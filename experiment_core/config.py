@@ -7,6 +7,7 @@ from typing import List, Optional
 
 import torch
 
+from .distributed import detect_distributed
 
 SUPPORTED_CONDITIONS = [
     "BBoxRectMaskBaseline",
@@ -54,6 +55,10 @@ class ExperimentConfig:
     sam2_cfg: str
     output_dir: Path
     device: torch.device
+    distributed: bool
+    rank: int
+    local_rank: int
+    world_size: int
     smoke_test: bool
     experiment_phase: str
     supervision_protocol: str
@@ -244,7 +249,11 @@ def load_config() -> ExperimentConfig:
             "Unsupported SUPERVISION_PROTOCOL. Expected one of "
             f"{sorted(SUPPORTED_SUPERVISION_PROTOCOLS)}, got {supervision_protocol!r}."
         )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    distributed_cfg = detect_distributed()
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{distributed_cfg.local_rank}" if distributed_cfg.enabled else "cuda")
+    else:
+        device = torch.device("cpu")
 
     seeds = _parse_int_csv_env("EXPERIMENT_SEEDS") or ([42] if smoke_test else [42, 123, 456])
     budgets = _parse_float_csv_env("SUPERVISION_BUDGETS") or ([0.1] if smoke_test else [0.1, 0.2, 0.5])
@@ -261,6 +270,10 @@ def load_config() -> ExperimentConfig:
         sam2_cfg=os.environ.get("SAM2_CFG", "configs/sam2.1/sam2.1_hiera_b+.yaml"),
         output_dir=Path(os.environ.get("OUTPUT_DIR", str(root / "benchmark_runs" / "outputs"))),
         device=device,
+        distributed=distributed_cfg.enabled,
+        rank=distributed_cfg.rank,
+        local_rank=distributed_cfg.local_rank,
+        world_size=distributed_cfg.world_size,
         smoke_test=smoke_test,
         experiment_phase=experiment_phase,
         supervision_protocol=supervision_protocol,

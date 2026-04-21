@@ -112,6 +112,8 @@ def build_summary(
             "checkpoint_selection": "best validation mIoU checkpoint is loaded before test evaluation",
             "split_strategy": "deterministic device_source split",
             "supervision_protocol": config.supervision_protocol,
+            "distributed": config.distributed,
+            "world_size": config.world_size,
         },
         "runtime_strategy": compute_budget.get("runtime_strategy", {}),
         "primary_dataset": config.dataset_name,

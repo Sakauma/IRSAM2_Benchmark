@@ -17,6 +17,7 @@ prepare_common_env() {
   require_env "SAM2_REPO"
 
   export PYTHON_BIN="${PYTHON_BIN:-python}"
+  export TORCHRUN_BIN="${TORCHRUN_BIN:-torchrun}"
   export OUTPUT_ROOT="${OUTPUT_ROOT:-${EXPERIMENT_DIR}/benchmark_runs}"
   export EXPERIMENT_SEEDS="${EXPERIMENT_SEEDS:-42,123,456}"
   export SUPERVISION_BUDGETS="${SUPERVISION_BUDGETS:-0.1,0.2,0.5}"
@@ -29,10 +30,16 @@ prepare_common_env() {
   export NUM_WORKERS="${NUM_WORKERS:-0}"
   export SUPERVISION_PROTOCOL="${SUPERVISION_PROTOCOL:-box_only}"
   export EXPERIMENT_PHASE="${EXPERIMENT_PHASE:-benchmark_v1}"
+  export NPROC_PER_NODE="${NPROC_PER_NODE:-1}"
+  export MASTER_PORT="${MASTER_PORT:-29500}"
 
   mkdir -p "${OUTPUT_ROOT}"
 }
 
 run_experiment_main() {
-  "${PYTHON_BIN}" "${EXPERIMENT_DIR}/main.py"
+  if [[ "${NPROC_PER_NODE}" -gt 1 ]]; then
+    "${TORCHRUN_BIN}" --standalone --nnodes 1 --nproc_per_node "${NPROC_PER_NODE}" --master_port "${MASTER_PORT}" "${EXPERIMENT_DIR}/main.py"
+  else
+    "${PYTHON_BIN}" "${EXPERIMENT_DIR}/main.py"
+  fi
 }

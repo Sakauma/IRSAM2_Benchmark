@@ -33,6 +33,7 @@ NUM_WORKERS=0
 ```
 
 `RBGT-Tiny` defaults to the IR-only `01` branch. On large multi-object datasets prefer `MAX_IMAGES` over `MAX_SAMPLES`.
+For single-node multi-GPU runs, set `NPROC_PER_NODE` to the number of GPUs, for example `8`.
 
 ## 3. Start Commands
 MultiModal:
@@ -62,6 +63,28 @@ export OUTPUT_DIR=/path/to/outputs/rbgt_tiny_benchmark_v1
 export MAX_IMAGES=512
 
 bash scripts/run_full_benchmark.sh
+```
+
+Single-node 8-GPU example:
+
+```bash
+cd /path/to/ir_sam2_bench
+
+export DATASET_ROOT=/path/to/datasets
+export DATASET_NAME=MultiModal
+export SAM2_REPO=/path/to/sam2
+export PYTHON_BIN=/path/to/your_env/bin/python
+export OUTPUT_DIR=/path/to/outputs/multimodal_8gpu_v1
+export NPROC_PER_NODE=8
+
+bash scripts/run_full_benchmark.sh
+```
+
+Equivalent helper scripts:
+
+```bash
+bash scripts/run_multimodal_8gpu.sh
+bash scripts/run_rbgt_8gpu.sh
 ```
 
 ## 4. Background Run Templates
@@ -103,6 +126,10 @@ export MAX_IMAGES=512
 nohup bash scripts/run_full_benchmark.sh > run.log 2>&1 &
 echo $!
 ```
+
+Multi-GPU note:
+- `NPROC_PER_NODE>1` automatically switches the launcher to `torchrun`.
+- Current DDP support is designed for single-node multi-GPU execution.
 
 ## 5. Recommended Run Profiles
 Choose one of these before the first formal run.
@@ -370,3 +397,11 @@ bash scripts/run_rbgt_server_first.sh
 After this first formal run finishes:
 - If the pipeline is stable and the ranking is sensible, then move to `Heavy`.
 - If the pipeline is unstable, keep the same profile and debug one variable at a time.
+
+If the server is `8x4090`, the next step after a stable first run is:
+
+```bash
+export NPROC_PER_NODE=8
+```
+
+and then rerun the same profile before increasing `EXPERIMENT_SEEDS`, `SUPERVISION_BUDGETS`, or `TRAIN_EPOCHS`.

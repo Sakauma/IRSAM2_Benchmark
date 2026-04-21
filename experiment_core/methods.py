@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel
 
 from .config import ExperimentConfig
 from .data import Sample, build_box_prior, clamp_box, load_ir_image
@@ -74,6 +75,10 @@ def _binary_iou(mask_a: np.ndarray, mask_b: np.ndarray) -> float:
     return intersection / union
 
 
+def _unwrap_module(module):
+    return module.module if hasattr(module, "module") else module
+
+
 class SAM2Teacher:
     def __init__(self, config: ExperimentConfig):
         self.config = config
@@ -134,6 +139,9 @@ class BaseMethod:
     def set_eval(self) -> None:
         return None
 
+    def configure_distributed(self, config: ExperimentConfig) -> None:
+        return None
+
 
 class ZeroShotSAM2BoxPromptIR(BaseMethod):
     def __init__(self, teacher: SAM2Teacher):
@@ -162,6 +170,18 @@ class TrainableMethod(BaseMethod):
     def build_optimizer(self, config: ExperimentConfig):
         return torch.optim.AdamW(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
 
+    def _wrap_module(self, module: torch.nn.Module) -> torch.nn.Module:
+        if not self.config.distributed:
+            return module
+        if isinstance(module, DistributedDataParallel):
+            return module
+        return DistributedDataParallel(
+            module,
+            device_ids=[self.config.local_rank] if self.config.device.type == "cuda" else None,
+            output_device=self.config.local_rank if self.config.device.type == "cuda" else None,
+            find_unused_parameters=False,
+        )
+
 
 class CleanBoxPEFTSAM2Adapter(TrainableMethod):
     learning_rate: float
@@ -180,16 +200,19 @@ class CleanBoxPEFTSAM2Adapter(TrainableMethod):
         return [p for p in self.adapter.parameters() if p.requires_grad]
 
     def state_dict(self):
-        return self.adapter.state_dict()
+        return _unwrap_module(self.adapter).state_dict()
 
     def load_state_dict(self, state) -> None:
-        self.adapter.load_state_dict(state)
+        _unwrap_module(self.adapter).load_state_dict(state)
 
     def set_train(self) -> None:
         self.adapter.train()
 
     def set_eval(self) -> None:
         self.adapter.eval()
+
+    def configure_distributed(self, config: ExperimentConfig) -> None:
+        self.adapter = self._wrap_module(_unwrap_module(self.adapter))
 
     def sample_prompt_box(self, bbox: Sequence[float], image_shape, rng: random.Random):
         return clamp_box(bbox, image_shape[1], image_shape[0])
@@ -351,16 +374,19 @@ class DirectSupervisedIRSegFormerB0(TrainableMethod):
         return [p for p in self.model.parameters() if p.requires_grad]
 
     def state_dict(self):
-        return self.model.state_dict()
+        return _unwrap_module(self.model).state_dict()
 
     def load_state_dict(self, state) -> None:
-        self.model.load_state_dict(state)
+        _unwrap_module(self.model).load_state_dict(state)
 
     def set_train(self) -> None:
         self.model.train()
 
     def set_eval(self) -> None:
         self.model.eval()
+
+    def configure_distributed(self, config: ExperimentConfig) -> None:
+        self.model = self._wrap_module(_unwrap_module(self.model))
 
     def training_step(self, batch: Dict[str, torch.Tensor], optimizer, config: ExperimentConfig) -> float:
         images = batch["images"].to(config.device)
@@ -406,16 +432,19 @@ class DirectSupervisedIRPIDNetS(TrainableMethod):
         return [p for p in self.model.parameters() if p.requires_grad]
 
     def state_dict(self):
-        return self.model.state_dict()
+        return _unwrap_module(self.model).state_dict()
 
     def load_state_dict(self, state) -> None:
-        self.model.load_state_dict(state)
+        _unwrap_module(self.model).load_state_dict(state)
 
     def set_train(self) -> None:
         self.model.train()
 
     def set_eval(self) -> None:
         self.model.eval()
+
+    def configure_distributed(self, config: ExperimentConfig) -> None:
+        self.model = self._wrap_module(_unwrap_module(self.model))
 
     def training_step(self, batch: Dict[str, torch.Tensor], optimizer, config: ExperimentConfig) -> float:
         images = batch["images"].to(config.device)

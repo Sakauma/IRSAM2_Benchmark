@@ -1503,6 +1503,149 @@ robustness 扩展指标：
   - `py_compile`
   - `SMOKE_TEST=1`
   - 再执行 full benchmark
+
+### GitHub 发布状态
+- 已新增服务器首跑脚本：
+  - `scripts/run_multimodal_server_first.sh`
+  - `scripts/run_rbgt_server_first.sh`
+- 已新增 `.gitignore`，屏蔽本地产物：
+  - `benchmark_runs/`
+  - `visualizations/`
+  - `__pycache__/`
+- `ir_sam2_bench` 已初始化为独立 git 仓库。
+- 已通过 SSH 推送到：
+  - `git@github.com:Sakauma/IRSAM2_Benchmark.git`
+- 首次提交：
+  - `9a78ab6 feat: add ir sam2 benchmark platform`
+
+## 2026-04-21 MultiModal Laptop Benchmark
+
+### 运行说明
+- 已在笔记本上使用：
+  - WSL `ubuntu2004`
+  - `sam_hq2`
+  - `MultiModal`
+  - `box_only`
+- 采用 `Light` 档配置：
+  - `seed=42`
+  - `budget=0.1`
+  - `TRAIN_EPOCHS=2`
+  - `PSEUDO_FINETUNE_EPOCHS=1`
+- 由于 monolithic full benchmark 在笔记本上两小时仍未自然结束，这轮结果按“分段完成”整理：
+  - 主输出目录：`benchmark_runs/multimodal_laptop_benchmark_v2`
+  - 剩余条件输出目录：`benchmark_runs/multimodal_laptop_remaining_v1`
+
+### 当前结果摘要
+- `BBoxRectMaskBaseline`
+  - `mIoU=0.3586`
+- `ZeroShotSAM2BoxPromptIR`
+  - `mIoU=0.6235`
+- `CleanBoxPEFTSAM2Adapter`
+  - `mIoU=0.6154`
+- `NoisyBoxPromptRobustSAM2Adapter`
+  - `mIoU=0.6149`
+- `CleanPromptOnlyWithinPromptRobustAdapter`
+  - `mIoU=0.6157`
+- `JitterOnlyPromptRobustSAM2Adapter`
+  - `mIoU=0.6163`
+- `QualityFilteredPseudoMaskSelfTrainingSAM2`
+  - `mIoU=0.5484`
+  - `pseudo_accept_count=1183`
+- `PseudoMaskSelfTrainingWithoutIRQualityFilter`
+  - `mIoU=0.5888`
+  - `pseudo_accept_count=1464`
+- `DirectSupervisedIRSegFormerB0`
+  - `mIoU=0.0094`
+- `DirectSupervisedIRPIDNetS`
+  - `mIoU=0.0019`
+
+### 当前结论
+- 在这轮 `MultiModal` 笔记本 benchmark 中：
+  - `ZeroShotSAM2BoxPromptIR` 明显高于 `BBoxRectMaskBaseline`
+  - 当前 adaptation 没有超过 zero-shot，且彼此接近
+  - 当前 pseudo 分支低于 zero-shot 和 adaptation
+  - direct-train baselines 仍然没有学起来
+
+## 2026-04-21 Server Option Evaluation
+
+### 候选配置
+- GPU: `RTX 5090 / 32 GB`
+- CPU: `25` vCPU, `Xeon Platinum 8470Q`
+- RAM: `90 GB`
+- Disk:
+  - system: `30 GB`
+  - data: `50 GB`
+- Driver: `580.105.08`
+- CUDA: `<= 13.0`
+- Price: `￥2.78/时`
+
+### 当前判断
+- 对 `ir_sam2_bench` 当前阶段：
+  - 这台机器是可用且偏充裕的
+- 对首次正式服务器运行：
+  - 可以直接采用
+- 对 benchmark 负载：
+  - `1x 5090 32GB` 明显强于笔记本环境
+  - 适合跑 `Standard`
+  - 大概率也能跑更重的配置，但不建议第一次就上 `Heavy`
+
+### 优点
+- `32 GB` 显存对当前单卡 benchmark 很友好
+- `25` vCPU 和 `90 GB` RAM 已经足够
+- 单卡结构也符合当前 benchmark 代码的实际使用方式
+
+### 风险点
+- `30 GB + 50 GB` 磁盘略紧
+- 如果同机安装完整环境、缓存 checkpoint、保留多轮输出和数据副本，80 GB 总盘很容易不够
+
+### 建议
+- 如果租这台机器：
+  - 直接跑 `Standard`
+  - 首次先不要跑 `Heavy`
+- 磁盘建议：
+  - 至少把数据盘扩到 `100-200 GB`
+
+## 2026-04-21 Multi-GPU Benchmark Refactor
+
+### 目标
+- 将 `ir_sam2_bench` 从单卡研究原型改为支持单机多卡运行。
+- 目标服务器场景：
+  - `8x4090`
+
+### 已完成改造
+- 新增分布式基础设施：
+  - `experiment_core/distributed.py`
+- `config.py` 已支持读取：
+  - `WORLD_SIZE`
+  - `RANK`
+  - `LOCAL_RANK`
+- `runner.py` 已支持：
+  - DDP 进程初始化与销毁
+  - rank-aware 日志
+  - `DistributedSampler`
+  - 验证/测试样本按 rank 分片
+  - 多卡评估结果汇总
+  - pseudo-sample 跨 rank 汇总
+- `methods.py` 已支持 trainable method 的 DDP 包装
+- `scripts/common.sh` 已支持：
+  - `NPROC_PER_NODE`
+  - 自动切换到 `torchrun`
+
+### 新增脚本
+- `scripts/run_multimodal_8gpu.sh`
+- `scripts/run_rbgt_8gpu.sh`
+
+### 当前验证状态
+- 已通过：
+  - `py_compile`
+  - shell 语法检查
+  - 单进程 smoke 回归
+- 尚未完成：
+  - 真正的多卡硬件实机验证
+
+### 当前结论
+- benchmark 平台已经具备单机多卡代码路径。
+- 后续上 `8x4090` 时，不需要再从单卡重写训练/评估主流程。
 ## 2026-04-21 Benchmark Server Migration Checklist
 
 ### 1. 代码与目录

@@ -49,11 +49,29 @@ SAM2_REPO=/path/to/sam2 \
 bash scripts/run_full_benchmark.sh
 ```
 
+单机多卡运行：
+
+```bash
+DATASET_ROOT=/path/to/dataset \
+SAM2_REPO=/path/to/sam2 \
+NPROC_PER_NODE=8 \
+bash scripts/run_full_benchmark.sh
+```
+
+当前多卡模式基于 `torchrun + DDP`，适用于单机多卡，例如 `8x4090`。
+
 服务器首次正式运行也可以直接用：
 
 ```bash
 bash scripts/run_multimodal_server_first.sh
 bash scripts/run_rbgt_server_first.sh
+```
+
+如果是单机 `8x4090`，也可以直接用：
+
+```bash
+bash scripts/run_multimodal_8gpu.sh
+bash scripts/run_rbgt_8gpu.sh
 ```
 
 绘制 `MultiModalCOCO` 的 tight / loose 标注可视化：
