@@ -1,0 +1,946 @@
+ablations:
+- expected_effect: 'Should reduce robustness under jittered/offset/truncated box evaluation
+    while possibly slightly improving GT-box-only fit.
+
+    '
+  how_it_differs: 'Replace sample_noisy_box() with identity GT box; set lambda_cons
+    = 0; do not create clean/noisy paired prompts.
+
+    '
+  name: CleanPromptOnlyWithinPromptRobustAdapter
+  parent_method: NoisyBoxPromptRobustSAM2Adapter
+  what_is_removed: Noisy-box augmentation and prompt-consistency regularization
+- expected_effect: 'If full robustness matters, performance should drop specifically
+    on truncated_box and offset_box test regimes.
+
+    '
+  how_it_differs: 'sample_noisy_box() draws only random jitter around GT box size/location;
+    no truncation or systematic offset.
+
+    '
+  name: JitterOnlyPromptRobustSAM2Adapter
+  parent_method: NoisyBoxPromptRobustSAM2Adapter
+  what_is_removed: Offset-box and truncated-box perturbation families
+- expected_effect: 'More noisy pseudo labels should increase variance and hurt fuzzy-boundary/small-target
+    performance.
+
+    '
+  how_it_differs: 'Accept all pseudo masks above raw teacher confidence threshold
+    only; disable box-mask consistency, prompt agreement, and compactness terms.
+
+    '
+  name: PseudoMaskSelfTrainingWithoutIRQualityFilter
+  parent_method: QualityFilteredPseudoMaskSelfTrainingSAM2
+  what_is_removed: IR-specific pseudo-mask scoring/filtering
+- expected_effect: 'Directly tests whether trajectory information, not just architecture
+    capacity, drives H2 gains.
+
+    '
+  how_it_differs: 'Keep the same student architecture but set lambda_traj = 0 for
+    all intermediate states and retain only final-step logit distillation.
+
+    '
+  name: FinalStateOnlyDistillationWithinTrajectoryStudent
+  parent_method: CorrectionTrajectoryDistilledIRStudent
+  what_is_removed: Intermediate correction-step losses
+- expected_effect: 'If correction dynamics are meaningful, destroying order should
+    hurt more than ordinary noise.
+
+    '
+  how_it_differs: 'Shuffle teacher step order before computing trajectory loss; keep
+    same number of steps and loss weight.
+
+    '
+  name: UnorderedTrajectoryDistillationStudent
+  parent_method: CorrectionTrajectoryDistilledIRStudent
+  what_is_removed: Temporal order of correction trajectory
+- expected_effect: 'Should reduce ability to match teacher correction process and
+    narrow gains over final-mask distillation.
+
+    '
+  how_it_differs: 'Remove auxiliary trajectory prediction branch and map only final
+    decoder feature to teacher targets.
+
+    '
+  name: TrajectoryStudentWithoutAuxiliaryTrajectoryHead
+  parent_method: CorrectionTrajectoryDistilledIRStudent
+  what_is_removed: Auxiliary head used to align intermediate teacher states
+- expected_effect: 'Should increase INT8 accuracy drop, especially in low-contrast/fuzzy-boundary
+    regimes.
+
+    '
+  how_it_differs: 'Apply PTQ only; if accuracy drops, do not run fake-quant finetuning
+    with quantization consistency loss.
+
+    '
+  name: INT8PostTrainingOnlyWithoutQuantizationAwareRecovery
+  parent_method: CorrectionTrajectoryDistilledINT8SegFormerB0
+  what_is_removed: QAT recovery stage
+- expected_effect: 'Should increase label noise, widen seed variance, and potentially
+    erase some gains, testing H4.
+
+    '
+  how_it_differs: 'Train/evaluate on all annotations without filtering or explicit
+    protocol flags; remove metadata stratification.
+
+    '
+  name: MixedProtocolTrainingWithoutProtocolConsistentSubset
+  parent_method: all_methods
+  what_is_removed: Protocol-consistent training/evaluation control
+- expected_effect: 'Can hide failure modes under distribution shift and weaken claims
+    of generality.
+
+    '
+  how_it_differs: 'Aggregate all sources together; no per-device reporting or calibration
+    subset balancing.
+
+    '
+  name: MetadataBlindEvaluationWithoutDeviceStratification
+  parent_method: all_methods
+  what_is_removed: Device/source-aware analysis
+baselines:
+- citation: Internal sanity baseline for weak-box segmentation experiments.
+  fairness_rationale: 'Tests the minimum geometry-only reference: directly convert the prompt box into a rectangular foreground mask.
+
+    '
+  implementation_spec:
+    algorithm_steps:
+    - Read the provided bounding box.
+    - Rasterize it into a binary rectangle mask.
+    - Return the rectangle mask directly with no learning.
+    class_name: BBoxRectMaskBaseline
+    differentiator: No image understanding and no training; pure rectangular box-to-mask baseline.
+    key_hyperparameters:
+      mask_value: 1.0
+      threshold: 0.5
+    key_methods:
+    - predict
+    loss_function: None (inference-only baseline).
+    required_data_pairing: none
+    required_distinct_helpers:
+    - build_box_prior
+    required_loss_terms: []
+    required_model_edits: []
+    required_runtime_hooks: []
+  name: BBoxRectMaskBaseline
+- citation: 'Ravi et al., SAM 2: Segment Anything in Images and Videos, 2024.'
+  fairness_rationale: 'Tests whether direct transfer of a strong modern foundation
+    segmenter with box prompts is already sufficient. This is the minimum strong baseline
+    for H1 and the natural reference point for IR domain gap.
+
+    '
+  implementation_spec:
+    algorithm_steps:
+    - Load local SAM2 checkpoint from /home/sakauma/code/sam2/checkpoints.
+    - Preprocess IR image to SAM2-compatible resolution and channel format.
+    - Convert provided bounding box into SAM2 box prompt tokens.
+    - Run frozen SAM2 inference with no parameter updates.
+    - Return binary mask, mask logits, and confidence score.
+    class_name: ZeroShotSAM2BoxPromptIR
+    differentiator: No IR finetuning; pure zero-shot SAM2 with box prompts.
+    key_hyperparameters:
+      checkpoint: sam2.1_hiera_base_plus.pt
+      input_size: 512
+      mask_threshold: 0.5
+    key_methods:
+    - __init__
+    - load_checkpoint
+    - prepare_prompt
+    - forward
+    - predict
+    loss_function: None (inference-only baseline).
+    required_data_pairing: none
+    required_distinct_helpers:
+    - prepare_prompt
+    required_loss_terms: []
+    required_model_edits: []
+    required_runtime_hooks: []
+  name: ZeroShotSAM2BoxPromptIR
+- citation: Ravi et al., 2024 (SAM2); Hu et al., LoRA, 2021; PEFT widely adopted 2023-2026.
+  fairness_rationale: 'Direct baseline for H1: same sparse box budget and same SAM2
+    backbone as the proposed method, but trained only on clean boxes without prompt-noise
+    robustness.
+
+    '
+  implementation_spec:
+    algorithm_steps:
+    - Load SAM2 checkpoint and freeze backbone except LoRA-injected attention/projection
+      modules.
+    - Attach LoRA adapters to selected image-encoder and prompt-conditioned decoder
+      linear layers.
+    - Use clean GT-derived boxes as prompts during training.
+    - Predict masks and compute supervised segmentation loss against available masks/pseudo-masks.
+    - Update only LoRA parameters with AdamW.
+    class_name: CleanBoxPEFTSAM2Adapter
+    differentiator: PEFT adaptation with clean boxes only; no prompt robustness augmentation.
+    key_hyperparameters:
+      batch_size: 4
+      checkpoint: sam2.1_hiera_base_plus.pt
+      grad_clip_norm: 1.0
+      lambda_bce: 1.0
+      lambda_dice: 1.0
+      lora_alpha: 32
+      lora_dropout: 0.05
+      lora_r: 16
+      lr: 0.0001
+      weight_decay: 0.0001
+    key_methods:
+    - __init__
+    - attach_lora
+    - prepare_prompt
+    - forward
+    - train_step
+    - predict
+    loss_function: L = lambda_bce * BCE(mask_logits, y) + lambda_dice * DiceLoss(mask_probs,
+      y)
+    required_data_pairing: independent_samples
+    required_distinct_helpers:
+    - attach_lora
+    - prepare_prompt
+    required_loss_terms:
+    - bce_loss
+    - dice_loss
+    required_model_edits:
+    - attach_lora
+    - selective_unfreezing
+    required_runtime_hooks: []
+  name: CleanBoxPEFTSAM2Adapter
+- citation: Xie et al., SegFormer, NeurIPS 2021; still strong lightweight baseline
+    in 2023-2026 deployment papers.
+  fairness_rationale: 'Strong direct-train lightweight baseline for H3. Tests the
+    contrarian claim that a dedicated small IR model may beat distilled SAM2-based
+    routes.
+
+    '
+  implementation_spec:
+    algorithm_steps:
+    - Initialize SegFormer-B0 encoder-decoder.
+    - Train directly on sparse-box-derived pseudo masks plus any available audited
+      masks.
+    - Apply standard image augmentations and class-balanced sampling.
+    - Optimize segmentation loss end-to-end.
+    - Export FP32 and INT8 versions for deployment evaluation.
+    class_name: DirectSupervisedIRSegFormerB0
+    differentiator: No teacher, no distillation; direct lightweight IR segmentation
+      training.
+    key_hyperparameters:
+      backbone: mit_b0
+      batch_size: 8
+      grad_clip_norm: 1.0
+      lambda_ce: 1.0
+      lambda_dice: 1.0
+      lr: 0.0006
+      weight_decay: 0.01
+    key_methods:
+    - __init__
+    - forward
+    - train_step
+    - predict
+    loss_function: L = lambda_ce * CE(seg_logits, y) + lambda_dice * DiceLoss(seg_probs,
+      y)
+    required_data_pairing: independent_samples
+    required_distinct_helpers: []
+    required_loss_terms:
+    - ce_loss
+    - dice_loss
+    required_model_edits: []
+    required_runtime_hooks: []
+  name: DirectSupervisedIRSegFormerB0
+- citation: PIDNet (2023, CVPR) and subsequent efficient real-time segmentation adoption.
+  fairness_rationale: 'Real-time segmentation baseline for H3 with different latency-accuracy
+    tradeoff than SegFormer-B0.
+
+    '
+  implementation_spec:
+    algorithm_steps:
+    - Initialize PIDNet-S real-time segmentation model.
+    - Train on the same supervision pool as student models.
+    - Use class-balanced BCE/Dice objective.
+    - Measure latency on representative edge hardware or CPU/GPU proxy.
+    class_name: DirectSupervisedIRPIDNetS
+    differentiator: Directly trained low-latency IR-specific small model without SAM2
+      teacher.
+    key_hyperparameters:
+      batch_size: 12
+      grad_clip_norm: 1.0
+      lambda_bce: 1.0
+      lambda_dice: 1.0
+      lr: 0.001
+      weight_decay: 0.0005
+    key_methods:
+    - __init__
+    - forward
+    - train_step
+    - predict
+    loss_function: L = lambda_bce * BCE(seg_logits, y) + lambda_dice * DiceLoss(seg_probs,
+      y)
+    required_data_pairing: independent_samples
+    required_distinct_helpers: []
+    required_loss_terms:
+    - bce_loss
+    - dice_loss
+    required_model_edits: []
+    required_runtime_hooks: []
+  name: DirectSupervisedIRPIDNetS
+- citation: 'Standard response-based knowledge distillation lineage; fair H2 comparison
+    because it keeps the same teacher and student but distills only the final mask
+    instead of the correction trajectory.
+
+    '
+  fairness_rationale: 'Direct comparator required by H2. If trajectory distillation
+    cannot beat this, the dynamic-teacher claim is weak.
+
+    '
+  implementation_spec:
+    algorithm_steps:
+    - Use IR-adapted SAM2 teacher to generate teacher mask logits for each prompted
+      image.
+    - Run student network on the same image and prompt encoding.
+    - Compute supervised loss to ground-truth/audited pseudo masks plus distillation
+      loss to final teacher mask logits.
+    - Update student parameters only.
+    class_name: FinalMaskDistilledIRStudent
+    differentiator: Distills only final teacher outputs, not intermediate correction
+      dynamics.
+    key_hyperparameters:
+      batch_size: 8
+      grad_clip_norm: 1.0
+      lambda_kd: 1.0
+      lambda_sup: 1.0
+      lr: 0.0006
+      student_backbone: segformer_b0
+      temperature: 2.0
+      weight_decay: 0.01
+    key_methods:
+    - __init__
+    - forward
+    - train_step
+    - predict
+    - compute_teacher_mask_targets
+    loss_function: "L = lambda_sup * (BCE(student_logits, y) + DiceLoss(student_probs,\
+      \ y))\n    + lambda_kd * KL(sigmoid(student_logits/T) || sigmoid(teacher_logits/T))\n"
+    required_data_pairing: teacher_student_same_image_prompt
+    required_distinct_helpers:
+    - compute_teacher_mask_targets
+    required_loss_terms:
+    - supervised_loss
+    - final_mask_kd_loss
+    required_model_edits: []
+    required_runtime_hooks: []
+  name: FinalMaskDistilledIRStudent
+compute_budget:
+  hardware_assumptions:
+    deployment_eval:
+    - desktop GPU and CPU proxy; optional ARM edge device if available
+    training:
+    - 1-2 GPUs with >=24GB VRAM preferred
+    - mixed precision enabled
+  minimum_total_runs_estimate: 'For full training runs, prioritize 11 core conditions
+    × 3 supervision budgets (10/20/50%) × 10 seeds = 330 training runs, with regime
+    evaluations performed from shared checkpoints. Ablations can be run on the 20%
+    supervision budget first and expanded only for statistically promising findings.
+
+    '
+  nominal_time_comment: 'This exceeds the nominal 2400s soft budget, but is scientifically
+    justified for multi-stage deep learning. Efficiency will come from cached preprocessing,
+    offline teacher-output reuse, reduced resolution (512x512), PEFT instead of full
+    SAM2 finetuning, and selective expansion of only the most critical ablations.
+
+    '
+  per_run_estimates:
+    SAM2_PEFT_train: 2-6 GPU-hours depending on supervision budget
+    ZeroShotSAM2BoxPromptIR_eval_only: 5-15 min per full test sweep
+    quantization_eval: 0.5-1 hour including calibration and latency tests
+    student_train: 1-3 GPU-hours
+  planned_conditions:
+    ablation_conditions:
+    - CleanPromptOnlyWithinPromptRobustAdapter
+    - JitterOnlyPromptRobustSAM2Adapter
+    - PseudoMaskSelfTrainingWithoutIRQualityFilter
+    - FinalStateOnlyDistillationWithinTrajectoryStudent
+    - UnorderedTrajectoryDistillationStudent
+    - TrajectoryStudentWithoutAuxiliaryTrajectoryHead
+    - INT8PostTrainingOnlyWithoutQuantizationAwareRecovery
+    - MixedProtocolTrainingWithoutProtocolConsistentSubset
+    core_conditions:
+    - BBoxRectMaskBaseline
+    - ZeroShotSAM2BoxPromptIR
+    - CleanBoxPEFTSAM2Adapter
+    - NoisyBoxPromptRobustSAM2Adapter
+    - QualityFilteredPseudoMaskSelfTrainingSAM2
+    - DirectSupervisedIRSegFormerB0
+    - DirectSupervisedIRPIDNetS
+    - FinalMaskDistilledIRStudent
+    - CorrectionTrajectoryDistilledIRStudent
+    - FinalMaskDistilledINT8SegFormerB0
+    - CorrectionTrajectoryDistilledINT8SegFormerB0
+    - CorrectionTrajectoryDistilledINT8PIDNetS
+  regime_count_estimate:
+    derivation: target_scale(3) × boundary_ambiguity(2) × prompt_quality(4); device_source
+      reported separately.
+    primary_reported_regimes: 24
+  runtime_strategy:
+    stage_1_data_audit_and_split: One-time preprocessing and JSON-to-mask parsing
+      cache.
+    stage_2_teacher_adaptation: Train SAM2 PEFT methods on sparse-box settings with
+      cached prompts.
+    stage_3_pseudo_label_generation: Offline teacher inference over unlabeled pool,
+      cached masks and quality scores.
+    stage_4_student_distillation: Train lightweight students using cached teacher
+      outputs/trajectories.
+    stage_5_quantization_and_latency: PTQ for all students, QAT recovery only for
+      top candidates.
+  seeds: 10
+  statistical_power_plan:
+    report:
+    - mean ± std
+    - 95% CI
+    - per-seed values
+    - effect sizes
+    seeds_per_condition: 10
+    tests:
+    - paired bootstrap for metric deltas
+    - Wilcoxon signed-rank for paired seed outcomes
+datasets:
+  primary_dataset:
+    factorial_reporting_requirement: 'Report results at minimum across target_scale
+      × boundary_ambiguity and separately by prompt_quality. Secondary tables stratify
+      by device_source.
+
+      '
+    image_dir: /home/sakauma/dataset/MultiModal/img
+    label_dir: /home/sakauma/dataset/MultiModal/label
+    label_parsing_plan: 'Parse JSON annotations into polygon/mask when available;
+      derive bounding boxes from masks/polygons; if some labels are detection-only,
+      mark them as box-only supervision pool. Build a unified sample table with: image_path,
+      label_path, device/source_id, frame_id if available, class_id, bbox, mask, annotation_protocol_flag.
+
+      '
+    modality: infrared / multimodal-local collection with image-label pairs
+    name: MultiModal-IR-Local
+    official_split_policy: 'Use deterministic source-aware splits to avoid near-duplicate
+      leakage: train/val/test split by sequence/device/source prefix where available,
+      never random image-only split.
+
+      '
+    preprocessing:
+      box_generation: tight bounding box from mask/polygon, plus noisy variants for
+        train/eval
+      image_resize:
+      - 512
+      - 512
+      intensity_normalization: per-image min-max + optional CLAHE branch for ablation
+      mask_rasterization: polygon-to-binary-mask with instance IDs preserved where
+        possible
+    regime_factors:
+      boundary_ambiguity:
+        definition: Derived by mask edge gradient / manual audit flag.
+        levels:
+        - sharp_boundary
+        - fuzzy_thermal_boundary
+      device_source:
+        definition: Approximated from filename patterns and metadata/source prefix.
+        levels:
+        - bmp_sensor_family
+        - jpg_sensor_family
+        - png_sensor_family
+      prompt_quality:
+        definition: Evaluation prompt regime for testing H1.
+        levels:
+        - gt_box
+        - jittered_box
+        - offset_box
+        - truncated_box
+      target_scale:
+        definition: 'By box area ratio to image: <1%, 1%-5%, >5%.'
+        levels:
+        - small
+        - medium
+        - large
+    root: /home/sakauma/dataset/MultiModal
+    supervision_partitions:
+      full_mask_validation_pool:
+        description: Validation and test retain full masks for evaluation.
+      protocol_consistent_subset:
+        description: 'Subset manually audited for annotation consistency under a unified
+          rule: prefer thermal-response region OR physical-object boundary, but keep
+          one protocol fixed within subset.
+
+          '
+      sparse_box_labeled_pool:
+        description: 10%, 20%, and 50% of training instances retain only bounding
+          boxes during training.
+      unlabeled_ir_pool:
+        description: Remaining training images used for pseudo-mask generation and
+          self-training.
+local_resources:
+  checkpoints_available:
+  - sam2.1_hiera_base_plus.pt
+  - sam2.1_hiera_large.pt
+  checkpoints_dir: /home/sakauma/code/sam2/checkpoints
+  datasets_dir: /home/sakauma/dataset/MultiModal
+  usage_requirement: 'Core experiments MUST use this local infrared dataset and its
+    filesystem labels; public datasets may be used only as optional supplementary
+    sanity checks, not as replacements for the core evaluation.
+
+    '
+metrics:
+  deployment_metrics:
+  - definition: Per-image end-to-end inference latency at batch=1.
+    name: LatencyMs
+  - definition: Frames per second at batch=1.
+    name: FPS
+  - definition: Peak runtime memory.
+    name: PeakMemoryMB
+  - definition: Serialized model size.
+    name: ModelSizeMB
+  - definition: mIoU(FP32) - mIoU(INT8).
+    name: INT8AccuracyDrop
+  distillation_discovery_endpoints:
+  - definition: mIoU(CorrectionTrajectoryDistilledIRStudent) - mIoU(FinalMaskDistilledIRStudent).
+    name: TrajectoryTransferGain
+  - definition: 'Fraction of evaluation regimes where a method is non-dominated in
+      accuracy-latency-memory space.
+
+      '
+    name: ParetoFrontMembershipRate
+  - definition: 'Fraction of student errors overlapping the teacher''s known failure
+      cases on audited subset.
+
+      '
+    name: TeacherErrorInheritanceRate
+  evaluation_protocol:
+    checkpoint_selection: best validation segmentation_error
+    seeds_per_condition: 10
+    test_reporting: 'Report overall results and per-regime results for target_scale
+      × boundary_ambiguity × prompt_quality; secondary reporting by device_source
+      and protocol_consistent_subset.
+
+      '
+  primary_metric:
+    definition: Primary paper-level optimization target; lower is better.
+    direction: minimize
+    name: segmentation_error
+    units: 1 - mIoU
+  pseudo_label_metrics:
+  - definition: Fraction of unlabeled samples retained after quality filtering.
+    name: PseudoMaskAcceptanceRate
+  - definition: Mask quality on accepted pseudo labels measured on audited subset.
+    name: PseudoMaskPrecisionAtAccepted
+  reproducibility_metrics:
+    reporting:
+    - mean ± std across seeds
+    - 95% bootstrap CI
+    - per-seed raw values
+    - paired bootstrap or Wilcoxon signed-rank test for method comparisons
+    - 'effect size: rank-biserial correlation or Cohen''s d'
+    success_rate:
+      definition: Fraction of seeds that complete training and evaluation without
+        NaN/crash/OOM.
+  segmentation_metrics:
+  - definition: Mean intersection-over-union on test masks.
+    name: mIoU
+  - definition: F1 overlap for binary/foreground segmentation.
+    name: Dice
+  - definition: Boundary F-score to capture fuzzy IR edge quality.
+    name: BoundaryF
+  - definition: mIoU(gt_box) - mIoU(noisy_box); lower gap is better.
+    name: BoxPromptRobustnessGap
+  - definition: IoU restricted to target_scale=small regime.
+    name: SmallTargetIoU
+  - definition: 1 - mIoU on protocol_consistent_subset.
+    name: ProtocolConsistentSubsetError
+objectives:
+  deliverables:
+  - IR dataset protocol built from local images and JSON labels with box and mask
+    views
+  - SAM2 IR adaptation benchmark using local checkpoints
+  - pseudo-label quality filtering protocol for sparse-box supervision
+  - distillation benchmark contrasting final-mask vs correction-trajectory distillation
+  - INT8 deployment benchmark on edge-oriented students
+  - statistical evidence for or against the full pipeline's publication value
+  hypothesis_alignment:
+    H1:
+      key_comparisons:
+      - NoisyBoxPromptRobustSAM2Adapter vs CleanBoxPEFTSAM2Adapter
+      - NoisyBoxPromptRobustSAM2Adapter vs ZeroShotSAM2BoxPromptIR
+      statement: 'In infrared segmentation, prompt robustness and representation mismatch
+        are bigger bottlenecks than supervision quantity alone; therefore noisy-box
+        PEFT adaptation should outperform clean-box-only PEFT under coarse-box evaluation
+        without materially harming GT-box performance.
+
+        '
+    H2:
+      key_comparisons:
+      - CorrectionTrajectoryDistilledIRStudent vs FinalMaskDistilledIRStudent
+      statement: 'Distilling the prompt-conditioned correction trajectory should outperform
+        distilling only the final mask if SAM2 has learned transferable interactive
+        correction behavior in IR.
+
+        '
+    H3:
+      key_comparisons:
+      - CorrectionTrajectoryDistilledINT8SegFormerB0 vs DirectSupervisedIRSegFormerB0
+      - FinalMaskDistilledINT8SegFormerB0 vs DirectSupervisedIRSegFormerB0
+      - CorrectionTrajectoryDistilledINT8PIDNetS vs DirectSupervisedIRPIDNetS
+      statement: 'The SAM2→student→INT8 route is justified only if the distilled and
+        quantized student lies on a better accuracy-latency-memory Pareto frontier
+        than directly trained lightweight IR models.
+
+        '
+    H4:
+      key_comparisons:
+      - all methods evaluated on protocol_consistent_subset vs mixed_protocol_fullset
+      - all methods evaluated per device/domain/target-size/boundary-ambiguity regime
+      statement: 'Annotation protocol stability and scene/device stratification may
+        limit IR segmentation performance as much as model adaptation; protocol-consistent
+        subsets and metadata-aware stratification must therefore be measured.
+
+        '
+  primary_goal: 'Evaluate whether a publishable computer-vision contribution can be
+    established by building an infrared-domain segmentation pipeline that uses sparse
+    box supervision, adapts SAM2 to IR with parameter-efficient finetuning, generates
+    and filters pseudo masks, distills to an edge-friendly student, and quantizes
+    to INT8 for deployment.
+
+    '
+proposed_methods:
+- citation: 'Proposed H1 method built on SAM2 (Ravi et al., 2024) with PEFT/LoRA adaptation
+    and prompt-noise training.
+
+    '
+  implementation_spec:
+    algorithm_steps:
+    - Load SAM2 checkpoint and freeze base weights except selected LoRA/adapter modules.
+    - Attach LoRA to prompt-conditioned attention/projection layers and selected decoder
+      layers.
+    - For each training sample, sample one noisy box variant from jitter/offset/truncated
+      distributions.
+    - Encode IR image and noisy box prompt; predict mask logits.
+    - Compute supervised segmentation loss on audited masks or high-quality pseudo
+      masks.
+    - Optionally add prompt-consistency regularization between clean-box and noisy-box
+      predictions.
+    - Update trainable PEFT parameters with AdamW and gradient clipping.
+    class_name: NoisyBoxPromptRobustSAM2Adapter
+    differentiator: PEFT adaptation explicitly trains prompt robustness using noisy
+      box perturbations.
+    key_hyperparameters:
+      batch_size: 4
+      checkpoint: sam2.1_hiera_base_plus.pt
+      grad_clip_norm: 1.0
+      jitter_scale: 0.1
+      lambda_bce: 1.0
+      lambda_cons: 0.2
+      lambda_dice: 1.0
+      lora_alpha: 32
+      lora_dropout: 0.05
+      lora_r: 16
+      lr: 0.0001
+      offset_scale: 0.15
+      truncation_prob: 0.3
+      weight_decay: 0.0001
+    key_methods:
+    - __init__
+    - attach_lora
+    - sample_noisy_box
+    - prepare_prompt
+    - forward
+    - train_step
+    - predict
+    loss_function: "L = lambda_bce * BCE(mask_logits, y)\n    + lambda_dice * DiceLoss(mask_probs,\
+      \ y)\n    + lambda_cons * ||sigmoid(f(x, box_clean)) - sigmoid(f(x, box_noisy))||_1\n"
+    required_data_pairing: same_image_with_clean_and_noisy_prompts
+    required_distinct_helpers:
+    - attach_lora
+    - sample_noisy_box
+    - prepare_prompt
+    required_loss_terms:
+    - bce_loss
+    - dice_loss
+    - prompt_consistency_loss
+    required_model_edits:
+    - attach_lora
+    - selective_unfreezing
+    required_runtime_hooks: []
+  name: NoisyBoxPromptRobustSAM2Adapter
+- citation: 'Proposed extension for sparse supervision: box-to-mask pseudo labeling
+    with IR-specific quality filtering.
+
+    '
+  implementation_spec:
+    algorithm_steps:
+    - Warm-start from NoisyBoxPromptRobustSAM2Adapter.
+    - Run teacher over unlabeled IR images with one or more prompt variants.
+    - Score pseudo masks using confidence, box-mask IoU consistency, contour compactness,
+      and prompt agreement.
+    - Retain only high-quality pseudo masks above threshold.
+    - Continue PEFT training on union of sparse labeled data and filtered pseudo-labeled
+      data.
+    class_name: QualityFilteredPseudoMaskSelfTrainingSAM2
+    differentiator: Adds IR-specific pseudo-mask quality estimation and self-training
+      over unlabeled images.
+    key_hyperparameters:
+      box_mask_iou_min: 0.5
+      compactness_weight: 0.2
+      grad_clip_norm: 1.0
+      lambda_pseudo: 0.5
+      lambda_sup: 1.0
+      lr: 8.0e-05
+      prompt_agreement_min: 0.75
+      pseudo_quality_threshold: 0.7
+    key_methods:
+    - __init__
+    - generate_pseudo_masks
+    - score_pseudo_mask_quality
+    - filter_pseudo_masks
+    - attach_lora
+    - train_step
+    - predict
+    loss_function: "L = lambda_sup * (BCE(mask_logits, y) + DiceLoss(mask_probs, y))\n\
+      \    + lambda_pseudo * w_q * (BCE(mask_logits, y_pseudo) + DiceLoss(mask_probs,\
+      \ y_pseudo))\n"
+    required_data_pairing: labeled_samples_plus_unlabeled_samples_with_teacher_generated_targets
+    required_distinct_helpers:
+    - generate_pseudo_masks
+    - score_pseudo_mask_quality
+    - filter_pseudo_masks
+    required_loss_terms:
+    - supervised_loss
+    - pseudo_supervised_loss
+    required_model_edits:
+    - attach_lora
+    required_runtime_hooks: []
+  name: QualityFilteredPseudoMaskSelfTrainingSAM2
+- citation: 'Proposed H2 method: distill prompt-conditioned correction trajectory
+    from IR-adapted SAM2 teacher to lightweight student.
+
+    '
+  implementation_spec:
+    algorithm_steps:
+    - 'Use IR-adapted SAM2 teacher to generate a multi-step correction trajectory
+      per image: initial box-prompt mask, teacher-refined mask under synthetic follow-up
+      prompts, and per-step logits.'
+    - Encode trajectory targets as ordered logits/features or delta masks.
+    - Run student on image plus initial prompt representation.
+    - Predict final segmentation and optional auxiliary trajectory states.
+    - Optimize supervised segmentation loss plus trajectory distillation loss over
+      intermediate steps.
+    - Optionally weight later correction steps more if they correlate better with
+      final quality.
+    class_name: CorrectionTrajectoryDistilledIRStudent
+    differentiator: Distills multi-step correction dynamics instead of only the final
+      mask.
+    key_hyperparameters:
+      batch_size: 8
+      grad_clip_norm: 1.0
+      lambda_logit: 0.5
+      lambda_sup: 1.0
+      lambda_traj: 0.5
+      lr: 0.0006
+      student_backbone: segformer_b0
+      trajectory_steps: 3
+      weight_decay: 0.01
+    key_methods:
+    - __init__
+    - simulate_correction_trajectory
+    - encode_trajectory_targets
+    - forward
+    - train_step
+    - predict
+    loss_function: "L = lambda_sup * (CE(student_final, y) + DiceLoss(student_final_probs,\
+      \ y))\n    + lambda_traj * sum_t w_t * ||h_t^student - h_t^teacher||_2^2\n \
+      \   + lambda_logit * sum_t w_t * KL(p_t^teacher || p_t^student)\n"
+    required_data_pairing: teacher_student_same_image_with_ordered_multi_step_prompt_corrections
+    required_distinct_helpers:
+    - simulate_correction_trajectory
+    - encode_trajectory_targets
+    required_loss_terms:
+    - supervised_loss
+    - trajectory_feature_loss
+    - trajectory_logit_loss
+    required_model_edits:
+    - auxiliary_trajectory_head
+    required_runtime_hooks:
+    - register_teacher_intermediate_logit_hook
+  name: CorrectionTrajectoryDistilledIRStudent
+- citation: Proposed deployment version of trajectory-distilled student.
+  implementation_spec:
+    algorithm_steps:
+    - Train CorrectionTrajectoryDistilledIRStudent with SegFormer-B0 backbone.
+    - Collect calibration batches stratified by device_source and target_scale.
+    - Apply post-training INT8 quantization or QAT if PTQ drop is excessive.
+    - Export quantized model and benchmark latency/memory.
+    class_name: CorrectionTrajectoryDistilledINT8SegFormerB0
+    differentiator: Trajectory-distilled student explicitly optimized for INT8 deployment.
+    key_hyperparameters:
+      activation_observer: moving_average_minmax
+      calibration_batches: 128
+      lambda_q: 0.2
+      quantization_mode: PTQ_then_QAT_if_needed
+      weight_observer: per_channel_symmetric
+    key_methods:
+    - __init__
+    - forward
+    - train_step
+    - predict
+    - prepare_quantization_calibration
+    - export_int8
+    loss_function: 'L_train = same as CorrectionTrajectoryDistilledIRStudent; L_qat
+      = L_train + lambda_q * QuantizationConsistencyLoss(fp32_logits, int8_fakequant_logits)
+
+      '
+    required_data_pairing: same as CorrectionTrajectoryDistilledIRStudent
+    required_distinct_helpers:
+    - prepare_quantization_calibration
+    - export_int8
+    required_loss_terms:
+    - supervised_loss
+    - trajectory_feature_loss
+    - trajectory_logit_loss
+    - quantization_consistency_loss
+    required_model_edits:
+    - insert_fake_quant_modules
+    required_runtime_hooks:
+    - quantization_prepare_hook
+  name: CorrectionTrajectoryDistilledINT8SegFormerB0
+- citation: Proposed deployment control for H3.
+  implementation_spec:
+    algorithm_steps:
+    - Train FinalMaskDistilledIRStudent with SegFormer-B0 backbone.
+    - Apply the same quantization calibration and export protocol as the trajectory-distilled
+      version.
+    - Benchmark deployment metrics for matched H3 comparison.
+    class_name: FinalMaskDistilledINT8SegFormerB0
+    differentiator: Final-mask-only distilled student with matched INT8 export.
+    key_hyperparameters:
+      calibration_batches: 128
+      lambda_kd: 1.0
+      lambda_q: 0.2
+      lambda_sup: 1.0
+      quantization_mode: PTQ_then_QAT_if_needed
+    key_methods:
+    - __init__
+    - forward
+    - train_step
+    - predict
+    - prepare_quantization_calibration
+    - export_int8
+    loss_function: "L_train = lambda_sup * (CE(student_logits, y) + DiceLoss(student_probs,\
+      \ y))\n          + lambda_kd * KL(p_teacher || p_student);\nL_qat = L_train\
+      \ + lambda_q * QuantizationConsistencyLoss(fp32_logits, int8_fakequant_logits)\n"
+    required_data_pairing: teacher_student_same_image_prompt
+    required_distinct_helpers:
+    - prepare_quantization_calibration
+    - export_int8
+    required_loss_terms:
+    - supervised_loss
+    - final_mask_kd_loss
+    - quantization_consistency_loss
+    required_model_edits:
+    - insert_fake_quant_modules
+    required_runtime_hooks:
+    - quantization_prepare_hook
+  name: FinalMaskDistilledINT8SegFormerB0
+- citation: Proposed low-latency deployment branch for H3.
+  implementation_spec:
+    algorithm_steps:
+    - Use the same trajectory targets as the SegFormer-B0 student.
+    - Train PIDNet-S student with auxiliary trajectory-alignment head.
+    - Quantize to INT8 with calibration on representative IR data.
+    - Measure accuracy-latency Pareto against direct PIDNet-S.
+    class_name: CorrectionTrajectoryDistilledINT8PIDNetS
+    differentiator: Real-time student with trajectory distillation and INT8 deployment
+      optimization.
+    key_hyperparameters:
+      batch_size: 12
+      grad_clip_norm: 1.0
+      lambda_q: 0.2
+      lambda_sup: 1.0
+      lambda_traj: 0.5
+      lr: 0.001
+      trajectory_steps: 3
+    key_methods:
+    - __init__
+    - simulate_correction_trajectory
+    - forward
+    - train_step
+    - predict
+    - prepare_quantization_calibration
+    - export_int8
+    loss_function: "L = lambda_sup * (BCE(student_logits, y) + DiceLoss(student_probs,\
+      \ y))\n    + lambda_traj * sum_t w_t * ||h_t^student - h_t^teacher||_2^2\n \
+      \   + lambda_q * QuantizationConsistencyLoss(fp32_logits, int8_fakequant_logits)\n"
+    required_data_pairing: teacher_student_same_image_with_ordered_multi_step_prompt_corrections
+    required_distinct_helpers:
+    - simulate_correction_trajectory
+    - prepare_quantization_calibration
+    - export_int8
+    required_loss_terms:
+    - supervised_loss
+    - trajectory_feature_loss
+    - quantization_consistency_loss
+    required_model_edits:
+    - auxiliary_trajectory_head
+    - insert_fake_quant_modules
+    required_runtime_hooks:
+    - register_teacher_intermediate_logit_hook
+    - quantization_prepare_hook
+  name: CorrectionTrajectoryDistilledINT8PIDNetS
+risks:
+  numerical_stability_risks:
+  - mitigation: 'AdamW with gradient clipping at 1.0, mixed-precision loss scaling,
+      early stop on NaN, skip invalid batches, log gradient norms and mask-logit ranges.
+
+      '
+    risk: NaN/divergence during PEFT or student distillation.
+  - mitigation: 'Temperature scaling, logit clipping, and gradual lambda_kd/lambda_traj
+      warmup over first 10% epochs.
+
+      '
+    risk: KL/logit distillation instability from overconfident teacher logits.
+  - mitigation: 'Start from PTQ; invoke short QAT recovery only if INT8AccuracyDrop
+      exceeds threshold; use representative calibration set.
+
+      '
+    risk: Quantization-aware training instability or severe fake-quant mismatch.
+  - mitigation: 'Prefer sam2.1_hiera_base_plus.pt for full experiment grid, reserve
+      large model for one confirmatory subset only, use gradient accumulation and
+      activation checkpointing.
+
+      '
+    risk: OOM from SAM2 large checkpoint.
+  - mitigation: 'Curriculum pseudo-labeling, confidence thresholding, capped pseudo-supervision
+      ratio, and early stopping on validation deterioration.
+
+      '
+    risk: Policy-collapse/reward-explosion style issue not applicable, but training
+      collapse from noisy pseudo labels is possible.
+  reproducibility_risks:
+  - mitigation: Split by source/sequence/device prefix rather than random image split.
+    risk: Data leakage via near-duplicate frames across train/test.
+  - mitigation: Warmup 50 runs, then average over 200 timed runs on fixed hardware
+      and fixed input size.
+    risk: Inconsistent latency measurement.
+  - mitigation: Use 10 seeds/condition, paired nonparametric tests, and report raw
+      seed values.
+    risk: Insufficient power.
+  scientific_risks:
+  - mitigation: 'Manually audit a protocol_consistent_subset, tag annotation protocol
+      where possible, and report H4 analyses explicitly.
+
+      '
+    risk: Local labels may mix thermal-response masks and physical-object contours,
+      confounding conclusions.
+  - mitigation: 'Treat H3 as falsifiable; compare against direct lightweight baselines
+      and be willing to reject the full chain.
+
+      '
+    risk: SAM2 may fail to transfer to IR even after PEFT, limiting downstream distillation
+      value.
+  - mitigation: 'Use audited pseudo-label precision, prompt-agreement filtering, and
+      per-regime reporting.
+
+      '
+    risk: Pseudo labels may amplify teacher bias on fuzzy boundaries and tiny objects.
+topic: '[cv] 建立一种使用相对较少的boundingbox标注的红外数据集，将SAM2迁移到红外领域并完成蒸馏量化，使其满足端侧可部署；这种管线做成端到端的微调框架，是否有发表价值？'
