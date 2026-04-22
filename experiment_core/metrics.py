@@ -1,3 +1,8 @@
+"""评估指标函数。
+
+这些函数既服务于测试集聚合结果，也服务于 eval report 的逐样本统计。
+"""
+
 from __future__ import annotations
 
 import time
@@ -9,6 +14,7 @@ import torch
 
 
 def compute_miou(pred: np.ndarray, target: np.ndarray) -> float:
+    """二值分割的 mIoU。"""
     pred_bin = pred > 0.5
     target_bin = target > 0.5
     inter = np.logical_and(pred_bin, target_bin).sum()
@@ -17,6 +23,7 @@ def compute_miou(pred: np.ndarray, target: np.ndarray) -> float:
 
 
 def compute_dice(pred: np.ndarray, target: np.ndarray) -> float:
+    """二值分割的 Dice。"""
     pred_bin = pred > 0.5
     target_bin = target > 0.5
     inter = np.logical_and(pred_bin, target_bin).sum()
@@ -25,6 +32,7 @@ def compute_dice(pred: np.ndarray, target: np.ndarray) -> float:
 
 
 def compute_boundary_f1(pred: np.ndarray, target: np.ndarray) -> float:
+    """通过形态学梯度近似边界，再计算边界 F1。"""
     pred_u8 = (pred > 0.5).astype(np.uint8)
     target_u8 = (target > 0.5).astype(np.uint8)
     kernel = np.ones((3, 3), np.uint8)
@@ -39,6 +47,10 @@ def compute_boundary_f1(pred: np.ndarray, target: np.ndarray) -> float:
 
 
 def compute_latency_ms(callable_fn: Callable[[], np.ndarray]):
+    """测量一次推理调用延迟。
+
+    在 CUDA 场景下显式同步，避免异步执行导致计时失真。
+    """
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     start = time.perf_counter()
@@ -49,10 +61,12 @@ def compute_latency_ms(callable_fn: Callable[[], np.ndarray]):
 
 
 def primary_metric_from_metrics(metrics: Dict[str, float]) -> float:
+    """主排序指标：优先看精度，再给延迟一个较小惩罚。"""
     return float((1.0 - metrics["mIoU"]) + 0.001 * metrics["LatencyMs"])
 
 
 def safe_mean(values: Iterable[float]) -> float:
+    """空列表安全求均值。"""
     values_list = list(values)
     if not values_list:
         return 0.0
@@ -60,6 +74,7 @@ def safe_mean(values: Iterable[float]) -> float:
 
 
 def infer_target_scale(box, image_height: int, image_width: int) -> str:
+    """根据 box 面积比例把目标粗分成 small / medium / large。"""
     x1, y1, x2, y2 = [float(v) for v in box]
     image_area = max(1.0, float(image_height * image_width))
     box_area_ratio = max(0.0, (x2 - x1) * (y2 - y1)) / image_area
@@ -71,6 +86,7 @@ def infer_target_scale(box, image_height: int, image_width: int) -> str:
 
 
 def summarize_metric_rows(rows: List[Dict[str, float]]) -> Dict[str, float]:
+    """把逐样本指标聚合成 summary / results.json 中的均值结果。"""
     return {
         "sample_count": int(len(rows)),
         "mIoU": safe_mean(row["mIoU"] for row in rows),

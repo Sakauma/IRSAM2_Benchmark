@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 只运行 pseudo-label 路线，便于单独评估伪标签闭环是否成立。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

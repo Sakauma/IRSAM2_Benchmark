@@ -1,3 +1,13 @@
+"""运行期配置解析。
+
+这里集中管理 benchmark 的全部运行参数，包括：
+1. 数据集与 SAM2 路径解析
+2. 单卡 / 多卡运行信息探测
+3. benchmark 阶段、监督协议、训练超参数默认值
+
+后续如果迁移到新服务器，优先修改环境变量，而不是改这里的默认逻辑。
+"""
+
 from __future__ import annotations
 
 import os
@@ -10,6 +20,7 @@ import torch
 from .distributed import detect_distributed
 
 SUPPORTED_CONDITIONS = [
+    # 主 benchmark 当前已经实现并允许直接运行的方法条件。
     "BBoxRectMaskBaseline",
     "ZeroShotSAM2BoxPromptIR",
     "CleanBoxPEFTSAM2Adapter",
@@ -23,11 +34,14 @@ SUPPORTED_CONDITIONS = [
 ]
 
 SUPPORTED_SUPERVISION_PROTOCOLS = {
+    # 完整 mask 监督，用于上界或对照实验。
     "mask_supervised",
+    # 仅保留 box 作为训练监督，mask 只用于评估或伪标签。
     "box_only",
 }
 
 DEFERRED_CONDITIONS = [
+    # 这些条件在计划里存在，但当前 benchmark v1 暂不正式启用。
     "FinalMaskDistilledIRStudent",
     "CorrectionTrajectoryDistilledIRStudent",
     "FinalMaskDistilledINT8SegFormerB0",
@@ -44,6 +58,12 @@ DEFERRED_CONDITIONS = [
 
 @dataclass
 class ExperimentConfig:
+    """统一配置对象。
+
+    这个 dataclass 会贯穿整个 benchmark 生命周期：
+    数据加载、方法构建、训练、评估、报告生成都只从这里取配置。
+    """
+
     root: Path
     dataset_root: Path
     dataset_name: str
@@ -94,6 +114,7 @@ class ExperimentConfig:
 
 
 def _first_existing(paths: List[Path]) -> Optional[Path]:
+    """按顺序返回第一个存在的路径，用于实现多候选路径回退。"""
     for path in paths:
         if path.exists():
             return path
@@ -101,6 +122,7 @@ def _first_existing(paths: List[Path]) -> Optional[Path]:
 
 
 def _parse_csv_env(name: str) -> List[str]:
+    """解析逗号分隔环境变量，例如 `42,123,456`。"""
     value = os.environ.get(name, "").strip()
     if not value:
         return []
@@ -116,6 +138,7 @@ def _parse_float_csv_env(name: str) -> List[float]:
 
 
 def _int_env(name: str, default: int) -> int:
+    """读取整型环境变量，不存在时回退到默认值。"""
     value = os.environ.get(name)
     if value is None or value.strip() == "":
         return default
@@ -123,6 +146,7 @@ def _int_env(name: str, default: int) -> int:
 
 
 def _float_env(name: str, default: float) -> float:
+    """读取浮点型环境变量，不存在时回退到默认值。"""
     value = os.environ.get(name)
     if value is None or value.strip() == "":
         return default
@@ -130,6 +154,10 @@ def _float_env(name: str, default: float) -> float:
 
 
 def _resolve_active_conditions(phase: str) -> List[str]:
+    """根据实验阶段选择默认要跑的方法条件。
+
+    如果用户显式设置了 `EXPERIMENT_CONDITIONS`，则以用户指定为准。
+    """
     explicit = _parse_csv_env("EXPERIMENT_CONDITIONS")
     if explicit:
         return explicit
@@ -156,6 +184,13 @@ def _resolve_active_conditions(phase: str) -> List[str]:
 
 
 def _resolve_dataset_root(root: Path) -> Path:
+    """解析数据集根目录。
+
+    优先级：
+    1. 显式环境变量
+    2. 仓库附近常见目录
+    3. 容器或当前工作目录下的 `dataset/`
+    """
     explicit = os.environ.get("DATASET_ROOT") or os.environ.get("DATA_ROOT")
     if explicit:
         return Path(explicit)
@@ -176,6 +211,7 @@ def _resolve_dataset_root(root: Path) -> Path:
 
 
 def _resolve_sam2_repo(root: Path) -> Path:
+    """解析本地 SAM2 仓库路径。"""
     explicit = os.environ.get("SAM2_REPO")
     if explicit:
         return Path(explicit)
@@ -195,6 +231,7 @@ def _resolve_sam2_repo(root: Path) -> Path:
 
 
 def _resolve_sam2_ckpt(sam2_repo: Path) -> Path:
+    """解析 SAM2 checkpoint 路径。"""
     explicit = os.environ.get("SAM2_CKPT")
     if explicit:
         return Path(explicit)
@@ -212,6 +249,10 @@ def _resolve_sam2_ckpt(sam2_repo: Path) -> Path:
 
 
 def _validate_config_paths(config: ExperimentConfig) -> None:
+    """在真正启动实验前做显式路径校验。
+
+    这里的目的不是“自动修复”，而是尽早给出可定位的报错。
+    """
     if not config.data_root.exists():
         raise RuntimeError(
             f"Dataset path does not exist: {config.data_root}. "
@@ -235,7 +276,9 @@ def _validate_config_paths(config: ExperimentConfig) -> None:
 
 
 def load_config() -> ExperimentConfig:
+    """从环境变量和默认规则构造完整配置对象。"""
     root = Path(__file__).resolve().parents[1]
+    # 先把所有路径依赖解析干净，后续模块不再关心路径发现逻辑。
     dataset_root = _resolve_dataset_root(root)
     dataset_name = os.environ.get("DATASET_NAME", "MultiModalCOCOClean")
     data_root = dataset_root / dataset_name
@@ -250,6 +293,7 @@ def load_config() -> ExperimentConfig:
             f"{sorted(SUPPORTED_SUPERVISION_PROTOCOLS)}, got {supervision_protocol!r}."
         )
     distributed_cfg = detect_distributed()
+    # 多卡模式下，每个进程绑定自己的 local_rank；单卡时统一用默认 cuda。
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{distributed_cfg.local_rank}" if distributed_cfg.enabled else "cuda")
     else:
@@ -268,6 +312,7 @@ def load_config() -> ExperimentConfig:
         sam2_repo=sam2_repo,
         sam2_ckpt=sam2_ckpt,
         sam2_cfg=os.environ.get("SAM2_CFG", "configs/sam2.1/sam2.1_hiera_b+.yaml"),
+        # 输出目录允许完全由外部覆盖，便于在服务器上把结果写到大容量盘。
         output_dir=Path(os.environ.get("OUTPUT_DIR", str(root / "benchmark_runs" / "outputs"))),
         device=device,
         distributed=distributed_cfg.enabled,
@@ -304,6 +349,7 @@ def load_config() -> ExperimentConfig:
         lr_pidnet=_float_env("LR_PIDNET", 1e-3),
         weight_decay=1e-4,
         max_grad_norm=1.0,
+        # active/deferred 会直接出现在 summary 中，便于追踪这次到底跑了什么。
         active_conditions=_resolve_active_conditions(experiment_phase),
         deferred_conditions=list(DEFERRED_CONDITIONS),
     )

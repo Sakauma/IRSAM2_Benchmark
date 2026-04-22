@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# MultiModal 单机 8 卡推荐启动脚本。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,7 +17,7 @@ export MAX_SAMPLES="${MAX_SAMPLES:-0}"
 export MAX_IMAGES="${MAX_IMAGES:-0}"
 export EVAL_LIMIT="${EVAL_LIMIT:-0}"
 export NUM_WORKERS="${NUM_WORKERS:-4}"
-export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"  # 默认打满 8 卡；也允许外部降成 4/2 卡调试。
 
 echo "[run_multimodal_8gpu] dataset=${DATASET_NAME} nproc=${NPROC_PER_NODE} output=${OUTPUT_DIR}"
 run_experiment_main

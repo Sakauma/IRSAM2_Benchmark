@@ -1,3 +1,9 @@
+"""实验调度器。
+
+这是 benchmark 平台的主控制流，负责把配置、数据集、方法、训练、评估和报告串起来。
+如果只读一个文件想理解整个平台怎么运行，优先读这里。
+"""
+
 from __future__ import annotations
 
 import copy
@@ -32,6 +38,7 @@ from .reporting import build_summary, write_eval_report
 
 
 def set_seed(seed: int) -> None:
+    """统一设置 Python / NumPy / PyTorch 随机种子。"""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -40,22 +47,29 @@ def set_seed(seed: int) -> None:
 
 
 def is_main_process(config: ExperimentConfig) -> bool:
+    """只有 rank0 负责打印日志和写全局产物。"""
     return config.rank == 0
 
 
 def log_main(message: str, config: ExperimentConfig) -> None:
+    """主进程日志打印，避免多卡重复刷屏。"""
     if is_main_process(config):
         print(message)
         sys.stdout.flush()
 
 
 def shard_samples_for_rank(samples: List[Sample], config: ExperimentConfig) -> List[Sample]:
+    """把样本列表按 rank 做静态切片。
+
+    评估和伪标签生成阶段都用这个逻辑来分担工作。
+    """
     if not config.distributed:
         return samples
     return [sample for idx, sample in enumerate(samples) if idx % config.world_size == config.rank]
 
 
 def gather_metric_rows(metric_rows: List[Dict[str, object]], config: ExperimentConfig) -> List[Dict[str, object]]:
+    """收集所有 rank 的逐样本评估行，并按 sample_id 排序。"""
     if not config.distributed:
         return metric_rows
     gathered = all_gather_object(metric_rows)
@@ -65,6 +79,7 @@ def gather_metric_rows(metric_rows: List[Dict[str, object]], config: ExperimentC
 
 
 def gather_pseudo_samples(pseudo_samples: List[Sample], config: ExperimentConfig) -> List[Sample]:
+    """收集所有 rank 生成的伪标签样本。"""
     if not config.distributed:
         return pseudo_samples
     gathered = all_gather_object(pseudo_samples)
@@ -81,6 +96,7 @@ def evaluate_method(
     prefix: str,
     save_artifacts: bool,
 ) -> Tuple[Dict[str, float], Optional[str]]:
+    """执行一次方法评估，并在多卡下汇总结果。"""
     local_samples = shard_samples_for_rank(samples, config)
     evaluation = evaluate_samples(
         method,
@@ -97,6 +113,7 @@ def evaluate_method(
         aggregate_metrics = summarize_metric_rows(merged_rows)
         metrics = dict(aggregate_metrics)
         if save_artifacts:
+            # 只有主进程写 eval report，其他 rank 只参与计算不落盘。
             report_path = write_eval_report(
                 output_dir=output_dir,
                 prefix=prefix,
@@ -117,7 +134,9 @@ def train_method(
     config: ExperimentConfig,
     num_epochs: int,
 ) -> Dict[str, float]:
+    """训练一个方法，并根据验证集选择最佳 checkpoint。"""
     if not method.is_trainable:
+        # 非训练方法直接在验证集上评估一次，用于统一后续流程。
         val_metrics, _ = evaluate_method(
             method,
             val_samples,
@@ -130,6 +149,7 @@ def train_method(
 
     dataset = InfraredDataset(
         train_samples,
+        # 只有 mask_supervised 协议才强制训练集必须提供 mask。
         require_mask=config.supervision_protocol == "mask_supervised",
         allow_gt_masks=config.supervision_protocol == "mask_supervised",
     )
@@ -152,10 +172,12 @@ def train_method(
     for epoch in range(num_epochs):
         method.set_train()
         if sampler is not None:
+            # DDP 下每轮都要刷新 sampler epoch，保证 shuffle 一致。
             sampler.set_epoch(epoch)
         for batch in loader:
             method.training_step(batch, optimizer, config)
             if config.smoke_test:
+                # smoke 模式只验证链路能走通，不追求完整收敛。
                 break
         method.set_eval()
         val_metrics, _ = evaluate_method(
@@ -167,6 +189,7 @@ def train_method(
             save_artifacts=False,
         )
         if val_metrics["mIoU"] > best_val_miou:
+            # 统一按验证集 mIoU 选最佳权重。
             best_val_miou = val_metrics["mIoU"]
             best_epoch = epoch + 1
             best_state = copy.deepcopy(method.state_dict())
@@ -174,6 +197,7 @@ def train_method(
             break
         barrier()
 
+    # 训练结束后显式回载最佳权重，确保 test 阶段不是吃最后一个 epoch。
     method.load_state_dict(best_state)
     method.set_eval()
     return {"best_val_mIoU": float(best_val_miou), "best_epoch": int(best_epoch)}
@@ -189,15 +213,18 @@ def run_condition(
     config: ExperimentConfig,
     artifact_prefix: str,
 ) -> Tuple[Dict[str, float], Dict[str, float]]:
+    """运行单个实验条件。"""
     train_info = {"best_val_mIoU": 0.0, "best_epoch": 0, "pseudo_accept_count": 0}
 
     if isinstance(method, QualityFilteredPseudoMaskSelfTrainingSAM2):
+        # 伪标签路线分两段：先 warmup teacher adapter，再生成伪标签并微调。
         warmup_info = train_method(method, train_samples, val_samples, config, config.train_epochs)
         local_unlabeled_samples = shard_samples_for_rank(unlabeled_samples, config)
         pseudo_samples = gather_pseudo_samples(method.generate_pseudo_samples(local_unlabeled_samples), config)
         train_info.update(warmup_info)
         train_info["pseudo_accept_count"] = len(pseudo_samples)
         if pseudo_samples:
+            # 伪标签和原始 labeled 集合并后再做第二阶段训练。
             finetune_samples = list(train_samples) + pseudo_samples
             finetune_info = train_method(method, finetune_samples, val_samples, config, config.pseudo_finetune_epochs)
             train_info.update(finetune_info)
@@ -218,7 +245,9 @@ def run_condition(
 
 
 def run_experiment(config: Optional[ExperimentConfig] = None) -> None:
+    """benchmark 平台总入口。"""
     config = config or load_config()
+    # 这里显式根据当前设备类型选择后端，保证单机多卡和 CPU 回退都能工作。
     init_distributed_process_group(
         DistributedConfig(
             enabled=config.distributed,
@@ -235,6 +264,7 @@ def run_experiment(config: Optional[ExperimentConfig] = None) -> None:
 
         plan_path = config.root / "EXPERIMENT_PLAN.yaml"
         plan = yaml.safe_load(plan_path.read_text(encoding="utf8"))
+        # active_conditions 由“用户配置”和“实验计划”求交集，避免跑到未计划条件。
         planned_conditions = plan.get("compute_budget", {}).get("planned_conditions", {})
         all_planned = planned_conditions.get("core_conditions", []) + planned_conditions.get("ablation_conditions", [])
         active_conditions = [condition for condition in config.active_conditions if condition in all_planned]
@@ -246,6 +276,7 @@ def run_experiment(config: Optional[ExperimentConfig] = None) -> None:
         dataset_adapter = build_dataset_adapter(config)
         loaded_dataset = dataset_adapter.load(config)
         samples = loaded_dataset.samples
+        # teacher 和 registry 都在实验开始时统一创建，避免每个 condition 重复建大对象。
         teacher = SAM2Teacher(config)
         registry = build_method_registry(teacher, config)
         results: List[Dict[str, float]] = []
@@ -294,6 +325,7 @@ def run_experiment(config: Optional[ExperimentConfig] = None) -> None:
                     barrier()
 
         if is_main_process(config):
+            # results.json 更偏结果表；summary.json 更偏协议和整体说明。
             (config.output_dir / "results.json").write_text(
                 json.dumps(results, indent=2, ensure_ascii=False),
                 encoding="utf8",

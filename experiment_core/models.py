@@ -1,3 +1,9 @@
+"""轻量模型组件定义。
+
+当前 benchmark 里，真正重模型的部分是外部 SAM2 teacher。
+这里实现的是围绕 benchmark 需要的轻量 student / adapter 结构。
+"""
+
 from __future__ import annotations
 
 import torch
@@ -12,6 +18,8 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 class ConvBlock(nn.Module):
+    """两层卷积的小块，作为轻量 encoder/decoder 的基础单元。"""
+
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         self.block = nn.Sequential(
@@ -28,9 +36,19 @@ class ConvBlock(nn.Module):
 
 
 class PromptConditionedMaskAdapter(nn.Module):
+    """对 SAM2 logits 做残差修正的 adapter。
+
+    输入由两部分组成：
+    1. teacher logits
+    2. box prior
+
+    输出是对 teacher logits 的残差修正，而不是从零开始预测 mask。
+    """
+
     def __init__(self):
         super().__init__()
         final_conv = nn.Conv2d(16, 1, kernel_size=1)
+        # 最后一层零初始化，让训练初期模型先退化为“基本不改 teacher 输出”。
         nn.init.zeros_(final_conv.weight)
         nn.init.zeros_(final_conv.bias)
         self.encoder = nn.Sequential(
@@ -51,6 +69,7 @@ class PromptConditionedMaskAdapter(nn.Module):
         )
 
     def forward(self, teacher_logits: torch.Tensor, box_prior: torch.Tensor) -> torch.Tensor:
+        # 把 prompt 信息显式拼接进网络，避免 adapter 只看到 teacher 输出而忽略几何条件。
         features = torch.cat([teacher_logits, box_prior], dim=1)
         encoded = self.encoder(features)
         residual = self.decoder(encoded)
@@ -60,6 +79,8 @@ class PromptConditionedMaskAdapter(nn.Module):
 
 
 class TinyPIDNetS(nn.Module):
+    """PIDNet-S 风格的极简替代实现，用作 control baseline。"""
+
     def __init__(self):
         super().__init__()
         self.stem = nn.Sequential(
@@ -78,10 +99,13 @@ class TinyPIDNetS(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         feat = self.body(self.stem(x))
+        # 输出统一上采样回输入分辨率，方便和 GT mask 对齐。
         return F.interpolate(self.classifier(feat), size=x.shape[-2:], mode="bilinear", align_corners=False)
 
 
 class TinyEncoderDecoder(nn.Module):
+    """当 transformers 不可用时的 SegFormer 退化替代。"""
+
     def __init__(self):
         super().__init__()
         self.down1 = ConvBlock(3, 32)
@@ -111,9 +135,16 @@ class TinyEncoderDecoder(nn.Module):
 
 
 class SegFormerWrapper(nn.Module):
+    """SegFormer 包装层。
+
+    如果环境缺少 transformers，则自动回退到轻量 encoder-decoder，
+    保证 benchmark 平台在依赖不完整时也能跑 control baseline。
+    """
+
     def __init__(self):
         super().__init__()
         if SegformerConfig is None or SegformerForSemanticSegmentation is None:
+            # 依赖缺失时仍保留一个可训练替代，避免方法注册器失效。
             self.backbone = None
             self.fallback = TinyEncoderDecoder()
         else:

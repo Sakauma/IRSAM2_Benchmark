@@ -1,3 +1,11 @@
+"""评估逻辑。
+
+这里负责把方法预测结果转成：
+1. 聚合指标
+2. 逐样本行记录
+3. 代表性可视化
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -21,12 +29,14 @@ from .metrics import (
 
 @dataclass(frozen=True)
 class EvaluationOutput:
+    """单次评估调用的统一返回结构。"""
     aggregate_metrics: Dict[str, float]
     metric_rows: List[Dict[str, object]]
     visual_path: Optional[str]
 
 
 def save_visual(output_dir: Path, image_rgb: np.ndarray, target: np.ndarray, pred: np.ndarray, prefix: str) -> str:
+    """保存一张代表性三联图：原图 / GT / 预测。"""
     output_dir.mkdir(parents=True, exist_ok=True)
     fig, axes = plt.subplots(1, 3, figsize=(9, 3))
     axes[0].imshow(image_rgb)
@@ -49,10 +59,12 @@ def evaluate_samples(
     prefix: str,
     save_artifacts: bool,
 ) -> EvaluationOutput:
+    """逐样本执行预测并生成指标行。"""
     dataset = InfraredDataset(samples, require_mask=True)
     metric_rows: List[Dict[str, object]] = []
     visual_path: Optional[str] = None
     for item in dataset:
+        # latency 直接包在预测调用外层，保证和最终输出保持一致。
         pred, latency = compute_latency_ms(lambda: method.predict(item))
         target = item["mask"]
         image_height, image_width = target.shape
@@ -67,6 +79,7 @@ def evaluate_samples(
         bbox_area_ratio = float(box_mask.sum() / max(1, image_height * image_width))
         metric_rows.append(
             {
+                # 这些字段会直接写入 eval report，便于做分组分析和问题排查。
                 "sample_id": item["sample_id"],
                 "category_name": item["category_name"],
                 "device_source": item["device_source"],
@@ -88,6 +101,7 @@ def evaluate_samples(
             }
         )
         if save_artifacts and visual_path is None:
+            # 每次评估只保存第一张代表性可视化，避免输出爆炸。
             visual_path = save_visual(output_dir, item["image_rgb"], target, pred, prefix)
     aggregate_metrics = summarize_metric_rows(metric_rows)
     return EvaluationOutput(

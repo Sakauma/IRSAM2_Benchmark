@@ -1,4 +1,10 @@
 #!/usr/bin/env python
+"""清洗 MultiModalCOCO 的类别体系。
+
+目标是把原始较脏的类别名映射到 RBGT-Tiny 风格的目标集合，
+为后续跨数据集 benchmark 对齐协议。
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -15,6 +21,7 @@ TARGET_CATEGORY_IDS = {name: idx + 1 for idx, name in enumerate(TARGET_CATEGORIE
 
 
 def parse_args() -> argparse.Namespace:
+    """解析类别清洗脚本参数。"""
     parser = argparse.ArgumentParser(
         description="Clean MultiModal COCO categories and map them onto the RBGT-Tiny target taxonomy."
     )
@@ -31,10 +38,15 @@ def parse_args() -> argparse.Namespace:
 
 
 def tokenize(name: str) -> List[str]:
+    """把类别名拆成小写 token，便于做规则映射。"""
     return re.findall(r"[a-z]+", name.lower())
 
 
 def map_category(name: str) -> Optional[str]:
+    """把原始类别名映射到目标类别。
+
+    返回 None 表示该类别被过滤掉。
+    """
     tokens = tokenize(name)
     token_set = set(tokens)
 
@@ -58,6 +70,7 @@ def map_category(name: str) -> Optional[str]:
 
 
 def load_coco(path: Path) -> Dict:
+    """读取目录下唯一的 COCO 标注文件。"""
     ann_files = sorted((path / "annotations_coco").glob("*.json"))
     if not ann_files:
         raise RuntimeError(f"No COCO annotations found under {path / 'annotations_coco'}")
@@ -67,6 +80,7 @@ def load_coco(path: Path) -> Dict:
 
 
 def copy_images(src_root: Path, dst_root: Path, file_names: List[str], overwrite: bool) -> None:
+    """把清洗后仍被引用的图像复制到目标目录。"""
     src_img_root = src_root / "image"
     dst_img_root = dst_root / "image"
     dst_img_root.mkdir(parents=True, exist_ok=True)
@@ -80,6 +94,7 @@ def copy_images(src_root: Path, dst_root: Path, file_names: List[str], overwrite
 
 
 def main() -> None:
+    """脚本主入口。"""
     args = parse_args()
     src_root = args.src_root
     dst_root = args.dst_root
@@ -105,6 +120,7 @@ def main() -> None:
         raw_name = raw_name_by_id.get(ann["category_id"], "unknown")
         clean_name = map_category(raw_name)
         if clean_name is None:
+            # 无法可靠映射到目标体系的类别直接丢弃。
             dropped_counter[raw_name] += 1
             continue
         raw_to_clean[raw_name] = clean_name

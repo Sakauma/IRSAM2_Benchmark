@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 服务器首次正式运行建议：RBGT-Tiny 标准档配置。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,7 +14,7 @@ export SUPERVISION_BUDGETS="${SUPERVISION_BUDGETS:-0.1,0.2}"
 export TRAIN_EPOCHS="${TRAIN_EPOCHS:-4}"
 export PSEUDO_FINETUNE_EPOCHS="${PSEUDO_FINETUNE_EPOCHS:-2}"
 export MAX_SAMPLES="${MAX_SAMPLES:-0}"
-export MAX_IMAGES="${MAX_IMAGES:-1024}"
+export MAX_IMAGES="${MAX_IMAGES:-1024}"  # 先限制图片数，避免第一次服务器运行时间不可控。
 export EVAL_LIMIT="${EVAL_LIMIT:-0}"
 export NUM_WORKERS="${NUM_WORKERS:-2}"
 

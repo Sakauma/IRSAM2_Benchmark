@@ -1746,3 +1746,11 @@ robustness 扩展指标：
   - 可以，零改动
 - 换全新数据集：
   - 可以，但需要补一个 dataset adapter
+
+### 11. 代码可读性补全记录
+- 时间：2026-04-22
+- 范围：ir_sam2_bench/main.py、experiment_core/*.py、scripts/*.py、scripts/*.sh
+- 动作：为入口、配置、数据层、方法层、评估层、分布式路径和启动脚本补充了系统性的中文模块说明与关键行注释。
+- 目的：在正式继续优化 benchmark 和上服务器运行前，先把代码阅读门槛降下来，便于后续讨论、协作和二次开发。
+- 验证：已在 ubuntu2004 + sam_hq2 环境下完成 python -m py_compile main.py experiment_core/*.py scripts/*.py 和 ash -n scripts/*.sh 级别的语法检查。
+

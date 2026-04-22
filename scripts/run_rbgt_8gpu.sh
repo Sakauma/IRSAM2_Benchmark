@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# RBGT-Tiny 单机 8 卡推荐启动脚本。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,7 +17,7 @@ export MAX_SAMPLES="${MAX_SAMPLES:-0}"
 export MAX_IMAGES="${MAX_IMAGES:-1024}"
 export EVAL_LIMIT="${EVAL_LIMIT:-0}"
 export NUM_WORKERS="${NUM_WORKERS:-4}"
-export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+export NPROC_PER_NODE="${NPROC_PER_NODE:-8}"  # 默认 8 卡 DDP，可按服务器空闲卡数覆盖。
 
 echo "[run_rbgt_8gpu] dataset=${DATASET_NAME} nproc=${NPROC_PER_NODE} output=${OUTPUT_DIR}"
 run_experiment_main

@@ -1,3 +1,14 @@
+"""数据层与样本组织逻辑。
+
+这一层负责把原始标注转换为 benchmark 统一可消费的 `Sample`，
+并在训练前完成：
+1. 图像读取
+2. polygon -> mask / bbox 转换
+3. loose box 构造
+4. 按设备来源的确定性切分
+5. DataLoader 可直接消费的 batch 组装
+"""
+
 from __future__ import annotations
 
 import json
@@ -15,14 +26,20 @@ from .config import ExperimentConfig
 
 
 def _limit_reached(limit: int, count: int) -> bool:
+    """通用数量上限判断，`limit<=0` 视为不限。"""
     return limit > 0 and count >= limit
 
 
 def _image_limit_reached(limit: int, seen_images: Sequence[str]) -> bool:
+    """按图像数而不是实例数做上限判断。"""
     return limit > 0 and len(seen_images) >= limit
 
 
 def sample_image_key(frame_id: str) -> str:
+    """把实例级 frame_id 映射回图像级 key。
+
+    这样在做 labeled/unlabeled 切分时，可以按图像整体而不是实例碎片切。
+    """
     if "__inst_" in frame_id:
         return frame_id.split("__inst_")[0]
     if "__ann_" in frame_id:
@@ -32,6 +49,11 @@ def sample_image_key(frame_id: str) -> str:
 
 @dataclass
 class Sample:
+    """统一样本结构。
+
+    训练、评估、伪标签生成全部以这个结构为中间表示，避免各模块直接绑定原始标注格式。
+    """
+
     image_path: Path
     label_path: Path
     bbox: List[float]
@@ -49,6 +71,7 @@ class Sample:
     pseudo_quality: Optional[float] = None
 
     def has_mask(self) -> bool:
+        """判断样本是否真的带有可用 mask。"""
         return self.mask_array is not None or bool(self.polygon_points)
 
     def with_mask(
@@ -59,6 +82,10 @@ class Sample:
         pseudo_score: Optional[float] = None,
         pseudo_quality: Optional[float] = None,
     ) -> "Sample":
+        """返回一个附带 mask 的新样本。
+
+        这里不原地修改，避免原始 GT 样本和伪标签样本混淆。
+        """
         return replace(
             self,
             polygon_points=None,
@@ -71,6 +98,10 @@ class Sample:
 
 
 def load_ir_image(path: Path) -> np.ndarray:
+    """读取红外图像并归一化到 3 通道伪 RGB。
+
+    这样可以兼容需要 3 通道输入的 SAM2 / SegFormer / PIDNet。
+    """
     raw = np.array(Image.open(path).convert("L"), dtype=np.uint8)
     min_v = float(raw.min())
     max_v = float(raw.max())
@@ -79,6 +110,7 @@ def load_ir_image(path: Path) -> np.ndarray:
 
 
 def polygon_to_mask(points: Sequence[float], h: int, w: int) -> np.ndarray:
+    """把 polygon 顶点序列渲染成二值 mask。"""
     canvas = Image.new("L", (w, h), 0)
     xy = [(float(points[i]), float(points[i + 1])) for i in range(0, len(points), 2)]
     ImageDraw.Draw(canvas).polygon(xy, outline=1, fill=1)
@@ -86,6 +118,7 @@ def polygon_to_mask(points: Sequence[float], h: int, w: int) -> np.ndarray:
 
 
 def polygon_bbox(points: Sequence[float]) -> List[float]:
+    """根据 polygon 直接计算 tight bbox。"""
     xs = [float(points[idx]) for idx in range(0, len(points), 2)]
     ys = [float(points[idx + 1]) for idx in range(0, len(points), 2)]
     x1 = min(xs)
@@ -96,16 +129,19 @@ def polygon_bbox(points: Sequence[float]) -> List[float]:
 
 
 def xywh_to_xyxy(box_xywh: Sequence[float]) -> List[float]:
+    """COCO 风格 bbox 转换为 `[x1, y1, x2, y2]`。"""
     x, y, w, h = [float(v) for v in box_xywh]
     return [x, y, x + w, y + h]
 
 
 def xyxy_to_xywh(box_xyxy: Sequence[float]) -> List[float]:
+    """把内部统一表示转回 COCO 风格 bbox。"""
     x1, y1, x2, y2 = [float(v) for v in box_xyxy]
     return [x1, y1, max(1.0, x2 - x1), max(1.0, y2 - y1)]
 
 
 def clamp_box(box: Sequence[float], w: int, h: int) -> List[float]:
+    """把 box 裁剪回图像边界内，并保证最小宽高不为 0。"""
     x1, y1, x2, y2 = [float(v) for v in box]
     x1 = max(0.0, min(float(w - 1), x1))
     y1 = max(0.0, min(float(h - 1), y1))
@@ -122,6 +158,11 @@ def build_loose_box_xyxy(
     min_pad: float,
     min_side: float,
 ) -> List[float]:
+    """从 tight box 生成 benchmark 默认使用的 loose box。
+
+    这个 loose box 是当前 box-only 协议的 canonical prompt，
+    用来避免 tight box 过强而让“直接画框”基线失真。
+    """
     tight_x1, tight_y1, tight_x2, tight_y2 = [float(v) for v in tight_box_xyxy]
     tight_w = tight_x2 - tight_x1
     tight_h = tight_y2 - tight_y1
@@ -148,6 +189,7 @@ def build_loose_box_xyxy(
 
 
 def build_box_prior(box: Sequence[float], h: int, w: int) -> np.ndarray:
+    """把 bbox 转成矩形先验 mask。"""
     x1, y1, x2, y2 = [int(round(v)) for v in clamp_box(box, w, h)]
     prior = np.zeros((h, w), dtype=np.float32)
     prior[y1:y2, x1:x2] = 1.0
@@ -155,10 +197,12 @@ def build_box_prior(box: Sequence[float], h: int, w: int) -> np.ndarray:
 
 
 def parse_device_source(label_path: Path) -> str:
+    """从文件名中提取设备来源，用于设备分层切分。"""
     return label_path.stem.split("_")[0].split("-")[0]
 
 
 def load_mask_for_sample(sample: Sample, image_shape: Tuple[int, int]) -> Optional[np.ndarray]:
+    """按优先级加载样本 mask：显式数组 > polygon 在线栅格化。"""
     if sample.mask_array is not None:
         return sample.mask_array.astype(np.float32)
     if sample.polygon_points:
@@ -167,6 +211,7 @@ def load_mask_for_sample(sample: Sample, image_shape: Tuple[int, int]) -> Option
 
 
 def load_samples(config: ExperimentConfig) -> List[Sample]:
+    """兼容旧调用方式的通用加载入口。"""
     if config.dataset_name == "MultiModal":
         return load_multimodal_samples(config)
     if (config.data_root / "annotations_coco").exists() and (config.data_root / "image").exists():
@@ -175,6 +220,10 @@ def load_samples(config: ExperimentConfig) -> List[Sample]:
 
 
 def load_multimodal_samples(config: ExperimentConfig) -> List[Sample]:
+    """读取原始 MultiModal 数据集。
+
+    每张图可能有多个目标，因此这里会把单图展开为多实例样本。
+    """
     samples: List[Sample] = []
     seen_images = set()
     assert config.label_dir is not None and config.img_dir is not None
@@ -213,6 +262,7 @@ def load_multimodal_samples(config: ExperimentConfig) -> List[Sample]:
             )
             samples.append(
                 Sample(
+                    # box-only 协议默认使用 loose box；tight/loose 都保留下来供审计。
                     image_path=image_path,
                     label_path=label_path,
                     bbox=bbox_loose,
@@ -233,6 +283,10 @@ def load_multimodal_samples(config: ExperimentConfig) -> List[Sample]:
 
 
 def _coco_segmentation_to_mask(segmentation, h: int, w: int) -> Optional[np.ndarray]:
+    """把 COCO segmentation 字段转成二值 mask。
+
+    当前只处理 polygon list，不处理 RLE。
+    """
     if not segmentation:
         return None
     if isinstance(segmentation, list):
@@ -250,6 +304,7 @@ def load_coco_samples(
     annotation_patterns: Optional[Sequence[str]] = None,
     file_name_filter: Optional[Callable[[str], bool]] = None,
 ) -> List[Sample]:
+    """读取 COCO-like 数据集，并兼容 tight/loose 双 bbox 字段。"""
     annotation_dir = config.data_root / "annotations_coco"
     image_root = config.data_root / "image"
     samples: List[Sample] = []
@@ -263,6 +318,7 @@ def load_coco_samples(
     if not annotation_files:
         annotation_files = sorted(annotation_dir.glob("*.json"))
     for ann_path in annotation_files:
+        # 每个 annotation json 都被视为一个候选 split 源；按顺序读取即可。
         data = json.loads(ann_path.read_text(encoding="utf8"))
         images = {item["id"]: item for item in data.get("images", [])}
         categories = {item["id"]: item.get("name", str(item["id"])) for item in data.get("categories", [])}
@@ -277,6 +333,7 @@ def load_coco_samples(
                 continue
             bbox_loose_xywh = ann.get("bbox_loose")
             bbox_tight_xywh = ann.get("bbox_tight")
+            # canonical bbox 优先级：loose > bbox > tight。
             bbox_xywh = bbox_loose_xywh or ann.get("bbox") or bbox_tight_xywh
             if bbox_xywh is None or len(bbox_xywh) != 4:
                 continue
@@ -310,6 +367,7 @@ def load_coco_samples(
                     polygon_points=None,
                     device_source=file_name.split("/")[0],
                     frame_id=frame_id,
+                    # 这个字段会进入 eval report，用于审计不同标注来源。
                     annotation_protocol_flag="coco_segmentation" if mask_array is not None else "bbox_only",
                     mask_array=mask_array,
                 )
@@ -329,12 +387,17 @@ def deterministic_source_split(
     budget: float,
     eval_limit: int,
 ) -> Tuple[List[Sample], List[Sample], List[Sample], List[Sample]]:
+    """按 device_source 做确定性切分。
+
+    这比随机切分更接近“跨设备泛化”设定，也是当前 benchmark 的核心协议之一。
+    """
     groups = {}
     for sample in samples:
         groups.setdefault(sample.device_source, []).append(sample)
 
     group_sizes = [len(items) for items in groups.values()]
     if group_sizes and (max(group_sizes) <= 2 or len(groups) >= max(4, len(samples) // 2)):
+        # 设备来源过碎时，回退到按图像分桶，避免 val/test 过小。
         groups = _fallback_bucket_groups(samples)
 
     ordered_sources = sorted(groups)
@@ -357,6 +420,7 @@ def deterministic_source_split(
         test = test[:eval_limit]
 
     if len(val) < 2:
+        # 极小数据集时做最小回退，保证验证和测试阶段不至于空掉。
         val = train_pool[:2]
     if len(test) < 2:
         test = train_pool[2:4]
@@ -366,6 +430,7 @@ def deterministic_source_split(
 
 
 def _fallback_bucket_groups(samples: Sequence[Sample]):
+    """当原始 device_source 过于稀碎时，按图像做伪分桶。"""
     image_groups = {}
     for sample in samples:
         image_id = sample_image_key(sample.frame_id)
@@ -379,6 +444,7 @@ def _fallback_bucket_groups(samples: Sequence[Sample]):
 
 
 def _split_train_pool_by_image(train_pool: Sequence[Sample], budget: float):
+    """按图像粒度把训练池切成 labeled 与 unlabeled。"""
     images = {}
     for sample in train_pool:
         image_id = sample_image_key(sample.frame_id)
@@ -394,6 +460,13 @@ def _split_train_pool_by_image(train_pool: Sequence[Sample], budget: float):
 
 
 class InfraredDataset(Dataset):
+    """PyTorch 数据集包装器。
+
+    这里通过 `require_mask` 和 `allow_gt_masks` 显式控制监督协议：
+    - mask_supervised: 允许直接读取 GT mask
+    - box_only: GT mask 不进入训练，但伪标签仍可进入
+    """
+
     def __init__(self, samples: Sequence[Sample], require_mask: bool, allow_gt_masks: bool = True):
         self.samples = list(samples)
         self.require_mask = require_mask
@@ -407,6 +480,7 @@ class InfraredDataset(Dataset):
         image_rgb = load_ir_image(sample.image_path)
         mask = load_mask_for_sample(sample, image_rgb.shape[:2])
         if not self.allow_gt_masks and sample.supervision_source == "gt_mask":
+            # box-only 协议下，把 GT mask 从训练视图中屏蔽掉。
             mask = None
         if self.require_mask and mask is None:
             raise ValueError(f"Sample {sample.frame_id} does not provide a training mask.")
@@ -431,6 +505,11 @@ class InfraredDataset(Dataset):
 
 
 def collate_fn(batch):
+    """把样本列表整理成统一 batch。
+
+    即使 batch 中混有无 mask 样本，也会补零 mask，并配套 `has_masks` 标志位。
+    这样训练代码可以按样本决定走 mask loss 还是 box-only loss。
+    """
     images = torch.stack(
         [torch.from_numpy(item["image_rgb"]).permute(2, 0, 1).float() / 255.0 for item in batch],
         dim=0,

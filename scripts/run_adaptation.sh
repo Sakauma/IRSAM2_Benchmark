@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 只运行 zero-shot 与 adaptation 层，用于分析 SAM2 适配收益。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

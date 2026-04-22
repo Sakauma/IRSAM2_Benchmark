@@ -1,3 +1,9 @@
+"""方法注册表。
+
+这个模块把“方法实现”和“benchmark 叙事层信息”绑定在一起：
+每个方法不仅有 factory，还会标注自己属于哪个 layer / family / description。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,6 +15,7 @@ from .methods import BaseMethod, SAM2Teacher, build_method_registry as build_met
 
 @dataclass(frozen=True)
 class MethodSpec:
+    """单个方法条件的静态描述。"""
     name: str
     layer: str
     family: str
@@ -17,6 +24,8 @@ class MethodSpec:
 
 
 class MethodRegistry:
+    """方法名到方法规格的统一索引。"""
+
     def __init__(self, specs: List[MethodSpec]):
         self._specs: Dict[str, MethodSpec] = {spec.name: spec for spec in specs}
 
@@ -24,6 +33,7 @@ class MethodRegistry:
         return list(self._specs)
 
     def build(self, name: str) -> BaseMethod:
+        # 统一从 factory 构造方法实例，runner 不需要关心具体类名。
         if name not in self._specs:
             raise KeyError(f"Unknown method condition: {name}")
         return self._specs[name].factory()
@@ -32,6 +42,7 @@ class MethodRegistry:
         return name in self._specs
 
     def manifest(self, selected: List[str] | None = None) -> List[Dict[str, str]]:
+        """导出方法清单，写入 summary。"""
         names = selected or self.names()
         manifest: List[Dict[str, str]] = []
         for name in names:
@@ -50,6 +61,7 @@ class MethodRegistry:
 
 
 def build_method_registry(teacher: SAM2Teacher, config: ExperimentConfig) -> MethodRegistry:
+    """把当前 benchmark v1 已实现的所有方法整理进注册表。"""
     factories = build_method_factories(teacher, config)
     specs = [
         MethodSpec(

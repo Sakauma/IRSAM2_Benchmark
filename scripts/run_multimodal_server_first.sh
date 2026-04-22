@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 服务器首次正式运行建议：MultiModal 标准档配置。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,7 +16,7 @@ export PSEUDO_FINETUNE_EPOCHS="${PSEUDO_FINETUNE_EPOCHS:-2}"
 export MAX_SAMPLES="${MAX_SAMPLES:-0}"
 export MAX_IMAGES="${MAX_IMAGES:-0}"
 export EVAL_LIMIT="${EVAL_LIMIT:-0}"
-export NUM_WORKERS="${NUM_WORKERS:-2}"
+export NUM_WORKERS="${NUM_WORKERS:-2}"  # 先用温和 worker 数，优先保证稳而不是极限吞吐。
 
 echo "[run_multimodal_server_first] dataset=${DATASET_NAME} output=${OUTPUT_DIR}"
 run_experiment_main

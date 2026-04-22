@@ -1,4 +1,13 @@
 #!/usr/bin/env python
+"""把原始 MultiModal 导出为 COCO 风格数据集。
+
+导出结果同时保留：
+1. bbox_tight
+2. bbox_loose
+3. canonical bbox（当前直接写成 bbox_loose）
+4. 原始 segmentation
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -11,6 +20,7 @@ from PIL import Image
 
 
 def parse_args() -> argparse.Namespace:
+    """解析导出脚本参数。"""
     parser = argparse.ArgumentParser(
         description="Export MultiModal annotations into a COCO-style dataset aligned with RBGT-Tiny layout."
     )
@@ -49,6 +59,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def polygon_bbox(points: Sequence[float]) -> List[float]:
+    """根据 polygon 计算 tight bbox（xywh）。"""
     xs = [float(points[idx]) for idx in range(0, len(points), 2)]
     ys = [float(points[idx + 1]) for idx in range(0, len(points), 2)]
     x1 = min(xs)
@@ -59,6 +70,7 @@ def polygon_bbox(points: Sequence[float]) -> List[float]:
 
 
 def polygon_area(points: Sequence[float]) -> float:
+    """用鞋带公式估计 polygon 面积。"""
     coords = [(float(points[idx]), float(points[idx + 1])) for idx in range(0, len(points), 2)]
     if len(coords) < 3:
         return 0.0
@@ -71,6 +83,7 @@ def polygon_area(points: Sequence[float]) -> float:
 
 
 def resolve_image_path(img_dir: Path, stem: str) -> Optional[Path]:
+    """按常见后缀寻找与标注同 stem 的图像文件。"""
     for suffix in (".bmp", ".png", ".jpg", ".jpeg"):
         candidate = img_dir / f"{stem}{suffix}"
         if candidate.exists():
@@ -105,6 +118,7 @@ def build_loose_box(
     min_pad: float,
     min_side: float,
 ) -> List[float]:
+    """由 tight bbox 生成 benchmark 协议使用的 loose bbox。"""
     tight_x1, tight_y1, tight_x2, tight_y2 = xywh_to_xyxy(tight_box_xywh)
     tight_w = tight_x2 - tight_x1
     tight_h = tight_y2 - tight_y1
@@ -136,6 +150,7 @@ def load_multimodal_records(
     bbox_min_pad: float,
     bbox_min_side: float,
 ) -> Tuple[List[Dict], Dict[str, int]]:
+    """把原始 MultiModal 样本整理成 COCO 记录。"""
     img_dir = src_root / "img"
     label_dir = src_root / "label"
     if not img_dir.exists() or not label_dir.exists():
@@ -180,6 +195,7 @@ def load_multimodal_records(
             polygon = masks[0] if masks and len(masks[0]) >= 6 else None
 
             if polygon is not None:
+                # 有 polygon 时优先用 polygon 生成 tight bbox，并保留 segmentation。
                 bbox_tight = polygon_bbox(polygon)
                 area = polygon_area(polygon)
                 segmentation = [polygon]
@@ -205,6 +221,7 @@ def load_multimodal_records(
                     "id": next_ann_id,
                     "image_id": image_id,
                     "category_id": categories[category_name],
+                    # 当前 benchmark 约定 canonical bbox 就是 loose box。
                     "bbox": bbox_loose,
                     "bbox_tight": bbox_tight,
                     "bbox_loose": bbox_loose,
@@ -228,6 +245,7 @@ def load_multimodal_records(
 
 
 def export_images(src_root: Path, dst_root: Path, stems: Sequence[str], overwrite: bool) -> None:
+    """可选地把原始图像复制到导出目录。"""
     src_img_dir = src_root / "img"
     dst_img_dir = dst_root / "image"
     dst_img_dir.mkdir(parents=True, exist_ok=True)
@@ -242,6 +260,7 @@ def export_images(src_root: Path, dst_root: Path, stems: Sequence[str], overwrit
 
 
 def main() -> None:
+    """脚本主入口。"""
     args = parse_args()
     datasets, image_id_by_stem = load_multimodal_records(
         args.src_root,

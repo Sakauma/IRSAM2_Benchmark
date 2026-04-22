@@ -1,4 +1,12 @@
 #!/usr/bin/env python
+"""可视化 COCO 数据集中的 tight / loose box。
+
+输出三套结果：
+1. tight 面板
+2. loose 面板
+3. tight / loose 并排对比图
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -22,6 +30,7 @@ BOX_COLORS = [
 
 
 def parse_args() -> argparse.Namespace:
+    """解析可视化脚本参数。"""
     parser = argparse.ArgumentParser(
         description="Visualize COCO annotations with tight and loose bounding boxes."
     )
@@ -43,6 +52,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_annotation_json(src_root: Path, explicit_path: Path | None) -> Path:
+    """定位要渲染的 annotation json。"""
     if explicit_path is not None:
         return explicit_path
     annotation_dir = src_root / "annotations_coco"
@@ -55,10 +65,12 @@ def resolve_annotation_json(src_root: Path, explicit_path: Path | None) -> Path:
 
 
 def color_for_category(category_id: int) -> Tuple[int, int, int]:
+    """为类别稳定分配一个可视化颜色。"""
     return ImageColor.getrgb(BOX_COLORS[category_id % len(BOX_COLORS)])
 
 
 def segmentation_to_xy(segmentation: Sequence[float]) -> List[Tuple[float, float]]:
+    """把 polygon 扁平数组转成 PIL 可直接绘制的点列表。"""
     return [(float(segmentation[idx]), float(segmentation[idx + 1])) for idx in range(0, len(segmentation), 2)]
 
 
@@ -74,6 +86,7 @@ def draw_annotation_panel(
     box_key: str,
     title: str,
 ) -> Image.Image:
+    """在单张图上叠加 polygon 与指定版本的 bbox。"""
     canvas = image_rgb.convert("RGBA")
     overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
@@ -85,6 +98,7 @@ def draw_annotation_panel(
         outline = (*color, 230)
         for polygon in ann.get("segmentation", []):
             if len(polygon) >= 6:
+                # 先画透明 polygon，再叠 bbox，便于观察框与真实轮廓的关系。
                 draw.polygon(segmentation_to_xy(polygon), fill=fill, outline=outline)
         box_xywh = ann.get(box_key) or ann.get("bbox")
         if box_xywh is None:
@@ -104,6 +118,7 @@ def draw_annotation_panel(
 
 
 def main() -> None:
+    """脚本主入口。"""
     args = parse_args()
     annotation_json = resolve_annotation_json(args.src_root, args.annotation_json)
     data = json.loads(annotation_json.read_text(encoding="utf8"))
@@ -148,6 +163,7 @@ def main() -> None:
             title="loose bbox",
         )
         comparison = Image.new("RGB", (tight_panel.width * 2, max(tight_panel.height, loose_panel.height)), color=(0, 0, 0))
+        # 对比图左右并排，方便肉眼比较 tight 和 loose 的差异。
         comparison.paste(tight_panel, (0, 0))
         comparison.paste(loose_panel, (tight_panel.width, 0))
 
