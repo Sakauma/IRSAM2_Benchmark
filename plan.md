@@ -1754,3 +1754,4 @@ robustness 扩展指标：
 - 目的：在正式继续优化 benchmark 和上服务器运行前，先把代码阅读门槛降下来，便于后续讨论、协作和二次开发。
 - 验证：已在 ubuntu2004 + sam_hq2 环境下完成 python -m py_compile main.py experiment_core/*.py scripts/*.py 和 ash -n scripts/*.sh 级别的语法检查。
 
+- 发布：ir_sam2_bench 已提交并推送到 GitHub，提交号 d5c333e，提交信息为 docs: add detailed chinese code comments。
