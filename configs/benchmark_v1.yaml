@@ -1,0 +1,66 @@
+model:
+  model_id: "sam2.1_hiera_base_plus"
+  family: "sam2"
+  cfg: "configs/sam2.1/sam2.1_hiera_b+.yaml"
+  ckpt: "checkpoints/sam2.1_hiera_base_plus.pt"
+  repo: ""
+
+dataset:
+  dataset_id: "MultiModalCOCOClean"
+  adapter: "coco_like"
+  root: "ir_sam2_exp/data_prep/MultiModalCOCOClean"
+  images_dir: "image"
+  annotations_dir: "annotations_coco"
+  mask_mode: "auto"
+  class_map: {}
+
+runtime:
+  artifact_root: "artifacts"
+  reference_results_root: "reference_results"
+  output_name: "benchmark_v1_run"
+  device: "cuda"
+  num_workers: 0
+  smoke_test: false
+  max_samples: 0
+  max_images: 0
+  save_visuals: true
+  seeds: [42, 123, 456]
+
+evaluation:
+  benchmark_version: "irsam2-benchmark-v1"
+  track: "track_a_image_prompted"
+  protocol: "box_only"
+  inference_mode: "box"
+  split_version: "split_v1"
+  prompt_policy_version: "prompt_policy_v1"
+  metric_schema_version: "metric_schema_v1"
+  reference_result_version: "reference_results_v1"
+  temporal_eval_policy: "sequence_aware"
+  prompt_policy:
+    name: "first_frame_gt_box_sparse_refresh"
+    prompt_type: "box"
+    prompt_source: "gt"
+    prompt_budget: 1
+    refresh_interval: 10
+    multi_mask: false
+    notes: "Default paper benchmark prompt policy."
+
+stages:
+  transfer: {}
+  adapt: {}
+  distill: {}
+  quantize: {}
+
+ablations:
+  thermal_frontend: false
+  peft: false
+  adapter: false
+  prompt_jitter: false
+  prompt_truncation: false
+  pseudo: false
+  quality_filter: false
+  distill_mask: false
+  distill_feature: false
+  distill_relation: false
+  ptq: false
+  qat: false

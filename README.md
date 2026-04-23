@@ -1,82 +1,62 @@
-# IR SAM2 Benchmark
+# IRSAM2_Benchmark
 
-`ir_sam2_bench/` 是一个独立的红外分割 benchmark 工程，目标不是只复现一组实验，而是提供一个以 baseline 为中心、可切换数据集、可稳定产出评估结果的平台。
+`IRSAM2_Benchmark` is a fresh benchmark platform for evaluating SAM2-based infrared segmentation pipelines. It replaces the earlier monolithic repository layout with a package-based benchmark runtime and frozen reporting schema.
 
-当前 benchmark v1 主线：
+This v0.1 implementation focuses on four things:
 
-`BBox baseline -> SAM2 zero-shot -> SAM2 adaptation -> SAM2 pseudo`
+- a clean package structure and CLI
+- dataset adapters for raw MultiModal, COCO-like, RBGT-Tiny, and generic `images/ + masks/`
+- first-class SAM2 baselines, including prompt-free and sequence-aware evaluation hooks
+- frozen result schema, manifests, and paper-oriented reporting
 
-## 工程结构
-- `main.py`
-  - benchmark 入口。
-- `experiment_core/config.py`
-  - 统一解析运行配置、数据路径、SAM2 路径和训练超参数。
-- `experiment_core/dataset_adapters.py`
-  - 数据集适配层。当前支持 `MultiModal` 原始格式、COCO 风格数据集、`RBGT-Tiny` 的 IR-only 分支。
-- `experiment_core/method_registry.py`
-  - 方法注册层。把 baseline、SAM2 主线和 control baselines 统一注册成可选择条件。
-- `experiment_core/evaluation.py`
-  - 执行逐样本评估并生成统一指标行。
-- `experiment_core/reporting.py`
-  - 写出 `results.json`、`summary.json` 和 `eval_reports/*.json`。
-- `scripts/`
-  - 数据准备、标注可视化和 benchmark 启动脚本。
+## Current Scope
 
-## 数据集支持
-- `MultiModal`
-  - 原始 `img/ + label/` 布局。benchmark 会在线生成 `bbox_tight` 和 canonical `bbox_loose`。
-- `MultiModalCOCO` / `MultiModalCOCOClean`
-  - COCO 风格导出数据。
-- `RBGT-Tiny`
-  - 默认只读取灰度 `01` 分支，避免把彩色 `00` 分支混进红外 benchmark。
+This codebase fully implements the benchmark platform skeleton, dataset ingestion, result schema, baseline registry, and evaluation stack. The baseline layer is functional. The full-chain training stages (`adapt`, `distill`, `quantize`) are implemented as pipeline stages with stable artifacts and interfaces, but they are still reference-stage scaffolds rather than finalized paper methods.
 
-## 评估输出
-每次运行至少会写出：
-- `results.json`
-- `summary.json`
-- `eval_reports/*.json`
+That split is deliberate:
 
-`eval_reports` 包含：
-- 聚合指标：`mIoU`、`Dice`、`BoundaryF1`、`LatencyMs`
-- 协议审计指标：`BBoxIoU`、`TightBoxMaskIoU`、`LooseBoxMaskIoU`、`PredAreaRatio`、`GTAreaRatio`
-- 分组结果：`device_source`、`target_scale`、`category_name`、`annotation_protocol_flag`
-- per-sample 明细
+- benchmark infrastructure must be stable before methods are swapped in
+- baseline and evaluation behavior must be reproducible before claiming pipeline gains
 
-## 常用命令
-```bash
-DATASET_ROOT=/path/to/dataset \
-SAM2_REPO=/path/to/sam2 \
-bash scripts/run_full_benchmark.sh
-```
+## Directory Layout
 
-单机多卡运行：
+- `src/irsam2_benchmark/`: runtime package
+- `configs/`: YAML benchmark configs
+- `docs/`: benchmark specifications
+- `tests/`: unit tests
+- `artifacts/`: default output root
+- `reference_results/`: frozen per-baseline reference snapshots for regression checks
+
+## CLI
 
 ```bash
-DATASET_ROOT=/path/to/dataset \
-SAM2_REPO=/path/to/sam2 \
-NPROC_PER_NODE=8 \
-bash scripts/run_full_benchmark.sh
+python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_zero_shot
+python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_zero_shot_point
+python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_zero_shot_box_point
+python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_no_prompt_auto_mask
+python -m irsam2_benchmark.cli run evaluate --config configs/benchmark_v1.yaml
 ```
 
-当前多卡模式基于 `torchrun + DDP`，适用于单机多卡，例如 `8x4090`。
-
-服务器首次正式运行也可以直接用：
+For fast validation, use the smoke config:
 
 ```bash
-bash scripts/run_multimodal_server_first.sh
-bash scripts/run_rbgt_server_first.sh
+python -m irsam2_benchmark.cli run baseline --config configs/benchmark_smoke.yaml --baseline bbox_rect
 ```
 
-如果是单机 `8x4090`，也可以直接用：
+The smoke config is intentionally small enough to validate:
 
-```bash
-bash scripts/run_multimodal_8gpu.sh
-bash scripts/run_rbgt_8gpu.sh
-```
+- dataset adapter loading
+- prompt synthesis
+- SAM2 checkpoint wiring
+- report schema and grouped eval outputs
+- reference snapshot generation under `reference_results/`
 
-绘制 `MultiModalCOCO` 的 tight / loose 标注可视化：
-```bash
-python scripts/visualize_coco_boxes.py \
-  --src-root /path/to/MultiModalCOCO \
-  --output-root ./visualizations/multimodal_coco_boxes_v1
-```
+## Machine Paths
+
+Machine-specific paths are configured through:
+
+- `DATASET_ROOT`
+- `SAM2_REPO`
+- `ARTIFACT_ROOT`
+
+The benchmark config keeps experimental meaning in YAML. Environment variables are used only for path resolution.

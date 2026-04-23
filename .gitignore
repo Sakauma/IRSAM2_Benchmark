@@ -1,13 +1,7 @@
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+.pytest_cache/
 
-.DS_Store
-Thumbs.db
-
-benchmark_runs/
-visualizations/
-
-run.log
-nohup.out
+artifacts/
+reference_results/*
+!reference_results/README.md
