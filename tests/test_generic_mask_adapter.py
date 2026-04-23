@@ -1,3 +1,8 @@
+"""通用 image+mask adapter 单元测试。
+
+Author: Egor Izmaylov
+"""
+
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +15,8 @@ from irsam2_benchmark.data import build_dataset_adapter
 
 
 class GenericMaskAdapterTests(unittest.TestCase):
+    """验证 generic adapter 最基础的读取和 prompt 合成能力。"""
+
     def test_generic_binary_mask_dataset(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -17,6 +24,7 @@ class GenericMaskAdapterTests(unittest.TestCase):
             masks = root / "masks"
             images.mkdir()
             masks.mkdir()
+
             image = np.zeros((8, 8), dtype=np.uint8)
             mask = np.zeros((8, 8), dtype=np.uint8)
             mask[2:6, 3:5] = 255

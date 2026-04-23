@@ -1,3 +1,8 @@
+"""实例集合评估指标。
+
+Author: Egor Izmaylov
+"""
+
 from __future__ import annotations
 
 from typing import Dict, List, Tuple
@@ -7,7 +12,15 @@ import numpy as np
 from .image_metrics import mask_iou
 
 
-def greedy_match_instances(pred_instances: List[Dict[str, object]], gt_instances: List[Dict[str, object]], iou_threshold: float = 0.5) -> Dict[str, float]:
+def greedy_match_instances(
+    pred_instances: List[Dict[str, object]],
+    gt_instances: List[Dict[str, object]],
+    iou_threshold: float = 0.5,
+) -> Dict[str, float]:
+    """使用 greedy matching 计算实例级 precision/recall/F1。
+
+    当前实现足够适合 no-prompt auto-mask 的 benchmark 基线比较。
+    """
     candidates: List[Tuple[float, int, int]] = []
     for pred_idx, pred in enumerate(pred_instances):
         pred_mask = np.asarray(pred["mask"], dtype=np.float32)
@@ -16,6 +29,8 @@ def greedy_match_instances(pred_instances: List[Dict[str, object]], gt_instances
             iou = mask_iou(pred_mask, gt_mask)
             if iou >= iou_threshold:
                 candidates.append((iou, pred_idx, gt_idx))
+
+    # 按 IoU 从高到低排序，再做一对一匹配。
     candidates.sort(reverse=True)
     matched_pred: set[int] = set()
     matched_gt: set[int] = set()
@@ -26,6 +41,7 @@ def greedy_match_instances(pred_instances: List[Dict[str, object]], gt_instances
         matched_pred.add(pred_idx)
         matched_gt.add(gt_idx)
         matched_iou.append(iou)
+
     pred_count = len(pred_instances)
     gt_count = len(gt_instances)
     match_count = len(matched_iou)

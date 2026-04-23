@@ -1,3 +1,14 @@
+"""pipeline 命令调度器。
+
+Author: Egor Izmaylov
+
+这里是 CLI 与 benchmark 运行时之间的桥梁：
+- 负责根据命令类型执行 stage 或 baseline；
+- 负责生成 benchmark spec；
+- 负责聚合 per-seed 结果；
+- 负责写出 artifact manifest 和 reference snapshot。
+"""
+
 from __future__ import annotations
 
 import shutil
@@ -13,7 +24,9 @@ from .stages import run_adapt_stage, run_distill_stage, run_quantize_stage, run_
 
 
 def _effective_prompt_policy(config: AppConfig, inference_mode: InferenceMode) -> Dict[str, Any]:
+    """根据推理模式返回真正写入 spec 的 prompt policy。"""
     if inference_mode == InferenceMode.NO_PROMPT_AUTO_MASK:
+        # no-prompt 模式不应复用图像 prompt policy，否则 benchmark spec 会误导。
         return PromptPolicy(
             name="no_prompt_auto_mask",
             prompt_type=PromptType.NONE,
@@ -27,6 +40,7 @@ def _effective_prompt_policy(config: AppConfig, inference_mode: InferenceMode) -
 
 
 def _build_benchmark_spec(config: AppConfig, inference_mode: InferenceMode) -> Dict[str, Any]:
+    """构建冻结版 benchmark spec。"""
     return {
         "benchmark_version": config.evaluation.benchmark_version,
         "split_version": config.evaluation.split_version,
@@ -42,12 +56,14 @@ def _build_benchmark_spec(config: AppConfig, inference_mode: InferenceMode) -> D
 
 
 def _seed_result(seed: int, aggregate: Dict[str, Any]) -> Dict[str, Any]:
+    """把 seed 写回聚合指标，形成单次运行记录。"""
     payload = {"seed": seed}
     payload.update({k: v for k, v in aggregate.items() if not isinstance(v, list)})
     return payload
 
 
 def _std_numeric(rows: List[Dict[str, Any]]) -> Dict[str, float]:
+    """计算 per-seed 数值字段的样本标准差。"""
     numeric: Dict[str, List[float]] = {}
     for row in rows:
         for key, value in row.items():
@@ -61,12 +77,14 @@ def _std_numeric(rows: List[Dict[str, Any]]) -> Dict[str, float]:
 
 
 def _sample_std(values: List[float]) -> float:
+    """手工实现样本标准差，避免额外引入统计依赖。"""
     mean = sum(values) / len(values)
     variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
     return variance ** 0.5
 
 
 def _snapshot_reference_outputs(config: AppConfig, baseline_name: str, output_dir: Any) -> None:
+    """把 baseline 输出复制到 reference_results 下，作为未来回归基线。"""
     snapshot_dir = config.reference_results_root / baseline_name / config.runtime.output_name
     snapshot_dir.mkdir(parents=True, exist_ok=True)
     for item in output_dir.iterdir():
@@ -80,6 +98,7 @@ def _snapshot_reference_outputs(config: AppConfig, baseline_name: str, output_di
 
 
 def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = None) -> None:
+    """统一执行入口。"""
     output_dir = config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     benchmark_spec = _build_benchmark_spec(config, config.inference_mode)
@@ -150,10 +169,12 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
                 "model_id": config.model.model_id,
                 "dataset_id": config.dataset.dataset_id,
                 "track": config.evaluation.track,
+                # 这里明确记录方法自身的推理模式，而不是盲目复用配置默认值。
                 "inference_mode": method.inference_mode.value,
             },
         ).to_dict()
     ]
+
     results = []
     eval_rows: List[Dict[str, Any]] = []
     for seed in config.runtime.seeds:
@@ -166,6 +187,7 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
         )
         results.append(_seed_result(seed, aggregate))
         eval_rows.extend([{**row, "seed": seed} for row in rows])
+
     summary = {
         "command": command,
         "baseline_name": baseline_name if command == "baseline" else "sam2_zero_shot",
@@ -174,7 +196,8 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
         "std": _std_numeric(results),
         "per_seed": results,
     }
-    output_paths = write_results(
+
+    write_results(
         output_dir,
         benchmark_spec=benchmark_spec,
         artifact_manifest={
@@ -204,6 +227,7 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
 
 
 def _mean_numeric(rows: List[Dict[str, Any]]) -> Dict[str, float]:
+    """计算 per-seed 结果的均值。"""
     numeric: Dict[str, List[float]] = {}
     for row in rows:
         for key, value in row.items():

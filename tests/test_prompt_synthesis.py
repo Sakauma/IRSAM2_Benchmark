@@ -1,11 +1,18 @@
+"""prompt synthesis 单元测试。
+
+Author: Egor Izmaylov
+"""
+
 import unittest
 
 import numpy as np
 
-from irsam2_benchmark.data.prompt_synthesis import connected_components, expand_box_xyxy, mask_to_point_prompt, mask_to_tight_box
+from irsam2_benchmark.data.prompt_synthesis import connected_components, expand_box_xyxy, mask_to_tight_box
 
 
 class PromptSynthesisTests(unittest.TestCase):
+    """验证 mask 到 prompt 的基本几何转换。"""
+
     def test_mask_to_tight_box(self):
         mask = np.zeros((10, 10), dtype=np.float32)
         mask[2:5, 3:7] = 1.0

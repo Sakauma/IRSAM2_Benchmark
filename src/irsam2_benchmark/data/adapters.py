@@ -1,10 +1,21 @@
+"""数据集 adapter 实现。
+
+Author: Egor Izmaylov
+
+这个模块是 benchmark 数据层的核心。它把不同原始数据格式统一映射到 `Sample`：
+- 原始 MultiModal；
+- COCO-like；
+- RBGT-Tiny；
+- 通用 `images/ + masks/`。
+"""
+
 from __future__ import annotations
 
 import json
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -16,6 +27,8 @@ from .sample import Sample
 
 @dataclass(frozen=True)
 class DatasetManifest:
+    """数据集摘要信息。"""
+
     adapter_name: str
     dataset_id: str
     root: str
@@ -31,11 +44,15 @@ class DatasetManifest:
 
 @dataclass(frozen=True)
 class LoadedDataset:
+    """adapter 加载完成后的数据容器。"""
+
     manifest: DatasetManifest
     samples: List[Sample]
 
 
 class DatasetAdapter:
+    """所有 adapter 的抽象基类。"""
+
     adapter_name = "base"
     notes = ""
 
@@ -43,6 +60,7 @@ class DatasetAdapter:
         raise NotImplementedError
 
     def load(self, config: AppConfig) -> LoadedDataset:
+        """统一构造 manifest 并返回样本列表。"""
         samples = self.load_samples(config)
         image_ids = {sample.frame_id for sample in samples}
         sequence_ids = {sample.sequence_id for sample in samples}
@@ -66,23 +84,28 @@ class DatasetAdapter:
 
 
 def _dataset_root(config: AppConfig) -> Path:
+    """返回当前数据集根目录。"""
     return config.dataset_root
 
 
 def _limit_reached(limit: int, count: int) -> bool:
+    """统一判断样本/图像上限是否触发。"""
     return limit > 0 and count >= limit
 
 
 def _mask_to_numpy(mask_path: Path) -> np.ndarray:
+    """读取 mask 文件。"""
     return np.array(Image.open(mask_path))
 
 
 def _image_size(image_path: Path) -> tuple[int, int]:
+    """读取图像宽高而不保留句柄。"""
     with Image.open(image_path) as image:
         return image.size
 
 
 def _polygon_to_mask(points: Sequence[float], height: int, width: int) -> np.ndarray:
+    """把 polygon 顶点 rasterize 成二值 mask。"""
     canvas = Image.new("L", (width, height), 0)
     xy = [(float(points[i]), float(points[i + 1])) for i in range(0, len(points), 2)]
     ImageDraw.Draw(canvas).polygon(xy, outline=1, fill=1)
@@ -90,11 +113,13 @@ def _polygon_to_mask(points: Sequence[float], height: int, width: int) -> np.nda
 
 
 def _sorted_files(root: Path, extensions: Sequence[str]) -> List[Path]:
+    """在根目录下按后缀筛选并稳定排序。"""
     lower = {ext.lower() for ext in extensions}
     return sorted([path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in lower])
 
 
 def _relative_sequence_id(path: Path, root: Path) -> str:
+    """根据相对路径推断 sequence_id。"""
     relative = path.relative_to(root)
     if relative.parent != Path("."):
         return relative.parent.as_posix()
@@ -102,6 +127,7 @@ def _relative_sequence_id(path: Path, root: Path) -> str:
 
 
 def _infer_device_source(path: Path, root: Path) -> str:
+    """根据目录或文件名前缀推断设备来源。"""
     relative = path.relative_to(root)
     if relative.parent != Path("."):
         return relative.parts[0]
@@ -113,6 +139,7 @@ def _infer_device_source(path: Path, root: Path) -> str:
 
 
 def _infer_frame_index(path: Path) -> int:
+    """从文件名中抽取最后一个数字片段作为 frame index。"""
     digits = re.findall(r"\d+", path.stem)
     return int(digits[-1]) if digits else 0
 
@@ -131,6 +158,7 @@ def _build_sample_from_mask(
     width: int,
     height: int,
 ) -> Sample:
+    """从显式 mask 构建统一 Sample。"""
     tight = mask_to_tight_box(mask_array)
     loose = expand_box_xyxy(tight, width=width, height=height)
     point = mask_to_point_prompt(mask_array)
@@ -157,6 +185,8 @@ def _build_sample_from_mask(
 
 
 class MultiModalAdapter(DatasetAdapter):
+    """原始 MultiModal 数据集 adapter。"""
+
     adapter_name = "multimodal_raw"
     notes = "Reads raw MultiModal img/ + label/ JSON files and synthesizes prompts from polygons."
 
@@ -214,6 +244,8 @@ class MultiModalAdapter(DatasetAdapter):
 
 
 class CocoLikeAdapter(DatasetAdapter):
+    """COCO-like 数据集 adapter。"""
+
     adapter_name = "coco_like"
     notes = "Reads COCO-style annotations and keeps mask-aware prompts when segmentation exists."
 
@@ -271,6 +303,8 @@ class CocoLikeAdapter(DatasetAdapter):
                     if _limit_reached(config.runtime.max_samples, len(samples)):
                         return samples
                     continue
+
+                # 如果没有 segmentation，就退化为 bbox-only 样本。
                 bbox_xywh = ann.get("bbox")
                 if not bbox_xywh or len(bbox_xywh) != 4:
                     continue
@@ -304,6 +338,8 @@ class CocoLikeAdapter(DatasetAdapter):
 
 
 class RBGTTinyIRAdapter(CocoLikeAdapter):
+    """RBGT-Tiny 灰度红外分支 adapter。"""
+
     adapter_name = "rbgt_tiny_ir_only"
     notes = "Reads RBGT-Tiny grayscale branch from COCO-style annotations."
 
@@ -312,10 +348,13 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
 
     def load_samples(self, config: AppConfig) -> List[Sample]:
         samples = super().load_samples(config)
+        # 当前 benchmark 只保留 01 灰度红外分支。
         return [sample for sample in samples if "/01/" in sample.image_path.as_posix() or "\\01\\" in str(sample.image_path)]
 
 
 class GenericImageMaskAdapter(DatasetAdapter):
+    """通用 `images/ + masks/` adapter。"""
+
     adapter_name = "generic_image_mask"
     notes = "Reads arbitrary images/ + masks/ datasets without requiring VOC/COCO conversion."
 
@@ -384,6 +423,7 @@ def _samples_from_generic_mask(
     mask_mode: str,
     class_map: Dict[str, str],
 ) -> List[Sample]:
+    """从通用 mask 图生成平台样本。"""
     if mask.ndim == 3:
         mask = mask[..., 0]
     mask = mask.astype(np.int64)
@@ -393,6 +433,7 @@ def _samples_from_generic_mask(
 
     resolved_mode = mask_mode
     if resolved_mode == "auto":
+        # 这里用简单规则推断 mask 语义，避免用户必须显式声明。
         resolved_mode = "binary" if len(positive_values) == 1 else "instance_id"
 
     samples: List[Sample] = []
@@ -460,6 +501,7 @@ def _samples_from_generic_mask(
 
 
 def _decode_coco_segmentation(segmentation: object, height: int, width: int) -> Optional[np.ndarray]:
+    """把 COCO polygon segmentation 解码成 mask。"""
     if not segmentation:
         return None
     if isinstance(segmentation, list):
@@ -473,6 +515,7 @@ def _decode_coco_segmentation(segmentation: object, height: int, width: int) -> 
 
 
 def _target_scale_from_area(area: float) -> str:
+    """根据目标面积划分 small / medium / large。"""
     if area < float(32 * 32):
         return "small"
     if area < float(96 * 96):
@@ -481,6 +524,7 @@ def _target_scale_from_area(area: float) -> str:
 
 
 def build_dataset_adapter(config: AppConfig) -> DatasetAdapter:
+    """按优先级选择合适的 adapter。"""
     adapters: List[DatasetAdapter] = [
         MultiModalAdapter(),
         RBGTTinyIRAdapter(),

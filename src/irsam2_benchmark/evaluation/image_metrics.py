@@ -1,18 +1,26 @@
+"""图像级评估指标。
+
+Author: Egor Izmaylov
+"""
+
 from __future__ import annotations
 
 import numpy as np
 
 
 def mask_iou(pred: np.ndarray, target: np.ndarray) -> float:
+    """计算二值 mask 的 IoU。"""
     pred_b = pred > 0.5
     target_b = target > 0.5
     union = float(np.logical_or(pred_b, target_b).sum())
     if union <= 0.0:
+        # 两边都为空时，按完全一致处理。
         return 1.0
     return float(np.logical_and(pred_b, target_b).sum()) / union
 
 
 def dice_score(pred: np.ndarray, target: np.ndarray) -> float:
+    """计算 Dice 系数。"""
     pred_b = pred > 0.5
     target_b = target > 0.5
     denom = float(pred_b.sum() + target_b.sum())
@@ -22,6 +30,7 @@ def dice_score(pred: np.ndarray, target: np.ndarray) -> float:
 
 
 def _boundary(mask: np.ndarray) -> np.ndarray:
+    """提取一个近似的 4 邻域边界图。"""
     mask_b = mask > 0.5
     up = np.pad(mask_b[1:, :], ((0, 1), (0, 0)))
     down = np.pad(mask_b[:-1, :], ((1, 0), (0, 0)))
@@ -32,6 +41,10 @@ def _boundary(mask: np.ndarray) -> np.ndarray:
 
 
 def boundary_f1(pred: np.ndarray, target: np.ndarray) -> float:
+    """计算边界 F1。
+
+    这是一个简化实现，但足够稳定地反映边界贴合程度。
+    """
     pred_b = _boundary(pred) > 0.5
     target_b = _boundary(target) > 0.5
     tp = float(np.logical_and(pred_b, target_b).sum())
@@ -49,6 +62,7 @@ def boundary_f1(pred: np.ndarray, target: np.ndarray) -> float:
 
 
 def bbox_iou(box_a: list[float] | None, box_b: list[float] | None) -> float:
+    """计算两个轴对齐框的 IoU。"""
     if box_a is None or box_b is None:
         return 0.0
     ax1, ay1, ax2, ay2 = box_a

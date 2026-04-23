@@ -1,13 +1,19 @@
+"""时序/视频评估指标。
+
+Author: Egor Izmaylov
+"""
+
 from __future__ import annotations
 
-from typing import Dict, Iterable, List
+from typing import Dict, List
 
 import numpy as np
 
-from .image_metrics import boundary_f1, mask_iou
+from .image_metrics import mask_iou
 
 
 def compute_temporal_metrics(sequence_rows: List[Dict[str, object]]) -> Dict[str, float]:
+    """根据单序列逐帧结果计算时序指标。"""
     if not sequence_rows:
         return {
             "temporal_iou_mean": 0.0,
@@ -30,6 +36,7 @@ def compute_temporal_metrics(sequence_rows: List[Dict[str, object]]) -> Dict[str
         next_mask = np.asarray(next_row["pred_mask"], dtype=np.float32)
         jitter.append(1.0 - mask_iou(prev_mask, next_mask))
 
+    # 用前 1/4 和后 1/4 的帧 IoU 差估计传播衰减。
     first_quarter = frame_ious[: max(1, len(frame_ious) // 4)]
     last_quarter = frame_ious[-max(1, len(frame_ious) // 4) :]
     track_tp = sum(1.0 for pred, gt in zip(presence, gt_presence) if pred > 0.0 and gt > 0.0)
@@ -43,5 +50,6 @@ def compute_temporal_metrics(sequence_rows: List[Dict[str, object]]) -> Dict[str
         "propagation_decay": float(np.mean(first_quarter) - np.mean(last_quarter)),
         "track_recall": float(track_recall),
         "track_precision": float(track_precision),
+        # 当前版本还没有目标级轨迹 ID 跟踪，因此先固定为 0。
         "identity_switch_count": 0.0,
     }

@@ -1,3 +1,8 @@
+"""核心共享类型导出。
+
+Author: Egor Izmaylov
+"""
+
 from .interfaces import (
     ArtifactRecord,
     InferenceMode,
