@@ -152,6 +152,50 @@ def _selected_rows(rows: list[dict], aliases: list[str], key: str) -> list[dict]
     return [row for row in rows if row[key] in allowed]
 
 
+def _checkpoint_root() -> Path:
+    """Resolve the preferred official-checkpoint root for matrix runs.
+
+    Priority:
+    1. SAM2_CKPT_ROOT
+    2. CHECKPOINT_ROOT
+    3. SAM2_REPO/checkpoints
+    """
+    explicit = os.environ.get("SAM2_CKPT_ROOT") or os.environ.get("CHECKPOINT_ROOT")
+    if explicit:
+        return Path(explicit)
+    sam2_repo = Path(os.environ.get("SAM2_REPO", "/root/sam2"))
+    return sam2_repo / "checkpoints"
+
+
+def _resolve_model_ckpt(model: dict) -> str:
+    """Resolve one official SAM2 checkpoint to an absolute path.
+
+    We fail early with a helpful message so the user does not have to dig
+    through the downstream SAM2 loading stack to see which file is missing.
+    """
+    raw = Path(model["ckpt"])
+    if raw.is_absolute():
+        if not raw.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {raw}")
+        return str(raw)
+
+    candidate = _checkpoint_root() / raw.name
+    if candidate.exists():
+        return str(candidate)
+
+    sam2_repo_candidate = Path(os.environ.get("SAM2_REPO", "/root/sam2")) / raw
+    if sam2_repo_candidate.exists():
+        return str(sam2_repo_candidate)
+
+    raise FileNotFoundError(
+        "Official SAM2 checkpoint not found for matrix run.\n"
+        f"  model alias: {model['alias']}\n"
+        f"  expected under checkpoint root: {_checkpoint_root() / raw.name}\n"
+        f"  fallback repo-relative path: {sam2_repo_candidate}\n"
+        "Please set SAM2_CKPT_ROOT (or CHECKPOINT_ROOT) to the directory that contains the official SAM2.1 .pt files."
+    )
+
+
 def main() -> int:
     python_bin = os.environ.get("PYTHON_BIN", sys.executable or "python")
     artifact_root = Path(os.environ.get("ARTIFACT_ROOT", str(PROJECT_ROOT / "artifacts")))
@@ -184,7 +228,7 @@ def main() -> int:
                     payload = json.loads(json.dumps(base_config))
                     payload["model"]["model_id"] = model["model_id"]
                     payload["model"]["cfg"] = model["cfg"]
-                    payload["model"]["ckpt"] = model["ckpt"]
+                    payload["model"]["ckpt"] = _resolve_model_ckpt(model)
                     payload["runtime"]["save_visuals"] = True
                     payload["runtime"]["visual_limit"] = visual_limit
                     payload["runtime"]["seeds"] = selected_seeds

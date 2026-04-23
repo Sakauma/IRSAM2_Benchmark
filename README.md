@@ -83,6 +83,13 @@ You can narrow the matrix with environment variables:
 MATRIX_MODELS=tiny,small MATRIX_DATASETS=multimodal MATRIX_MODES=box,point bash scripts/run_official_baseline_matrix.sh
 ```
 
+If your official SAM2.1 checkpoints are not stored under `${SAM2_REPO}/checkpoints`, set a dedicated checkpoint root before running the matrix:
+
+```bash
+export SAM2_CKPT_ROOT=/path/to/official_sam2_checkpoints
+bash scripts/run_official_baseline_matrix.sh
+```
+
 For AutoDL-style servers, there is also a bootstrap workflow:
 
 ```bash
