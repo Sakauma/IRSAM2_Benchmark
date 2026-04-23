@@ -62,6 +62,21 @@ bash scripts/run_baseline.sh configs/benchmark_v1.yaml sam2_zero_shot_point
 bash scripts/run_tests.sh
 ```
 
+For AutoDL-style servers, there is also a bootstrap workflow:
+
+```bash
+bash scripts/setup_autodl_server.sh
+source .autodl_env.sh
+bash scripts/run_autodl_smoke.sh multimodal sam2_zero_shot
+bash scripts/run_autodl_smoke.sh rbgt sam2_zero_shot
+```
+
+The AutoDL helper assumes:
+
+- dataset archives are stored under `/root/autodl-fs`
+- extracted datasets, outputs, and checkpoints live under `/root/autodl-tmp`
+- the SAM2 repository is available at `/root/sam2` unless `SAM2_REPO` is overridden
+
 ## Machine Paths
 
 Machine-specific paths are configured through:

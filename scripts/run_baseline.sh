@@ -11,6 +11,7 @@ set -euo pipefail
 
 CONFIG_PATH="${1:-configs/benchmark_v1.yaml}"
 BASELINE_NAME="${2:-bbox_rect}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
 # 以脚本所在目录的父目录作为项目根目录，避免从任意 cwd 调用时路径错乱。
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,4 +22,4 @@ cd "${PROJECT_ROOT}"
 # 统一把 src 注入导入路径，这样无需预先安装 package 也能直接运行。
 export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
-python main.py run baseline --config "${CONFIG_PATH}" --baseline "${BASELINE_NAME}"
+"${PYTHON_BIN}" main.py run baseline --config "${CONFIG_PATH}" --baseline "${BASELINE_NAME}"
