@@ -59,7 +59,28 @@ For Linux servers, the `scripts/` directory now includes shell entrypoints:
 bash scripts/run_smoke.sh
 bash scripts/run_smoke.sh sam2_zero_shot
 bash scripts/run_baseline.sh configs/benchmark_v1.yaml sam2_zero_shot_point
+bash scripts/run_official_baseline_matrix.sh
 bash scripts/run_tests.sh
+```
+
+The official baseline matrix script runs:
+
+- 4 official SAM2.1 checkpoints
+- 2 datasets (`MultiModalCOCOClean`, `RBGT-Tiny`)
+- 4 modes (`box`, `point`, `box+point`, `no_prompt_auto_mask`)
+
+and writes:
+
+- per-run frozen benchmark outputs
+- grouped JSON reports
+- qualitative PNG overlays
+- tqdm progress bars during inference when the environment has the declared project dependencies installed
+- a matrix-level `matrix_summary.json` and `matrix_summary.csv`
+
+You can narrow the matrix with environment variables:
+
+```bash
+MATRIX_MODELS=tiny,small MATRIX_DATASETS=multimodal MATRIX_MODES=box,point bash scripts/run_official_baseline_matrix.sh
 ```
 
 For AutoDL-style servers, there is also a bootstrap workflow:
