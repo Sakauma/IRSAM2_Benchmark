@@ -51,6 +51,17 @@ The smoke config is intentionally small enough to validate:
 - report schema and grouped eval outputs
 - reference snapshot generation under `reference_results/`
 
+## Linux Scripts
+
+For Linux servers, the `scripts/` directory now includes shell entrypoints:
+
+```bash
+bash scripts/run_smoke.sh
+bash scripts/run_smoke.sh sam2_zero_shot
+bash scripts/run_baseline.sh configs/benchmark_v1.yaml sam2_zero_shot_point
+bash scripts/run_tests.sh
+```
+
 ## Machine Paths
 
 Machine-specific paths are configured through:
@@ -124,6 +135,17 @@ python -m irsam2_benchmark.cli run baseline --config configs/benchmark_smoke.yam
 - `SAM2` checkpoint 接线是否正确
 - report schema 与分组评测输出
 - `reference_results/` 下的快照生成
+
+### Linux 脚本
+
+现在 `scripts/` 目录里也提供了 Linux 下可直接运行的 shell 脚本：
+
+```bash
+bash scripts/run_smoke.sh
+bash scripts/run_smoke.sh sam2_zero_shot
+bash scripts/run_baseline.sh configs/benchmark_v1.yaml sam2_zero_shot_point
+bash scripts/run_tests.sh
+```
 
 ### 机器相关路径
 
