@@ -104,6 +104,19 @@ def _image_size(image_path: Path) -> tuple[int, int]:
         return image.size
 
 
+def _load_json_with_prefix_cleanup(path: Path) -> Dict[str, object]:
+    """Load JSON files that may contain a small non-JSON prefix."""
+    text = path.read_text(encoding="utf-8")
+    stripped = text.lstrip()
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        first_brace = stripped.find("{")
+        if first_brace > 0:
+            return json.loads(stripped[first_brace:])
+        raise
+
+
 def _polygon_to_mask(points: Sequence[float], height: int, width: int) -> np.ndarray:
     """把 polygon 顶点 rasterize 成二值 mask。"""
     canvas = Image.new("L", (width, height), 0)
@@ -161,7 +174,6 @@ def _build_sample_from_mask(
     """从显式 mask 构建统一 Sample。"""
     tight = mask_to_tight_box(mask_array)
     loose = expand_box_xyxy(tight, width=width, height=height)
-    point = mask_to_point_prompt(mask_array)
     target_scale = _target_scale_from_area(float((mask_array > 0.5).sum()))
     return Sample(
         image_path=image_path,
@@ -179,7 +191,7 @@ def _build_sample_from_mask(
         supervision_type="mask",
         bbox_tight=tight,
         bbox_loose=loose,
-        point_prompt=point,
+        point_prompt=None,
         mask_array=mask_array.astype(np.float32),
     )
 
@@ -521,6 +533,116 @@ def _target_scale_from_area(area: float) -> str:
     if area < float(96 * 96):
         return "medium"
     return "large"
+
+
+class RBGTTinyIRAdapter(CocoLikeAdapter):
+    """RBGT-Tiny 灰度红外分支 adapter。
+
+    这里重新定义一次类，覆盖前面较宽泛的实现。RBGT-Tiny 的 COCO 标注同时
+    包含可见光 `00` 和红外 `01` 两套大文件；如果先按通用 COCO 全量解析，
+    再过滤 `/01/`，full benchmark 会在前处理阶段消耗大量 CPU 和内存。
+    """
+
+    adapter_name = "rbgt_tiny_ir_only"
+    notes = "Reads only the RBGT-Tiny infrared 01 branch from COCO-style annotations."
+
+    def can_handle(self, config: AppConfig) -> bool:
+        return config.dataset.adapter == self.adapter_name or config.dataset.dataset_id == "RBGT-Tiny"
+
+    def load_samples(self, config: AppConfig) -> List[Sample]:
+        root = _dataset_root(config)
+        ann_dir = root / (config.dataset.annotations_dir or "annotations_coco")
+        image_root = root / (config.dataset.images_dir or "image")
+
+        ann_files = sorted(ann_dir.glob("instances_01_*.json"))
+        if not ann_files:
+            ann_files = sorted(ann_dir.glob("*01*.json"))
+
+        samples: List[Sample] = []
+        seen_images: set[str] = set()
+        for ann_path in ann_files:
+            data = _load_json_with_prefix_cleanup(ann_path)
+            images = {item["id"]: item for item in data.get("images", [])}
+            categories = {item["id"]: item.get("name", str(item["id"])) for item in data.get("categories", [])}
+
+            for ann in data.get("annotations", []):
+                image_info = images.get(ann.get("image_id"))
+                if image_info is None:
+                    continue
+
+                file_name = image_info["file_name"]
+                normalized_name = Path(file_name).as_posix()
+                if "/01/" not in f"/{normalized_name}":
+                    continue
+
+                image_path = image_root / file_name
+                if not image_path.exists():
+                    continue
+
+                if _limit_reached(config.runtime.max_images, len(seen_images)) and file_name not in seen_images:
+                    return samples
+                seen_images.add(file_name)
+
+                width = int(image_info.get("width", _image_size(image_path)[0]))
+                height = int(image_info.get("height", _image_size(image_path)[1]))
+                sequence_id = _relative_sequence_id(image_path, image_root)
+                frame_index = _infer_frame_index(image_path)
+                device_source = _infer_device_source(image_path, image_root)
+                frame_id = f"{normalized_name}__ann_{ann.get('id')}"
+                category = categories.get(ann.get("category_id"), "unknown")
+
+                segmentation = ann.get("segmentation")
+                mask_array = _decode_coco_segmentation(segmentation, height=height, width=width)
+                if mask_array is not None:
+                    samples.append(
+                        _build_sample_from_mask(
+                            image_path=image_path,
+                            frame_id=frame_id,
+                            sequence_id=sequence_id,
+                            frame_index=frame_index,
+                            temporal_key=frame_id,
+                            category=category,
+                            device_source=device_source,
+                            annotation_protocol_flag="coco_segmentation",
+                            mask_array=mask_array,
+                            width=width,
+                            height=height,
+                        )
+                    )
+                    if _limit_reached(config.runtime.max_samples, len(samples)):
+                        return samples
+                    continue
+
+                bbox_xywh = ann.get("bbox")
+                if not bbox_xywh or len(bbox_xywh) != 4:
+                    continue
+
+                x, y, w, h = [float(v) for v in bbox_xywh]
+                tight = [x, y, x + w, y + h]
+                loose = expand_box_xyxy(tight, width=width, height=height)
+                samples.append(
+                    Sample(
+                        image_path=image_path,
+                        sample_id=frame_id,
+                        frame_id=frame_id,
+                        sequence_id=sequence_id,
+                        frame_index=frame_index,
+                        temporal_key=frame_id,
+                        width=width,
+                        height=height,
+                        category=category,
+                        target_scale=_target_scale_from_area(w * h),
+                        device_source=device_source,
+                        annotation_protocol_flag="coco_bbox_only",
+                        supervision_type="bbox",
+                        bbox_tight=tight,
+                        bbox_loose=loose,
+                        point_prompt=None,
+                    )
+                )
+                if _limit_reached(config.runtime.max_samples, len(samples)):
+                    return samples
+        return samples
 
 
 def build_dataset_adapter(config: AppConfig) -> DatasetAdapter:

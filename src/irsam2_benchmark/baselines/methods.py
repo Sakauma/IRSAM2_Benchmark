@@ -18,7 +18,7 @@ import numpy as np
 
 from ..config import AppConfig
 from ..core.interfaces import InferenceMode
-from ..data.prompt_synthesis import clamp_box_xyxy
+from ..data.prompt_synthesis import clamp_box_xyxy, mask_to_point_prompt
 from ..data.sample import Sample
 from ..models import SAM2ModelAdapter, load_image_rgb
 
@@ -87,12 +87,18 @@ class ZeroShotSAM2(BaseMethod):
         if self.inference_mode == InferenceMode.BOX:
             kwargs["box"] = sample.bbox_loose or sample.bbox_tight
         elif self.inference_mode == InferenceMode.POINT:
-            kwargs["points"] = np.array([sample.point_prompt], dtype=np.float32) if sample.point_prompt else None
-            kwargs["point_labels"] = np.array([1], dtype=np.int32) if sample.point_prompt else None
+            point_prompt = sample.point_prompt
+            if point_prompt is None and sample.mask_array is not None:
+                point_prompt = mask_to_point_prompt(sample.mask_array)
+            kwargs["points"] = np.array([point_prompt], dtype=np.float32) if point_prompt else None
+            kwargs["point_labels"] = np.array([1], dtype=np.int32) if point_prompt else None
         elif self.inference_mode == InferenceMode.BOX_POINT:
             kwargs["box"] = sample.bbox_loose or sample.bbox_tight
-            kwargs["points"] = np.array([sample.point_prompt], dtype=np.float32) if sample.point_prompt else None
-            kwargs["point_labels"] = np.array([1], dtype=np.int32) if sample.point_prompt else None
+            point_prompt = sample.point_prompt
+            if point_prompt is None and sample.mask_array is not None:
+                point_prompt = mask_to_point_prompt(sample.mask_array)
+            kwargs["points"] = np.array([point_prompt], dtype=np.float32) if point_prompt else None
+            kwargs["point_labels"] = np.array([1], dtype=np.int32) if point_prompt else None
         elif self.inference_mode in {InferenceMode.SINGLE_MASK, InferenceMode.MULTI_MASK}:
             # 当前平台对 single/multi mask 的默认初始化仍然基于 box。
             kwargs["box"] = sample.bbox_loose or sample.bbox_tight
