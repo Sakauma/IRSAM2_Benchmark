@@ -213,6 +213,7 @@ def main() -> int:
                     payload["model"]["ckpt"] = _resolve_model_ckpt(model)
                     payload["runtime"]["save_visuals"] = True
                     payload["runtime"]["visual_limit"] = visual_limit
+                    payload["runtime"]["update_reference_results"] = False
                     payload["runtime"]["seeds"] = selected_seeds
                     payload["runtime"]["output_name"] = (
                         f"official_baseline_matrix/{dataset['alias']}/{model['alias']}/{baseline['alias']}"

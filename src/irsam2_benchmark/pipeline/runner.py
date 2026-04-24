@@ -10,8 +10,10 @@ from ..baselines import build_baseline_registry
 from ..config import AppConfig
 from ..core.interfaces import ArtifactRecord, InferenceMode, PipelineStage, PromptPolicy, PromptSource, PromptType
 from ..data import build_dataset_adapter
+from ..data.views import build_image_view, build_track_view
 from ..evaluation.reporting import write_results
 from ..evaluation.runner import evaluate_method
+from ..evaluation.visualization import save_visualizations
 from .stages import run_adapt_stage, run_distill_stage, run_quantize_stage, run_transfer_stage
 
 
@@ -80,6 +82,70 @@ def _snapshot_reference_outputs(config: AppConfig, baseline_name: str, output_di
             shutil.copytree(item, target)
         else:
             shutil.copy2(item, target)
+
+
+def _visual_gt_mask(sample) -> np.ndarray:
+    if sample.mask_array is not None:
+        return np.asarray(sample.mask_array, dtype=np.float32)
+    return np.zeros((sample.height, sample.width), dtype=np.float32)
+
+
+def _build_visual_records(
+    *,
+    method,
+    samples,
+    inference_mode: InferenceMode,
+    visual_limit: int,
+) -> List[Dict[str, Any]]:
+    if visual_limit <= 0:
+        return []
+
+    records: List[Dict[str, Any]] = []
+    if inference_mode == InferenceMode.NO_PROMPT_AUTO_MASK:
+        image_view = build_image_view(samples)
+        for _, items in image_view.items():
+            representative = items[0]
+            prediction = method.predict_sample(representative)
+            gt_instances = [{"mask": item.mask_array} for item in items if item.mask_array is not None]
+            records.append(
+                {
+                    "sample": representative,
+                    "gt_instances": gt_instances,
+                    "pred_instances": prediction.get("instances", []),
+                }
+            )
+            if len(records) >= visual_limit:
+                break
+        return records
+
+    if inference_mode == InferenceMode.VIDEO_PROPAGATION:
+        track_view = build_track_view(samples)
+        for _, items in track_view.items():
+            predictions = method.predict_sequence(items)
+            for item in items:
+                pred_mask = np.asarray(predictions[item.sample_id], dtype=np.float32)
+                records.append(
+                    {
+                        "sample": item,
+                        "pred_mask": pred_mask,
+                        "gt_mask": _visual_gt_mask(item),
+                    }
+                )
+                if len(records) >= visual_limit:
+                    return records
+        return records
+
+    for item in samples[:visual_limit]:
+        prediction = method.predict_sample(item)
+        pred_mask = np.asarray(prediction["mask"], dtype=np.float32)
+        records.append(
+            {
+                "sample": item,
+                "pred_mask": pred_mask,
+                "gt_mask": _visual_gt_mask(item),
+            }
+        )
+    return records
 
 
 def set_global_seed(seed: int) -> None:
@@ -186,6 +252,30 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
         )
         results.append(_seed_result(seed, aggregate))
         eval_rows.extend([{**row, "seed": seed} for row in rows])
+        if config.runtime.save_visuals:
+            visual_records = _build_visual_records(
+                method=method,
+                samples=dataset.samples,
+                inference_mode=method.inference_mode,
+                visual_limit=max(0, int(config.runtime.visual_limit)),
+            )
+            visual_paths = save_visualizations(
+                output_dir=output_dir,
+                visual_records=visual_records,
+                inference_mode=method.inference_mode,
+                method_name=resolved_baseline_name,
+                seed=seed,
+            )
+            if visual_paths:
+                visual_dir = output_dir / "visuals" / resolved_baseline_name / f"seed_{seed}"
+                artifact_records.append(
+                    ArtifactRecord(
+                        stage=PipelineStage.EVALUATE.value,
+                        artifact_dir=str(visual_dir),
+                        artifact_name=f"visuals_seed_{seed}",
+                        metadata={"count": len(visual_paths), "paths": [str(path) for path in visual_paths]},
+                    ).to_dict()
+                )
     summary = {
         "command": command,
         "baseline_name": resolved_baseline_name,
@@ -219,7 +309,7 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
         results=results,
         eval_rows=eval_rows,
     )
-    if command == "baseline":
+    if command == "baseline" and config.runtime.update_reference_results:
         _snapshot_reference_outputs(config, resolved_baseline_name, output_dir)
 
 

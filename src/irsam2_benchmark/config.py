@@ -65,6 +65,8 @@ class RuntimeConfig:
     max_samples: int = 0
     max_images: int = 0
     save_visuals: bool = True
+    visual_limit: int = 24
+    update_reference_results: bool = True
     seeds: list[int] = field(default_factory=lambda: [42, 123, 456])
 
 
