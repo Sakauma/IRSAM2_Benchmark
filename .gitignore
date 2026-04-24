@@ -5,3 +5,5 @@ __pycache__/
 artifacts/
 reference_results/*
 !reference_results/README.md
+
+AGENTS.md
