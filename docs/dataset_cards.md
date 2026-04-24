@@ -1,8 +1,8 @@
-# Dataset Cards
+# 数据集卡片
 
-## Required Fields
+## 必需字段
 
-Every dataset adapter must emit a unified `Sample` schema with:
+每个数据集 adapter 都必须产出统一的 `Sample` schema，至少包含：
 
 - `image_path`
 - `sample_id`
@@ -10,33 +10,33 @@ Every dataset adapter must emit a unified `Sample` schema with:
 - `sequence_id`
 - `frame_index`
 - `temporal_key`
-- `track_id` (optional, required for Track C / video propagation)
+- `track_id`（可选，但 Track C / 视频传播场景下必需）
 - `category`
 - `device_source`
 - `annotation_protocol_flag`
 - `supervision_type`
 
-Field semantics:
+字段语义：
 
-- `frame_id`: image-level identifier shared by all instances from the same frame
-- `sample_id`: instance-level unique identifier
-- `track_id`: explicit cross-frame identity when the dataset can support sequence propagation evaluation
+- `frame_id`：图像级标识符，同一帧中的所有实例共享它
+- `sample_id`：实例级唯一标识符
+- `track_id`：当数据集支持跨帧传播评估时，显式表示同一目标的跨帧身份
 
-## Supported Dataset Families
+## 已支持的数据集族
 
-- `MultiModalAdapter`: raw `img/ + label/`
-- `CocoLikeAdapter`: `annotations_coco/ + image/`
-- `RBGTTinyIRAdapter`: RBGT-Tiny grayscale branch
-- `GenericImageMaskAdapter`: arbitrary `images/ + masks/`
+- `MultiModalAdapter`：原始 `img/ + label/`
+- `CocoLikeAdapter`：`annotations_coco/ + image/`
+- `RBGTTinyIRAdapter`：`RBGT-Tiny` 灰度红外分支
+- `GenericImageMaskAdapter`：任意 `images/ + masks/`
 
-## Generic Image+Mask Policy
+## 通用 Image+Mask 策略
 
-`GenericImageMaskAdapter` must support:
+`GenericImageMaskAdapter` 必须支持：
 
-- binary foreground masks
-- class-index masks
-- instance-id masks
+- 二值前景 mask
+- 类别索引 mask
+- 实例 id mask
 
-For `instance-id` masks, the instance value may be reused as `track_id` when that value is explicitly stable across frames.
+对于 `instance-id` mask，如果某个实例值在跨帧语义上是稳定的，那么该值可以直接复用为 `track_id`。
 
-If prompts are not explicitly annotated, deterministic prompt synthesis is mandatory.
+如果数据集中没有显式 prompt 标注，则必须使用确定性的 prompt synthesis。

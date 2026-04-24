@@ -1,23 +1,23 @@
-# Metric Cards
+# 指标卡片
 
-## Core Image Metrics
+## 核心图像指标
 
-- `mIoU`: mask IoU between prediction and GT
-- `Dice`: Sørensen–Dice score
-- `BoundaryF1`: boundary-aware F1
-- `LatencyMs`: per-sample or per-frame inference latency
+- `mIoU`：预测 mask 与 GT mask 的 IoU
+- `Dice`：Sørensen-Dice 分数
+- `BoundaryF1`：边界感知 F1
+- `LatencyMs`：单样本或单帧推理时延
 
-## Prompt / Protocol Audit Metrics
+## Prompt / 协议审计指标
 
-- `BBoxIoU`: IoU between the predicted mask tight box and the GT tight box
+- `BBoxIoU`：预测 mask 的 tight box 与 GT tight box 之间的 IoU
 - `TightBoxMaskIoU`
 - `LooseBoxMaskIoU`
 - `PredAreaRatio`
 - `GTAreaRatio`
 
-## Automatic Masking Metrics
+## 自动分割指标
 
-- image-level evaluation: one automatic-mask inference per image, then matched against all GT instances from that image
+- 图像级评估：每张图只做一次 automatic-mask 推理，再与该图中的全部 GT 实例匹配
 - `num_pred_instances`
 - `num_matched_instances`
 - `instance_precision`
@@ -25,9 +25,9 @@
 - `instance_f1`
 - `matched_instance_iou`
 
-## Temporal Metrics
+## 时序指标
 
-- Track C rows are evaluated per `(sequence_id, track_id)` stream
+- Track C 按 `(sequence_id, track_id)` 流进行评估
 - `temporal_iou_mean`
 - `temporal_boundary_f1`
 - `mask_jitter_score`

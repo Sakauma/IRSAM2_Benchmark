@@ -1,24 +1,24 @@
-# Documentation Map
+# 文档索引
 
-This directory holds the repository's benchmark-facing documentation.
+本目录存放仓库中所有面向 benchmark 的说明文档。
 
-## Core Specs
+## 核心规范
 
-- `artifact_schema_spec.md`: output files and reporting schema
-- `prompt_policy_spec.md`: prompt budget and prompt-source rules
-- `track_definitions.md`: Track A/B/C/D semantics
-- `metric_cards.md`: metric definitions and interpretation notes
-- `dataset_cards.md`: dataset adapter assumptions and dataset-facing notes
+- `artifact_schema_spec.md`：输出文件与报告 schema
+- `prompt_policy_spec.md`：prompt 预算与 prompt 来源规则
+- `track_definitions.md`：Track A/B/C/D 的语义定义
+- `metric_cards.md`：指标定义与解释说明
+- `dataset_cards.md`：数据集 adapter 假设与数据侧说明
 
-## Implementation Notes
+## 实现说明
 
-- `implementation_notes.md`: current implementation constraints and runtime notes
+- `implementation_notes.md`：当前实现边界与运行时说明
 
-## Historical Notes
+## 历史说明
 
-- `remote_session_handoff.md`: archived operator handoff note from an earlier remote workflow
+- `remote_session_handoff.md`：早期远程工作流遗留的交接说明
 
-If you are new to the repository, start with the root `README.md`, then read:
+如果你第一次接触这个仓库，建议先阅读根目录 `README.md`，然后按下面顺序继续：
 
 1. `track_definitions.md`
 2. `metric_cards.md`

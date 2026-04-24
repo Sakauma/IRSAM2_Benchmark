@@ -1,6 +1,6 @@
-# Prompt Policy Spec
+# Prompt Policy 规范
 
-Prompt policy is a frozen benchmark object. It must specify:
+Prompt policy 是冻结的 benchmark 对象，必须显式给出：
 
 - `prompt_type`
 - `prompt_source`
@@ -8,10 +8,10 @@ Prompt policy is a frozen benchmark object. It must specify:
 - `refresh_interval`
 - `multi_mask`
 
-## Default Video Policy
+## 默认视频策略
 
-- first frame GT prompt
-- sparse refresh allowed
-- fixed refresh interval
+- 首帧使用 GT prompt
+- 允许稀疏 refresh
+- 使用固定 refresh 间隔
 
-This avoids unfair comparisons between methods with different prompt budgets.
+这样可以避免不同方法在 prompt 预算不同的情况下发生不公平对比。

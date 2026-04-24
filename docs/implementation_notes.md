@@ -1,51 +1,51 @@
-# Implementation Notes
+# 实现说明
 
-This note records the first implementation pass of the greenfield `IRSAM2_Benchmark` project.
+本文档记录了全新 `IRSAM2_Benchmark` 工程的第一轮实现情况。
 
-## Implemented in this pass
+## 本轮已实现
 
-- Created a new standalone project layout under `IRSAM2_Benchmark/`
-- Added a package-based CLI and config loader
-- Added dataset adapters for:
-  - raw `MultiModal`
-  - COCO-like datasets
-  - `RBGT-Tiny` IR-only view
-  - generic `images/ + masks/` datasets
-- Added deterministic prompt synthesis for mask-only datasets:
+- 在 `IRSAM2_Benchmark/` 下创建了新的独立工程结构
+- 增加了基于 package 的 CLI 与配置加载器
+- 增加了以下数据集 adapter：
+  - 原始 `MultiModal`
+  - COCO-like 数据集
+  - `RBGT-Tiny` 红外单分支视图
+  - 通用 `images/ + masks/` 数据集
+- 为 mask-only 数据集增加了确定性的 prompt synthesis：
   - tight box
   - loose box
   - point prompt
-- Added first-class SAM2 baselines:
+- 增加了一等公民化的 SAM2 baseline：
   - `BBoxRectMaskBaseline`
   - `ZeroShotSAM2`
   - `NoPromptAutoMaskSAM2`
   - `ZeroShotSAM2VideoPropagation`
-- Added benchmark governance fields:
+- 增加了 benchmark 治理字段：
   - `benchmark_version`
   - `split_version`
   - `prompt_policy_version`
   - `metric_schema_version`
   - `reference_result_version`
-- Added grouped evaluation reports and reference snapshot generation
+- 增加了分组评估报告与参考结果快照生成
 
-## Validation completed
+## 已完成验证
 
-- Python syntax validation passed in WSL
-- Unit tests passed in the `sam_hq2` environment
-- End-to-end `bbox_rect` baseline run completed on `MultiModalCOCOClean`
-- Real `SAM2` smoke validation completed for:
+- WSL 下通过了 Python 语法验证
+- `sam_hq2` 环境下单元测试已通过
+- 在 `MultiModalCOCOClean` 上完成了 `bbox_rect` 的端到端 baseline 运行
+- 已完成真实 `SAM2` smoke 验证：
   - `sam2_zero_shot`
   - `sam2_zero_shot_point`
   - `sam2_no_prompt_auto_mask`
 
-## Current boundary
+## 当前边界
 
-The platform skeleton, result schema, dataset layer, and baseline layer are operational.
+平台骨架、结果 schema、数据层和 baseline 层已经可运行。
 
-The full pipeline stages:
+完整 pipeline 中的以下 stage：
 
 - `adapt`
 - `distill`
 - `quantize`
 
-already have stable stage interfaces and artifact scaffolding, but they are not yet final paper methods.
+虽然已经具备稳定的 stage 接口和 artifact scaffold，但目前还不是最终论文方法。

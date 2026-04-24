@@ -1,18 +1,18 @@
-# Track Definitions
+# Track 定义
 
-## Track A: Image Prompted Segmentation
+## Track A：图像级 Prompted Segmentation
 
-Prompted segmentation with `box`, `point`, or `box+point`.
+在 `box`、`point` 或 `box+point` 条件下进行提示式分割评估。
 
-## Track B: No-Prompt Automatic Masking
+## Track B：无 Prompt Automatic Masking
 
-Prompt-free automatic mask generation with image-level inference and instance matching against all GT objects in that image.
+不提供外部 prompt，直接做 automatic mask generation，并在图像级与该图中的全部 GT 实例进行匹配评估。
 
-## Track C: Sequence / Video Propagation
+## Track C：序列 / 视频传播
 
-Sequence-aware inference using SAM2 temporal propagation with frozen prompt policy.
-This track requires explicit `track_id` values so each propagated stream represents one real target across frames.
+使用带冻结 prompt policy 的 SAM2 时序传播能力进行 sequence-aware 推理。
+该 track 要求显式 `track_id`，从而确保每条传播流都对应真实的跨帧目标。
 
-## Track D: Full Pipeline Deployment
+## Track D：完整部署链路
 
-Compare `adapted teacher -> student -> quantized student` under both image and temporal metrics.
+同时在图像指标和时序指标下比较 `adapted teacher -> student -> quantized student`。

@@ -1,100 +1,99 @@
-# Remote Session Handoff
+# 远程会话交接说明
 
 Author: Egor Izmaylov
 
-## Purpose
+## 用途
 
-This file is a handoff note for a fresh Codex session opened inside a remote VS Code window.
-If the remote Codex session does not share the local conversation history, read this file first
-and continue from the state recorded below.
+这个文件是给在远程 VS Code 窗口中开启的新 Codex 会话使用的交接说明。
+如果远程 Codex 会话无法共享本地对话历史，请先阅读本文件，再根据下面记录的状态继续工作。
 
-## Repository State
+## 仓库状态
 
-- Repository root: `/root/autodl-tmp/IRSAM2_Benchmark` on the rented server
-- Latest expected commit: `2f05405 feat: add autodl bootstrap scripts`
-- Old repo/workflow is historical only; the active benchmark code is the new package-based platform
-- Current benchmark repo on the local machine lives at:
+- 服务器上的仓库根目录：`/root/autodl-tmp/IRSAM2_Benchmark`
+- 当时预期的最新提交：`2f05405 feat: add autodl bootstrap scripts`
+- 旧仓库/旧工作流仅保留为历史参考；当前实际使用的是新的 package-based benchmark 平台
+- 本地机器上的 benchmark 仓库当时位于：
   - `D:/workspace/sam_ir/ir_sam2_bench`
 
-## What Has Been Implemented
+## 已实现内容
 
-The benchmark platform itself is already usable.
+benchmark 平台本身已经可用。
 
-Implemented:
+已实现：
 
-- package-based benchmark structure
-- dataset adapters
-- generic `images/ + masks/` support
-- prompt synthesis from mask-only datasets
+- 基于 package 的 benchmark 结构
+- 数据集 adapter
+- 通用 `images/ + masks/` 支持
+- 面向 mask-only 数据集的 prompt synthesis
 - baseline registry
 - `bbox_rect`
 - `sam2_zero_shot`
 - `sam2_zero_shot_point`
 - `sam2_zero_shot_box_point`
 - `sam2_no_prompt_auto_mask`
-- `sam2_video_propagation` interface
-- frozen artifact/report schema
-- Linux helper scripts
-- AutoDL bootstrap scripts
+- `sam2_video_propagation` 接口
+- 冻结的 artifact / report schema
+- Linux 辅助脚本
+- AutoDL 启动脚本
 
-Not yet fully implemented as paper methods:
+尚未完整实现为论文方法的部分：
 
 - `adapt`
 - `distill`
 - `quantize`
 
-These three currently exist as stable stage scaffolds, not final training methods.
+这三个阶段目前只是稳定的 stage scaffold，还不是最终训练方法。
 
-## AutoDL Server Assumptions
+## AutoDL 服务器假设
 
-The rented server uses:
+当时租用服务器的目录约定为：
 
-- `/root/autodl-tmp` as the fast data/runtime disk
-- `/root/autodl-fs` as the persistent archive/storage disk
+- `/root/autodl-tmp`：高速数据盘 / 运行盘
+- `/root/autodl-fs`：持久化归档 / 存储盘
 
-The user said the uploaded dataset archives are:
+用户当时说明已经上传的数据集压缩包包括：
 
 - `MultiModalCOCOClean.zip`
 - `RBGT-Tiny.tar.gz`
 
-They are expected under:
+预期路径为：
 
 - `/root/autodl-fs/MultiModalCOCOClean.zip`
 - `/root/autodl-fs/RBGT-Tiny.tar.gz`
 
-The user already has:
+用户当时已有：
 
 - `/root/sam2`
 - `/root/sam-hq`
 - `/root/miniconda3`
 
-## Recommended Server Layout
+## 推荐服务器目录布局
 
-Use these runtime locations:
+推荐使用以下运行路径：
 
-- repo: `/root/autodl-tmp/IRSAM2_Benchmark`
-- datasets: `/root/autodl-tmp/datasets`
-- outputs: `/root/autodl-tmp/runs`
-- checkpoints: `/root/autodl-tmp/checkpoints`
+- 仓库：`/root/autodl-tmp/IRSAM2_Benchmark`
+- 数据集：`/root/autodl-tmp/datasets`
+- 输出：`/root/autodl-tmp/runs`
+- checkpoints：`/root/autodl-tmp/checkpoints`
 
-Do not use `/` as the main runtime/output location because the system disk is small.
+不要把 `/` 作为主运行目录或输出目录，因为系统盘容量较小。
 
-## New Helper Scripts Added For AutoDL
+## 为 AutoDL 新增的辅助脚本
 
 - `scripts/setup_autodl_server.sh`
 - `scripts/run_autodl_smoke.sh`
 - `configs/benchmark_smoke_rbgt_tiny.yaml`
 - `configs/benchmark_v1_rbgt_tiny.yaml`
 
-Also updated:
+同时更新了：
 
 - `scripts/run_baseline.sh`
 - `scripts/run_tests.sh`
 - `README.md`
 
-## Expected First Commands On The Server
+## 服务器上的预期起步命令
 
-If the repo is not cloned yet:
+如果仓库还没有 clone：
 
 ```bash
 cd /root/autodl-tmp
@@ -102,21 +101,21 @@ git clone git@github.com:Sakauma/IRSAM2_Benchmark.git
 cd IRSAM2_Benchmark
 ```
 
-If it is already cloned:
+如果仓库已经存在：
 
 ```bash
 cd /root/autodl-tmp/IRSAM2_Benchmark
 git pull
 ```
 
-Then initialize the server workspace:
+然后初始化服务器工作区：
 
 ```bash
 bash scripts/setup_autodl_server.sh
 source .autodl_env.sh
 ```
 
-Then run smoke baselines:
+接着运行 smoke baselines：
 
 ```bash
 bash scripts/run_autodl_smoke.sh multimodal bbox_rect
@@ -124,39 +123,39 @@ bash scripts/run_autodl_smoke.sh multimodal sam2_zero_shot
 bash scripts/run_autodl_smoke.sh rbgt sam2_zero_shot
 ```
 
-If a specific Python interpreter is needed:
+如果需要指定 Python 解释器：
 
 ```bash
 export PYTHON_BIN=/root/miniconda3/bin/python
 ```
 
-or use the target environment's `python` path instead.
+也可以改成目标环境中的 `python` 路径。
 
-## What To Do Next
+## 接下来做什么
 
-After the server bootstrap is working, continue in this order:
+在服务器 bootstrap 能正常工作之后，建议按下面顺序继续：
 
-1. verify `nvidia-smi`
-2. verify Python environment imports
-3. run the smoke baselines above
-4. check generated `artifacts/` and `reference_results/`
-5. only then move to formal benchmark runs
+1. 检查 `nvidia-smi`
+2. 检查 Python 环境导入是否正常
+3. 运行上面的 smoke baselines
+4. 检查生成的 `artifacts/` 和 `reference_results/`
+5. 只有这些都正常后，再进入正式 benchmark 运行
 
-## Important Context For The Next Codex Session
+## 给下一次 Codex 会话的重要上下文
 
-- The user prefers a complete paper-grade benchmark platform
-- SAM2 baseline support is mandatory
-- generic mask-only datasets are mandatory
-- image and sequence/video evaluation are both required
-- `adapt / distill / quantize` are the next real implementation targets
-- right now the immediate practical task is getting the server environment ready and running smoke tests
+- 用户希望得到完整、论文级的 benchmark 平台
+- `SAM2` baseline 支持是硬要求
+- 通用 mask-only 数据集支持是硬要求
+- 图像与序列/视频评估都必须支持
+- `adapt / distill / quantize` 是下一阶段真正要补齐的方法实现
+- 当时最紧迫的任务是把服务器环境准备好并跑通 smoke tests
 
-## Instruction To The Next Session
+## 给下一次会话的指令
 
-If you are the new remote Codex session, start by:
+如果你是新的远程 Codex 会话，请先做下面几件事：
 
-1. reading this file
-2. checking whether the repo is at commit `2f05405`
-3. checking whether `/root/autodl-fs/MultiModalCOCOClean.zip` and `/root/autodl-fs/RBGT-Tiny.tar.gz` exist
-4. running the AutoDL bootstrap flow
-5. reporting any server-side errors precisely
+1. 阅读本文件
+2. 检查仓库是否位于提交 `2f05405`
+3. 检查 `/root/autodl-fs/MultiModalCOCOClean.zip` 与 `/root/autodl-fs/RBGT-Tiny.tar.gz` 是否存在
+4. 运行 AutoDL bootstrap 流程
+5. 精确报告所有服务器侧错误

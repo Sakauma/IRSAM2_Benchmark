@@ -1,19 +1,19 @@
-# Config Map
+# 配置索引
 
-This directory groups benchmark configs by runtime scale and dataset.
+本目录按运行规模与数据集组织 benchmark 配置。
 
 ## MultiModalCOCOClean
 
-- `benchmark_quick10.yaml`: fastest 10-image sanity check
-- `benchmark_smoke.yaml`: small smoke run for adapter and reporting validation
-- `benchmark_v1.yaml`: full default benchmark configuration
+- `benchmark_quick10.yaml`：最快的 10 图 sanity check
+- `benchmark_smoke.yaml`：用于 adapter 和报告链路验证的小规模 smoke run
+- `benchmark_v1.yaml`：默认完整 benchmark 配置
 
 ## RBGT-Tiny IR
 
-- `benchmark_quick10_rbgt_tiny.yaml`: 10-image RBGT-Tiny quick check
-- `benchmark_smoke_rbgt_tiny.yaml`: RBGT-Tiny smoke run
-- `benchmark_v1_rbgt_tiny.yaml`: full RBGT-Tiny benchmark configuration
+- `benchmark_quick10_rbgt_tiny.yaml`：`RBGT-Tiny` 的 10 图快速检查
+- `benchmark_smoke_rbgt_tiny.yaml`：`RBGT-Tiny` smoke run
+- `benchmark_v1_rbgt_tiny.yaml`：完整 `RBGT-Tiny` benchmark 配置
 
-## Usage Pattern
+## 使用建议
 
-Use quick configs for environment validation, smoke configs for pipeline sanity checks, and `v1` configs for formal benchmark runs.
+优先用 quick 配置做环境检查，用 smoke 配置做流程 sanity check，用 `v1` 配置执行正式 benchmark。
