@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Author: Egor Izmaylov
-#
-# AutoDL 环境的一键 smoke 入口。
-# 按数据集关键字切换到对应配置，并自动设置 DATASET_ROOT。
 
 set -euo pipefail
 

@@ -6,9 +6,9 @@ model:
   repo: ""
 
 dataset:
-  dataset_id: "RBGT-Tiny"
-  adapter: "rbgt_tiny_ir_only"
-  root: "RBGT-Tiny"
+  dataset_id: "MultiModalCOCOClean"
+  adapter: "coco_like"
+  root: "ir_sam2_exp/data_prep/MultiModalCOCOClean"
   images_dir: "image"
   annotations_dir: "annotations_coco"
   mask_mode: "auto"
@@ -17,17 +17,17 @@ dataset:
 runtime:
   artifact_root: "artifacts"
   reference_results_root: "reference_results"
-  output_name: "benchmark_v1_rbgt_tiny_run"
+  output_name: "benchmark_quick10_run"
   device: "cuda"
   num_workers: 0
-  smoke_test: false
+  smoke_test: true
   max_samples: 0
-  max_images: 0
-  save_visuals: true
-  seeds: [42, 123, 456]
+  max_images: 10
+  save_visuals: false
+  seeds: [42]
 
 evaluation:
-  benchmark_version: "irsam2-benchmark-v1-rbgt"
+  benchmark_version: "irsam2-benchmark-v1-quick10"
   track: "track_a_image_prompted"
   protocol: "box_only"
   inference_mode: "box"
@@ -43,7 +43,7 @@ evaluation:
     prompt_budget: 1
     refresh_interval: 10
     multi_mask: false
-    notes: "Default paper benchmark prompt policy for RBGT-Tiny IR."
+    notes: "Quick 10-image validation config."
 
 stages:
   transfer: {}

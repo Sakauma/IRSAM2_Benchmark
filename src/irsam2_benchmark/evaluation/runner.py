@@ -1,46 +1,27 @@
-"""Evaluation runner.
-Author: Egor Izmaylov
-
-This module executes image-level, instance-set, and sequence-aware evaluation.
-It now also:
-- shows tqdm progress bars when tqdm is installed
-- evaluates no-prompt auto-mask at image level instead of per-instance duplication
-- returns qualitative visualization payloads for downstream PNG export
-"""
-
 from __future__ import annotations
 
 import time
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List
 
 import numpy as np
 
 from ..config import AppConfig
 from ..core.interfaces import InferenceMode
+from ..data.prompt_synthesis import mask_to_tight_box
 from ..data.sample import Sample
-from ..data.views import build_image_view, build_sequence_view
+from ..data.views import build_image_view, build_track_view
 from .image_metrics import bbox_iou, boundary_f1, dice_score, mask_iou
 from .instance_metrics import greedy_match_instances
 from .temporal_metrics import compute_temporal_metrics
-
-try:  # pragma: no cover - optional dependency
-    from tqdm.auto import tqdm
-except Exception:  # pragma: no cover - optional dependency
-    tqdm = None
-
-
-def _progress(iterable, *, desc: str):
-    """Wrap iterables with tqdm when available, otherwise return them unchanged."""
-    if tqdm is None:
-        return iterable
-    return tqdm(iterable, desc=desc, leave=False)
 
 
 def _aggregate(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     numeric: Dict[str, List[float]] = defaultdict(list)
     for row in rows:
         for key, value in row.items():
+            if isinstance(value, bool):
+                continue
             if isinstance(value, (int, float)):
                 numeric[key].append(float(value))
     aggregate: Dict[str, Any] = {}
@@ -49,21 +30,38 @@ def _aggregate(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     return aggregate
 
 
-def _image_level_label(items: List[Sample], attr: str) -> str:
-    """Aggregate image-level categorical metadata for multi-instance rows.
-
-    No-prompt automatic mask runs are evaluated once per image rather than once
-    per instance. For grouped reports we still need stable image-level labels,
-    but an image may contain several categories or target scales. In that case
-    we explicitly mark the field as mixed instead of leaking the first instance
-    label into the report.
-    """
-    values = sorted({str(getattr(item, attr, "unknown")) for item in items if getattr(item, attr, None) is not None})
-    if not values:
+def _summarize_values(values: Iterable[str]) -> str:
+    unique = sorted({value for value in values if value})
+    if not unique:
         return "unknown"
-    if len(values) == 1:
-        return values[0]
-    return "mixed"
+    if len(unique) == 1:
+        return unique[0]
+    return "multiple"
+
+
+def _mask_box(mask: np.ndarray) -> list[float] | None:
+    if float((mask > 0.5).sum()) <= 0.0:
+        return None
+    return mask_to_tight_box(mask)
+
+
+def _image_level_row(items: List[Sample], elapsed_ms: float, instance_metrics: Dict[str, float]) -> Dict[str, Any]:
+    representative = items[0]
+    row = {
+        "sample_id": representative.frame_id,
+        "frame_id": representative.frame_id,
+        "sequence_id": representative.sequence_id,
+        "category_name": _summarize_values(item.category for item in items),
+        "target_scale": _summarize_values(item.target_scale for item in items),
+        "device_source": _summarize_values(item.device_source for item in items),
+        "annotation_protocol_flag": _summarize_values(item.annotation_protocol_flag for item in items),
+        "LatencyMs": elapsed_ms,
+        **instance_metrics,
+    }
+    track_value = _summarize_values(item.track_id for item in items if item.track_id is not None)
+    if track_value != "unknown":
+        row["track_id"] = track_value
+    return row
 
 
 def evaluate_method(
@@ -73,18 +71,19 @@ def evaluate_method(
     config: AppConfig,
     track_name: str,
     inference_mode: InferenceMode,
-) -> tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    del config
+
     rows: List[Dict[str, Any]] = []
-    visual_records: List[Dict[str, Any]] = []
-    visual_limit = max(0, int(config.runtime.visual_limit))
-
-    def should_capture_visual() -> bool:
-        return bool(config.runtime.save_visuals) and (visual_limit == 0 or len(visual_records) < visual_limit)
-
     if inference_mode == InferenceMode.VIDEO_PROPAGATION:
-        sequence_view = build_sequence_view(samples)
+        track_view = build_track_view(samples)
         sequence_metrics = []
-        for sequence_id, items in _progress(sequence_view.items(), desc=f"{method.name} sequences"):
+        for (sequence_id, track_id), items in track_view.items():
+            frame_ids = {item.frame_id for item in items}
+            if len(frame_ids) != len(items):
+                raise RuntimeError(
+                    f"Video propagation expects one sample per frame within a track, got duplicates for sequence_id={sequence_id!r}, track_id={track_id!r}."
+                )
             start = time.perf_counter()
             predictions = method.predict_sequence(items)
             elapsed_ms = (time.perf_counter() - start) * 1000.0 / max(1, len(items))
@@ -94,73 +93,48 @@ def evaluate_method(
                 gt_mask = np.asarray(item.mask_array, dtype=np.float32) if item.mask_array is not None else np.zeros_like(pred_mask)
                 row = build_segmentation_row(item, pred_mask, gt_mask, elapsed_ms)
                 row["track"] = track_name
+                row["track_id"] = track_id
                 sequence_rows.append({**row, "pred_mask": pred_mask})
                 rows.append(row)
-                if should_capture_visual():
-                    visual_records.append({"sample": item, "pred_mask": pred_mask, "gt_mask": gt_mask})
             temporal = compute_temporal_metrics(sequence_rows)
             temporal["sequence_id"] = sequence_id
+            temporal["track_id"] = track_id
             sequence_metrics.append(temporal)
         summary = _aggregate(rows)
         if sequence_metrics:
             summary.update(_aggregate(sequence_metrics))
-        return summary, rows, visual_records
+        return summary, rows
 
     if inference_mode == InferenceMode.NO_PROMPT_AUTO_MASK:
         image_view = build_image_view(samples)
-        for image_id, items in _progress(image_view.items(), desc=f"{method.name} images"):
+        for _, items in image_view.items():
             representative = items[0]
             start = time.perf_counter()
             pred = method.predict_sample(representative)
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             gt_instances = [{"mask": item.mask_array} for item in items if item.mask_array is not None]
             instance_metrics = greedy_match_instances(pred.get("instances", []), gt_instances)
-            row = {
-                "sample_id": image_id,
-                "frame_id": representative.image_path.as_posix(),
-                "sequence_id": representative.sequence_id,
-                "category_name": _image_level_label(items, "category"),
-                "target_scale": _image_level_label(items, "target_scale"),
-                "device_source": _image_level_label(items, "device_source"),
-                "annotation_protocol_flag": _image_level_label(items, "annotation_protocol_flag"),
-                "track": track_name,
-                "LatencyMs": elapsed_ms,
-                "num_gt_instances": len(gt_instances),
-                **instance_metrics,
-            }
-            rows.append(row)
-            if should_capture_visual():
-                visual_records.append(
-                    {
-                        "sample": representative,
-                        "pred_instances": pred.get("instances", []),
-                        "gt_instances": gt_instances,
-                    }
-                )
-        return _aggregate(rows), rows, visual_records
+            rows.append(_image_level_row(items, elapsed_ms, instance_metrics))
+        return _aggregate(rows), rows
 
-    for item in _progress(samples, desc=f"{method.name} samples"):
+    for item in samples:
         start = time.perf_counter()
         pred = method.predict_sample(item)
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         pred_mask = np.asarray(pred["mask"], dtype=np.float32)
         gt_mask = np.asarray(item.mask_array, dtype=np.float32) if item.mask_array is not None else np.zeros_like(pred_mask)
-        row = build_segmentation_row(item, pred_mask, gt_mask, elapsed_ms)
-        row["track"] = track_name
-        rows.append(row)
-        if should_capture_visual():
-            visual_records.append({"sample": item, "pred_mask": pred_mask, "gt_mask": gt_mask})
-    return _aggregate(rows), rows, visual_records
+        rows.append(build_segmentation_row(item, pred_mask, gt_mask, elapsed_ms))
+    return _aggregate(rows), rows
 
 
 def build_segmentation_row(item: Sample, pred_mask: np.ndarray, gt_mask: np.ndarray, elapsed_ms: float) -> Dict[str, Any]:
     pred_area = float((pred_mask > 0.5).sum())
     gt_area = float((gt_mask > 0.5).sum())
-    pred_box = item.bbox_loose if pred_area > 0.0 else None
+    pred_box = _mask_box(pred_mask)
     gt_box = item.bbox_tight
     height = max(1, item.height)
     width = max(1, item.width)
-    return {
+    row = {
         "sample_id": item.sample_id,
         "frame_id": item.frame_id,
         "sequence_id": item.sequence_id,
@@ -178,6 +152,9 @@ def build_segmentation_row(item: Sample, pred_mask: np.ndarray, gt_mask: np.ndar
         "PredAreaRatio": pred_area / float(height * width),
         "GTAreaRatio": gt_area / float(height * width),
     }
+    if item.track_id is not None:
+        row["track_id"] = item.track_id
+    return row
 
 
 def box_to_area(box: list[float] | None, height: int, width: int) -> np.ndarray:

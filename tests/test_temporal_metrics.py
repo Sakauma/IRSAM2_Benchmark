@@ -1,8 +1,3 @@
-"""时序指标单元测试。
-
-Author: Egor Izmaylov
-"""
-
 import unittest
 
 import numpy as np
@@ -11,8 +6,6 @@ from irsam2_benchmark.evaluation.temporal_metrics import compute_temporal_metric
 
 
 class TemporalMetricTests(unittest.TestCase):
-    """验证时序指标函数至少返回预期字段。"""
-
     def test_temporal_metrics_shape(self):
         rows = [
             {"mIoU": 0.8, "BoundaryF1": 0.7, "PredAreaRatio": 0.1, "GTAreaRatio": 0.1, "pred_mask": np.ones((4, 4), dtype=np.float32)},

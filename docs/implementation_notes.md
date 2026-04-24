@@ -4,7 +4,7 @@ This note records the first implementation pass of the greenfield `IRSAM2_Benchm
 
 ## Implemented in this pass
 
-- Created a new standalone package layout for the benchmark platform
+- Created a new standalone project layout under `IRSAM2_Benchmark/`
 - Added a package-based CLI and config loader
 - Added dataset adapters for:
   - raw `MultiModal`

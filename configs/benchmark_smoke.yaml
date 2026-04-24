@@ -24,7 +24,6 @@ runtime:
   max_samples: 24
   max_images: 24
   save_visuals: false
-  visual_limit: 0
   seeds: [42]
 
 evaluation:

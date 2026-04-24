@@ -24,7 +24,6 @@ runtime:
   max_samples: 24
   max_images: 24
   save_visuals: false
-  visual_limit: 0
   seeds: [42]
 
 evaluation:
@@ -44,7 +43,7 @@ evaluation:
     prompt_budget: 1
     refresh_interval: 10
     multi_mask: false
-    notes: "Smoke benchmark prompt policy for RBGT-Tiny."
+    notes: "Smoke benchmark prompt policy for RBGT-Tiny IR."
 
 stages:
   transfer: {}

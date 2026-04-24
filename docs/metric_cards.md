@@ -9,7 +9,7 @@
 
 ## Prompt / Protocol Audit Metrics
 
-- `BBoxIoU`
+- `BBoxIoU`: IoU between the predicted mask tight box and the GT tight box
 - `TightBoxMaskIoU`
 - `LooseBoxMaskIoU`
 - `PredAreaRatio`
@@ -17,6 +17,7 @@
 
 ## Automatic Masking Metrics
 
+- image-level evaluation: one automatic-mask inference per image, then matched against all GT instances from that image
 - `num_pred_instances`
 - `num_matched_instances`
 - `instance_precision`
@@ -26,6 +27,7 @@
 
 ## Temporal Metrics
 
+- Track C rows are evaluated per `(sequence_id, track_id)` stream
 - `temporal_iou_mean`
 - `temporal_boundary_f1`
 - `mask_jitter_score`

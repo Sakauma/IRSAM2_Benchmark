@@ -1,9 +1,3 @@
-# Author: Egor Izmaylov
-#
-# 这个 pyproject 负责定义项目构建方式、运行依赖和可执行脚本入口。
-# 项目本身仍然以研究型 benchmark 为主，但通过标准 package 元数据，
-# 可以更方便地在服务器、CI 或其他工作站上安装和调用。
-
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -17,15 +11,12 @@ requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",
   "Pillow>=10.0",
-  "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]
-# YAML 解析是可选依赖，因为某些极简环境可能只使用 JSON 配置。
 yaml = ["PyYAML>=6.0"]
 
 [project.scripts]
-# 安装后可直接使用 irsam2-benchmark 命令调用 CLI。
 irsam2-benchmark = "irsam2_benchmark.cli:main"
 
 [tool.setuptools]

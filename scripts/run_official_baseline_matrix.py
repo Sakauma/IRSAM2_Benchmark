@@ -1,13 +1,4 @@
 #!/usr/bin/env python
-# Author: Egor Izmaylov
-#
-# Run the full official SAM2 baseline matrix:
-# - 4 official SAM2.1 checkpoints
-# - 2 datasets (MultiModalCOCOClean / RBGT-Tiny)
-# - 4 inference modes (box / point / box+point / no-prompt auto-mask)
-#
-# Each run writes its own frozen benchmark directory and this script also
-# aggregates a matrix_summary.json/csv for quick comparison.
 
 from __future__ import annotations
 
@@ -153,13 +144,6 @@ def _selected_rows(rows: list[dict], aliases: list[str], key: str) -> list[dict]
 
 
 def _checkpoint_root() -> Path:
-    """Resolve the preferred official-checkpoint root for matrix runs.
-
-    Priority:
-    1. SAM2_CKPT_ROOT
-    2. CHECKPOINT_ROOT
-    3. SAM2_REPO/checkpoints
-    """
     explicit = os.environ.get("SAM2_CKPT_ROOT") or os.environ.get("CHECKPOINT_ROOT")
     if explicit:
         return Path(explicit)
@@ -168,11 +152,6 @@ def _checkpoint_root() -> Path:
 
 
 def _resolve_model_ckpt(model: dict) -> str:
-    """Resolve one official SAM2 checkpoint to an absolute path.
-
-    We fail early with a helpful message so the user does not have to dig
-    through the downstream SAM2 loading stack to see which file is missing.
-    """
     raw = Path(model["ckpt"])
     if raw.is_absolute():
         if not raw.exists():
@@ -224,7 +203,10 @@ def main() -> int:
             for model in selected_models:
                 for baseline in selected_baselines:
                     completed += 1
-                    print(f"[{completed}/{run_count}] dataset={dataset['alias']} model={model['alias']} mode={baseline['alias']}", flush=True)
+                    print(
+                        f"[{completed}/{run_count}] dataset={dataset['alias']} model={model['alias']} mode={baseline['alias']}",
+                        flush=True,
+                    )
                     payload = json.loads(json.dumps(base_config))
                     payload["model"]["model_id"] = model["model_id"]
                     payload["model"]["cfg"] = model["cfg"]
@@ -232,7 +214,9 @@ def main() -> int:
                     payload["runtime"]["save_visuals"] = True
                     payload["runtime"]["visual_limit"] = visual_limit
                     payload["runtime"]["seeds"] = selected_seeds
-                    payload["runtime"]["output_name"] = f"official_baseline_matrix/{dataset['alias']}/{model['alias']}/{baseline['alias']}"
+                    payload["runtime"]["output_name"] = (
+                        f"official_baseline_matrix/{dataset['alias']}/{model['alias']}/{baseline['alias']}"
+                    )
                     payload["evaluation"]["benchmark_version"] = "irsam2-benchmark-v1-official-matrix"
                     payload["evaluation"]["track"] = baseline["track"]
                     payload["evaluation"]["inference_mode"] = baseline["inference_mode"]
@@ -242,7 +226,9 @@ def main() -> int:
                     _write_yaml(temp_config, payload)
 
                     env = os.environ.copy()
-                    env["PYTHONPATH"] = f"{PROJECT_ROOT / 'src'}{os.pathsep}{env.get('PYTHONPATH', '')}".rstrip(os.pathsep)
+                    env["PYTHONPATH"] = f"{PROJECT_ROOT / 'src'}{os.pathsep}{env.get('PYTHONPATH', '')}".rstrip(
+                        os.pathsep
+                    )
                     env["DATASET_ROOT"] = dataset_root
                     env["ARTIFACT_ROOT"] = str(artifact_root)
 

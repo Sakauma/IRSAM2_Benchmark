@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# Author: Egor Izmaylov
-#
-# One-command entrypoint for the official SAM2 baseline matrix.
-# Default matrix:
-# - 4 official SAM2.1 checkpoints
-# - 2 datasets: MultiModalCOCOClean, RBGT-Tiny
-# - 4 modes: box / point / box+point / no-prompt auto-mask
 
 set -euo pipefail
 

@@ -1,12 +1,3 @@
-"""平台核心枚举与接口数据结构。
-
-Author: Egor Izmaylov
-
-这些类型是全工程共享的“词汇表”：
-- 不同模块都依赖同一套 stage / inference mode / prompt policy 枚举；
-- artifact manifest 也依赖这些 dataclass 进行序列化。
-"""
-
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
@@ -15,8 +6,6 @@ from typing import Any, Dict, Optional
 
 
 class InferenceMode(str, Enum):
-    """平台支持的推理模式枚举。"""
-
     BOX = "box"
     POINT = "point"
     BOX_POINT = "box+point"
@@ -31,8 +20,6 @@ class InferenceMode(str, Enum):
 
 
 class PipelineStage(str, Enum):
-    """全链路 benchmark stage。"""
-
     TRANSFER = "transfer"
     ADAPT = "adapt"
     DISTILL = "distill"
@@ -42,8 +29,6 @@ class PipelineStage(str, Enum):
 
 
 class Track(str, Enum):
-    """正式 benchmark 赛道枚举。"""
-
     IMAGE_PROMPTED = "track_a_image_prompted"
     AUTO_MASK = "track_b_auto_mask"
     VIDEO_PROPAGATION = "track_c_video_propagation"
@@ -51,8 +36,6 @@ class Track(str, Enum):
 
 
 class PromptType(str, Enum):
-    """提示类型。"""
-
     BOX = "box"
     POINT = "point"
     BOX_POINT = "box+point"
@@ -60,8 +43,6 @@ class PromptType(str, Enum):
 
 
 class PromptSource(str, Enum):
-    """提示来源。"""
-
     GT = "gt"
     SYNTHESIZED = "synthesized"
     NONE = "none"
@@ -69,11 +50,6 @@ class PromptSource(str, Enum):
 
 @dataclass(frozen=True)
 class PromptPolicy:
-    """冻结后的 prompt policy。
-
-    这个对象会进入 benchmark spec，因此字段应该保持稳定。
-    """
-
     name: str
     prompt_type: PromptType
     prompt_source: PromptSource
@@ -83,17 +59,11 @@ class PromptPolicy:
     notes: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
-        """序列化为普通字典，便于写入 JSON。"""
         return asdict(self)
 
 
 @dataclass(frozen=True)
 class ModelCapabilities:
-    """模型能力声明。
-
-    通过显式 capability 声明，平台可以判断某个模型能否支持某类评测。
-    """
-
     supports_box_prompt: bool = True
     supports_point_prompt: bool = True
     supports_box_point_prompt: bool = True
@@ -112,15 +82,12 @@ class ModelCapabilities:
 
 @dataclass
 class ArtifactRecord:
-    """artifact manifest 中的单条记录。"""
-
     stage: str
     artifact_dir: str
     artifact_name: str
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        """转换为 JSON 友好的字典格式。"""
         return {
             "stage": self.stage,
             "artifact_dir": self.artifact_dir,
