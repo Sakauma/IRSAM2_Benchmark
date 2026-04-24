@@ -27,6 +27,12 @@ That split is deliberate:
 - `artifacts/`: default output root
 - `reference_results/`: frozen per-baseline reference snapshots for regression checks
 
+Repository entry maps:
+
+- `docs/README.md`: document index
+- `configs/README.md`: config index
+- `scripts/README.md`: script index
+
 ## CLI
 
 ```bash
@@ -69,6 +75,17 @@ The quick-10 configs are intended for shorter sanity checks:
 When the dataset is stored outside the repo-relative default location, set `DATASET_ROOT` explicitly.
 This is especially common for `configs/benchmark_quick10_rbgt_tiny.yaml`.
 
+## Documentation
+
+Use `docs/README.md` as the documentation index. The most important benchmark-facing specs are:
+
+- `docs/track_definitions.md`
+- `docs/metric_cards.md`
+- `docs/dataset_cards.md`
+- `docs/artifact_schema_spec.md`
+
+This split keeps the root README focused on execution while the detailed benchmark contract stays under `docs/`.
+
 ## Linux Scripts
 
 For Linux servers, `scripts/` now includes shell entrypoints again:
@@ -109,6 +126,12 @@ source .autodl_env.sh
 bash scripts/run_autodl_smoke.sh multimodal sam2_zero_shot
 bash scripts/run_autodl_smoke.sh rbgt sam2_zero_shot
 ```
+
+Use `scripts/README.md` for a short description of each helper entrypoint.
+
+## Configs
+
+Use `configs/README.md` to choose between quick, smoke, and full benchmark configs.
 
 ## Machine Paths
 
