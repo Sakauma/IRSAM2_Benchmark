@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -75,6 +76,15 @@ def _limit_reached(limit: int, count: int) -> bool:
 
 def _mask_to_numpy(mask_path: Path) -> np.ndarray:
     return np.array(Image.open(mask_path))
+
+
+def _mask_height_width(mask: np.ndarray) -> tuple[int, int]:
+    arr = np.asarray(mask)
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    if arr.ndim != 2:
+        raise ValueError(f"Expected a 2D mask, got shape {arr.shape}.")
+    return int(arr.shape[0]), int(arr.shape[1])
 
 
 def _read_json(path: Path) -> Dict[str, object]:
@@ -447,6 +457,18 @@ class GenericImageMaskAdapter(DatasetAdapter):
         return config.dataset.adapter == self.adapter_name or (images_dir.exists() and masks_dir.exists())
 
     def load_samples(self, config: AppConfig) -> List[Sample]:
+        base_notes = self.__class__.notes
+        skipped_size_mismatches: List[str] = []
+
+        def finish(samples: List[Sample]) -> List[Sample]:
+            if skipped_size_mismatches:
+                preview = ", ".join(skipped_size_mismatches[:5])
+                suffix = "..." if len(skipped_size_mismatches) > 5 else ""
+                self.notes = f"{base_notes} Skipped {len(skipped_size_mismatches)} image(s) with image/mask size mismatch: {preview}{suffix}."
+            else:
+                self.notes = base_notes
+            return samples
+
         root = _dataset_root(config)
         images_dir = root / (config.dataset.images_dir or "images")
         masks_dir = root / (config.dataset.masks_dir or "masks")
@@ -467,6 +489,17 @@ class GenericImageMaskAdapter(DatasetAdapter):
             seen_images.add(rel_stem)
             mask_image = _mask_to_numpy(mask_path)
             width, height = _image_size(image_path)
+            mask_height, mask_width = _mask_height_width(mask_image)
+            if (mask_width, mask_height) != (width, height):
+                message = (
+                    "Skipping image/mask size mismatch. "
+                    f"dataset_id={config.dataset.dataset_id!r}, "
+                    f"image={image_path}, image_size={(width, height)}, "
+                    f"mask={mask_path}, mask_size={(mask_width, mask_height)}."
+                )
+                warnings.warn(message, RuntimeWarning, stacklevel=2)
+                skipped_size_mismatches.append(image_path.relative_to(images_dir).as_posix())
+                continue
             sequence_id = _relative_sequence_id(image_path, images_dir)
             frame_index = _infer_frame_index(image_path)
             frame_id = rel_stem
@@ -487,8 +520,8 @@ class GenericImageMaskAdapter(DatasetAdapter):
             ):
                 samples.append(sample)
                 if _limit_reached(config.runtime.max_samples, len(samples)):
-                    return samples
-        return samples
+                    return finish(samples)
+        return finish(samples)
 
 
 def _samples_from_generic_mask(
