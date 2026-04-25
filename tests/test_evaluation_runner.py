@@ -5,7 +5,7 @@ import numpy as np
 
 from irsam2_benchmark.core.interfaces import InferenceMode
 from irsam2_benchmark.data.sample import Sample
-from irsam2_benchmark.evaluation.runner import build_segmentation_row, box_to_area, evaluate_method
+from irsam2_benchmark.evaluation.runner import align_mask_to_sample, build_segmentation_row, box_to_area, evaluate_method
 
 
 def make_sample(
@@ -92,6 +92,55 @@ class EvaluationRunnerTests(unittest.TestCase):
         self.assertNotIn("TargetRecallIoU25", row)
         self.assertEqual(row["PromptBoxBBoxIoU"], 1.0)
         self.assertEqual(row["PromptPointInBBox"], 1.0)
+
+    def test_pred_mask_alignment_records_resize_metadata(self):
+        gt_mask = box_to_area([0, 0, 4, 4], 4, 4)
+        pred_mask = np.ones((2, 2), dtype=np.float32)
+        item = make_sample(
+            sample_id="frame_0__inst_0",
+            frame_id="frame_0",
+            bbox_tight=[0, 0, 4, 4],
+            bbox_loose=[0, 0, 4, 4],
+            mask_array=gt_mask,
+        )
+
+        aligned_mask, metadata = align_mask_to_sample(pred_mask, item)
+        row = build_segmentation_row(item, aligned_mask, gt_mask, elapsed_ms=1.0, mask_alignment=metadata)
+
+        self.assertEqual(aligned_mask.shape, (4, 4))
+        self.assertTrue(row["PredMaskWasResized"])
+        self.assertEqual(row["PredMaskOriginalHeight"], 2)
+        self.assertEqual(row["PredMaskOriginalWidth"], 2)
+        self.assertEqual(row["PredMaskAlignedHeight"], 4)
+        self.assertEqual(row["PredMaskAlignedWidth"], 4)
+        self.assertEqual(row["mIoU"], 1.0)
+
+    def test_evaluate_method_aligns_pred_mask_before_metrics(self):
+        gt_mask = box_to_area([0, 0, 4, 4], 4, 4)
+        item = make_sample(
+            sample_id="frame_0__inst_0",
+            frame_id="frame_0",
+            bbox_tight=[0, 0, 4, 4],
+            bbox_loose=[0, 0, 4, 4],
+            mask_array=gt_mask,
+        )
+
+        class DummyMethod:
+            def predict_sample(self, sample):
+                return {"mask": np.ones((2, 2), dtype=np.float32), "prompt": None}
+
+        _, rows = evaluate_method(
+            method=DummyMethod(),
+            samples=[item],
+            config=None,
+            track_name="track_a_mask_prompt",
+            inference_mode=InferenceMode.BOX,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["PredMaskWasResized"])
+        self.assertEqual(rows[0]["PredMaskAlignedHeight"], 4)
+        self.assertEqual(rows[0]["PredMaskAlignedWidth"], 4)
 
     def test_auto_mask_evaluates_once_per_image(self):
         mask_a = box_to_area([0, 0, 2, 2], 4, 4)

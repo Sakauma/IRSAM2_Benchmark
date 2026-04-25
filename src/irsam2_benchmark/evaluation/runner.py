@@ -47,6 +47,44 @@ def _mask_box(mask: np.ndarray) -> list[float] | None:
     return mask_to_tight_box(mask)
 
 
+def _mask_to_2d(mask: np.ndarray) -> np.ndarray:
+    arr = np.asarray(mask, dtype=np.float32)
+    if arr.ndim == 3 and arr.shape[-1] == 1:
+        arr = arr[..., 0]
+    while arr.ndim > 2:
+        arr = arr[0]
+    if arr.ndim != 2:
+        raise ValueError(f"Expected a 2D mask, got shape {arr.shape}.")
+    return arr
+
+
+def _resize_mask_nearest(mask: np.ndarray, height: int, width: int) -> np.ndarray:
+    arr = _mask_to_2d(mask)
+    if arr.shape == (height, width):
+        return arr.astype(np.float32)
+    src_h, src_w = arr.shape
+    if src_h <= 0 or src_w <= 0:
+        return np.zeros((height, width), dtype=np.float32)
+    y_idx = np.minimum((np.arange(height) * (src_h / float(height))).astype(np.int64), src_h - 1)
+    x_idx = np.minimum((np.arange(width) * (src_w / float(width))).astype(np.int64), src_w - 1)
+    return arr[y_idx[:, None], x_idx[None, :]].astype(np.float32)
+
+
+def align_mask_to_sample(mask: np.ndarray, item: Sample) -> tuple[np.ndarray, Dict[str, Any]]:
+    raw = _mask_to_2d(mask)
+    target_h = max(1, int(item.height))
+    target_w = max(1, int(item.width))
+    aligned = _resize_mask_nearest(raw, target_h, target_w)
+    metadata = {
+        "PredMaskOriginalHeight": int(raw.shape[0]),
+        "PredMaskOriginalWidth": int(raw.shape[1]),
+        "PredMaskAlignedHeight": target_h,
+        "PredMaskAlignedWidth": target_w,
+        "PredMaskWasResized": raw.shape != (target_h, target_w),
+    }
+    return aligned, metadata
+
+
 def _image_level_row(items: List[Sample], elapsed_ms: float, instance_metrics: Dict[str, float], modality: str) -> Dict[str, Any]:
     representative = items[0]
     row = {
@@ -94,9 +132,9 @@ def evaluate_method(
             elapsed_ms = (time.perf_counter() - start) * 1000.0 / max(1, len(items))
             sequence_rows = []
             for item in items:
-                pred_mask = np.asarray(predictions[item.sample_id], dtype=np.float32)
-                gt_mask = np.asarray(item.mask_array, dtype=np.float32) if item.mask_array is not None else np.zeros_like(pred_mask)
-                row = build_segmentation_row(item, pred_mask, gt_mask, elapsed_ms, modality=modality)
+                pred_mask, mask_alignment = align_mask_to_sample(predictions[item.sample_id], item)
+                gt_mask = np.asarray(item.mask_array, dtype=np.float32) if item.mask_array is not None else np.zeros((item.height, item.width), dtype=np.float32)
+                row = build_segmentation_row(item, pred_mask, gt_mask, elapsed_ms, modality=modality, mask_alignment=mask_alignment)
                 row["track"] = track_name
                 row["track_id"] = track_id
                 sequence_rows.append({**row, "pred_mask": pred_mask})
@@ -118,7 +156,10 @@ def evaluate_method(
             pred = method.predict_sample(representative)
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             gt_instances = [{"mask": item.mask_array} for item in items if item.mask_array is not None]
-            pred_instances = pred.get("instances", [])
+            pred_instances = []
+            for instance in pred.get("instances", []):
+                aligned_mask, _ = align_mask_to_sample(instance["mask"], representative)
+                pred_instances.append({**instance, "mask": aligned_mask})
             if gt_instances:
                 instance_metrics = greedy_match_instances(pred_instances, gt_instances)
             else:
@@ -130,9 +171,9 @@ def evaluate_method(
         start = time.perf_counter()
         pred = method.predict_sample(item)
         elapsed_ms = (time.perf_counter() - start) * 1000.0
-        pred_mask = np.asarray(pred["mask"], dtype=np.float32)
-        gt_mask = np.asarray(item.mask_array, dtype=np.float32) if item.mask_array is not None else np.zeros_like(pred_mask)
-        rows.append(build_segmentation_row(item, pred_mask, gt_mask, elapsed_ms, modality=modality, prompt=pred.get("prompt")))
+        pred_mask, mask_alignment = align_mask_to_sample(pred["mask"], item)
+        gt_mask = np.asarray(item.mask_array, dtype=np.float32) if item.mask_array is not None else np.zeros((item.height, item.width), dtype=np.float32)
+        rows.append(build_segmentation_row(item, pred_mask, gt_mask, elapsed_ms, modality=modality, prompt=pred.get("prompt"), mask_alignment=mask_alignment))
     return _aggregate(rows), rows
 
 
@@ -143,6 +184,7 @@ def build_segmentation_row(
     elapsed_ms: float,
     modality: str = "ir",
     prompt: Dict[str, object] | None = None,
+    mask_alignment: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     pred_area = float((pred_mask > 0.5).sum())
     gt_area = float((gt_mask > 0.5).sum())
@@ -194,6 +236,7 @@ def build_segmentation_row(
         "BBoxIoU": bbox_iou(pred_box, gt_box),
         "PredAreaRatio": pred_area / float(height * width),
         "PredAreaPixels": pred_area,
+        **(mask_alignment or {}),
         **prompt_metadata,
     }
     if has_mask_gt:

@@ -18,7 +18,7 @@ from ..core.interfaces import ArtifactRecord, InferenceMode, PipelineStage, Prom
 from ..data import build_dataset_adapter
 from ..data.views import build_image_view, build_track_view
 from ..evaluation.reporting import write_results
-from ..evaluation.runner import evaluate_method
+from ..evaluation.runner import align_mask_to_sample, evaluate_method
 from ..evaluation.visualization import save_visualizations
 from .stages import run_adapt_stage, run_distill_stage, run_quantize_stage, run_transfer_stage
 
@@ -219,11 +219,15 @@ def _build_visual_records(
             representative = items[0]
             prediction = method.predict_sample(representative)
             gt_instances = [{"mask": item.mask_array} for item in items if item.mask_array is not None]
+            pred_instances = []
+            for instance in prediction.get("instances", []):
+                aligned_mask, _ = align_mask_to_sample(instance["mask"], representative)
+                pred_instances.append({**instance, "mask": aligned_mask})
             records.append(
                 {
                     "sample": representative,
                     "gt_instances": gt_instances,
-                    "pred_instances": prediction.get("instances", []),
+                    "pred_instances": pred_instances,
                 }
             )
             if len(records) >= visual_limit:
@@ -235,7 +239,7 @@ def _build_visual_records(
         for _, items in track_view.items():
             predictions = method.predict_sequence(items)
             for item in items:
-                pred_mask = np.asarray(predictions[item.sample_id], dtype=np.float32)
+                pred_mask, _ = align_mask_to_sample(predictions[item.sample_id], item)
                 records.append(
                     {
                         "sample": item,
@@ -249,7 +253,7 @@ def _build_visual_records(
 
     for item in samples[:visual_limit]:
         prediction = method.predict_sample(item)
-        pred_mask = np.asarray(prediction["mask"], dtype=np.float32)
+        pred_mask, _ = align_mask_to_sample(prediction["mask"], item)
         records.append(
             {
                 "sample": item,
