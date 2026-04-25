@@ -1,0 +1,54 @@
+artifact_root: "artifacts/paper_v1"
+output_dir: "artifacts/paper_v1/analysis"
+matrix: "configs/paper_experiments_v1.yaml"
+paths: "configs/local_paths.yaml"
+
+experiment_groups:
+  - "T1_oracle_prompt_baselines"
+  - "T2_ir_auto_prompt"
+  - "T3_prior_prompt_ablation"
+
+primary_metric: "mIoU"
+metrics:
+  - "mIoU"
+  - "Dice"
+  - "TargetRecallIoU25"
+  - "FalseAlarmPixelsPerMP"
+  - "LatencyMs"
+
+lower_is_better:
+  - "FalseAlarmPixelsPerMP"
+  - "FalseAlarmComponents"
+  - "LatencyMs"
+
+group_keys:
+  - "dataset"
+  - "method"
+  - "target_scale"
+  - "annotation_protocol_flag"
+
+case_selection:
+  top_k: 8
+  primary_metric: "mIoU"
+
+statistics:
+  n_bootstrap: 10000
+  ci: 0.95
+  random_seed: 42
+  low_power_threshold: 20
+  comparisons:
+    - name: "sam2_box_oracle_vs_bbox_rect"
+      baseline: "bbox_rect"
+      candidate: "sam2_box_oracle"
+    - name: "sam2_box_point_oracle_vs_sam2_box_oracle"
+      baseline: "sam2_box_oracle"
+      candidate: "sam2_box_point_oracle"
+    - name: "sam2_point_oracle_vs_sam2_box_oracle"
+      baseline: "sam2_box_oracle"
+      candidate: "sam2_point_oracle"
+    - name: "sam2_no_prompt_auto_mask_vs_sam2_box_oracle"
+      baseline: "sam2_box_oracle"
+      candidate: "sam2_no_prompt_auto_mask"
+    - name: "sam2_physics_auto_prompt_vs_sam2_no_prompt_auto_mask"
+      baseline: "sam2_no_prompt_auto_mask"
+      candidate: "sam2_physics_auto_prompt"

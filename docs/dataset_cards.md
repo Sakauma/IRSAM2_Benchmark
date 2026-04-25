@@ -29,6 +29,16 @@
 - `RBGTTinyIRAdapter`：`RBGT-Tiny` 灰度红外分支
 - `GenericImageMaskAdapter`：任意 `images/ + masks/`
 
+## 论文 IR-only 约束
+
+论文实验只允许使用红外图像。
+
+- `modality` 必须记录为 `ir`
+- `SAM2` 所需的三通道输入只能由单通道红外图像复制得到
+- 不允许读取真实 RGB 图像作为输入或对比
+- `RBGT-Tiny` 只使用红外分支和 box 标注
+- `MultiModal` 使用 `img/ + label/` 结构，通过 `MultiModalAdapter` 解码 JSON polygon 为 mask
+
 ## 通用 Image+Mask 策略
 
 `GenericImageMaskAdapter` 必须支持：

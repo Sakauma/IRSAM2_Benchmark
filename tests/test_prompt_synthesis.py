@@ -18,6 +18,10 @@ class PromptSynthesisTests(unittest.TestCase):
         self.assertGreaterEqual(loose[2], 7.0)
         self.assertGreaterEqual(loose[3], 5.0)
 
+    def test_default_expand_box_caps_small_target_growth(self):
+        loose = expand_box_xyxy([111, 178, 114, 181], width=256, height=256)
+        self.assertEqual(loose, [109.5, 176.5, 115.5, 182.5])
+
     def test_connected_components(self):
         mask = np.zeros((5, 5), dtype=np.float32)
         mask[0, 0] = 1.0

@@ -1,5 +1,12 @@
 # 配置索引
 
+## 论文实验矩阵
+
+- `paper_experiments_v1.yaml`：IR-only 论文实验矩阵，配合 `scripts/run_paper_experiments.py` 使用。
+- `local_paths.example.yaml`：机器本地路径配置模板，复制为 `local_paths.yaml` 后填写数据集、SAM2 和 artifact 路径。
+- `paper_analysis_v1.yaml`：论文基准结果分析配置，配合 `scripts/analyze_paper_results.py` 使用。
+- `server_5090_full_benchmark.yaml`：单张 RTX 5090 完整基准的 checkpoint、prompt policy、suite 和分析默认配置。
+
 本目录按运行规模与数据集组织 benchmark 配置。
 
 ## MultiModalCOCOClean

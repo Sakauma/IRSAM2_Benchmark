@@ -86,6 +86,75 @@ class GenericMaskAdapterTests(unittest.TestCase):
             self.assertEqual(len({sample.sample_id for sample in loaded.samples}), 2)
             self.assertEqual({sample.track_id for sample in loaded.samples}, {"1", "2"})
 
+    def test_generic_mask_matches_pixels_suffix(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            images = root / "images"
+            masks = root / "masks"
+            images.mkdir()
+            masks.mkdir()
+            Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(images / "Misc_12.png")
+            mask = np.zeros((8, 8), dtype=np.uint8)
+            mask[3:5, 2:4] = 255
+            Image.fromarray(mask).save(masks / "Misc_12_pixels0.png")
+
+            config_path = root / "config.json"
+            config_path.write_text(
+                """
+                {
+                  "model": {"model_id": "dummy", "family": "sam2", "cfg": "cfg", "ckpt": "ckpt", "repo": ""},
+                  "dataset": {"dataset_id": "generic", "adapter": "generic_image_mask", "root": ".", "images_dir": "images", "masks_dir": "masks", "mask_mode": "binary", "class_map": {}},
+                  "runtime": {"artifact_root": "artifacts", "reference_results_root": "reference_results", "output_name": "out", "device": "cpu", "num_workers": 0, "smoke_test": true, "max_samples": 0, "max_images": 0, "save_visuals": false, "seeds": [42]},
+                  "evaluation": {"benchmark_version": "v1", "track": "track_a_image_prompted", "protocol": "mask_supervised", "inference_mode": "box", "prompt_policy": {"name": "p", "prompt_type": "box", "prompt_source": "gt", "prompt_budget": 1, "multi_mask": false}},
+                  "stages": {},
+                  "ablations": {}
+                }
+                """,
+                encoding="utf-8",
+            )
+            config = load_app_config(config_path)
+            adapter = build_dataset_adapter(config)
+            loaded = adapter.load(config)
+
+            self.assertEqual(loaded.manifest.sample_count, 1)
+            self.assertEqual(loaded.samples[0].frame_id, "Misc_12")
+            self.assertEqual(loaded.samples[0].bbox_tight, [2.0, 3.0, 4.0, 5.0])
+
+    def test_binary_mask_prefers_255_when_mixed_positive_values_exist(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            images = root / "images"
+            masks = root / "masks"
+            images.mkdir()
+            masks.mkdir()
+            Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(images / "sample.png")
+            mask = np.zeros((8, 8), dtype=np.uint8)
+            mask[6, 6] = 64
+            mask[1:3, 2:4] = 255
+            Image.fromarray(mask).save(masks / "sample.png")
+
+            config_path = root / "config.json"
+            config_path.write_text(
+                """
+                {
+                  "model": {"model_id": "dummy", "family": "sam2", "cfg": "cfg", "ckpt": "ckpt", "repo": ""},
+                  "dataset": {"dataset_id": "generic", "adapter": "generic_image_mask", "root": ".", "images_dir": "images", "masks_dir": "masks", "mask_mode": "binary", "class_map": {}},
+                  "runtime": {"artifact_root": "artifacts", "reference_results_root": "reference_results", "output_name": "out", "device": "cpu", "num_workers": 0, "smoke_test": true, "max_samples": 0, "max_images": 0, "save_visuals": false, "seeds": [42]},
+                  "evaluation": {"benchmark_version": "v1", "track": "track_a_image_prompted", "protocol": "mask_supervised", "inference_mode": "box", "prompt_policy": {"name": "p", "prompt_type": "box", "prompt_source": "gt", "prompt_budget": 1, "multi_mask": false}},
+                  "stages": {},
+                  "ablations": {}
+                }
+                """,
+                encoding="utf-8",
+            )
+            config = load_app_config(config_path)
+            adapter = build_dataset_adapter(config)
+            loaded = adapter.load(config)
+
+            self.assertEqual(loaded.manifest.sample_count, 1)
+            self.assertEqual(loaded.samples[0].bbox_tight, [2.0, 1.0, 4.0, 3.0])
+            self.assertEqual(loaded.samples[0].metadata["mask_decode"]["binary_rule"], "value_255_when_mixed_positive_values")
+
 
 if __name__ == "__main__":
     unittest.main()

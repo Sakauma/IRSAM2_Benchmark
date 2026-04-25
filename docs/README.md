@@ -9,6 +9,10 @@
 - `track_definitions.md`：Track A/B/C/D 的语义定义
 - `metric_cards.md`：指标定义与解释说明
 - `dataset_cards.md`：数据集 adapter 假设与数据侧说明
+- `paper_experiment_matrix.md`：论文实验矩阵与启动入口
+- `server_5090_benchmark.md`：单张 RTX 5090 上的完整基准运行方案
+- `server_benchmark_runbook.md`：服务器运行、验收和 artifact 归档清单
+- `eval_v2_roadmap.md`：后续评估分析模块改进计划
 
 ## 实现说明
 

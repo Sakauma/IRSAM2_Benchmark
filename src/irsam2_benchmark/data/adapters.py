@@ -10,7 +10,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from ..config import AppConfig
-from .prompt_synthesis import connected_components, expand_box_xyxy, mask_to_point_prompt, mask_to_tight_box
+from .prompt_synthesis import connected_components, expand_box_xyxy, mask_derived_prompt_metadata, mask_to_point_prompt, mask_to_tight_box
 from .sample import Sample
 
 
@@ -98,6 +98,15 @@ def _sorted_files(root: Path, extensions: Sequence[str]) -> List[Path]:
     return sorted([path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in lower])
 
 
+def _generic_mask_index_keys(path: Path, root: Path) -> List[str]:
+    rel_stem = path.relative_to(root).with_suffix("").as_posix()
+    keys = [rel_stem]
+    normalized = re.sub(r"_pixels\d+$", "", rel_stem)
+    if normalized != rel_stem:
+        keys.append(normalized)
+    return keys
+
+
 def _relative_sequence_id(path: Path, root: Path) -> str:
     relative = path.relative_to(root)
     if relative.parent != Path("."):
@@ -160,6 +169,7 @@ def _build_sample_from_mask(
         bbox_loose=loose,
         point_prompt=point,
         mask_array=mask_array.astype(np.float32),
+        metadata={"prompt_generation": mask_derived_prompt_metadata()},
     )
 
 
@@ -441,10 +451,10 @@ class GenericImageMaskAdapter(DatasetAdapter):
         images_dir = root / (config.dataset.images_dir or "images")
         masks_dir = root / (config.dataset.masks_dir or "masks")
         images = _sorted_files(images_dir, config.dataset.image_extensions)
-        mask_index = {
-            path.relative_to(masks_dir).with_suffix("").as_posix(): path
-            for path in _sorted_files(masks_dir, config.dataset.mask_extensions)
-        }
+        mask_index: Dict[str, Path] = {}
+        for path in _sorted_files(masks_dir, config.dataset.mask_extensions):
+            for key in _generic_mask_index_keys(path, masks_dir):
+                mask_index.setdefault(key, path)
         samples: List[Sample] = []
         seen_images: set[str] = set()
         for image_path in images:
@@ -508,23 +518,36 @@ def _samples_from_generic_mask(
 
     samples: List[Sample] = []
     if resolved_mode == "binary":
-        instance_mask = (mask > 0).astype(np.float32)
+        binary_rule = "positive_values_gt_0"
+        if 255 in positive_values and len(positive_values) > 1:
+            instance_mask = (mask == 255).astype(np.float32)
+            binary_rule = "value_255_when_mixed_positive_values"
+        else:
+            instance_mask = (mask > 0).astype(np.float32)
+        if float(instance_mask.sum()) <= 0.0:
+            return []
+        sample = _build_sample_from_mask(
+            image_path=image_path,
+            sample_id=frame_id,
+            frame_id=frame_id,
+            sequence_id=sequence_id,
+            frame_index=frame_index,
+            temporal_key=temporal_key,
+            track_id=None,
+            category="foreground",
+            device_source=device_source,
+            annotation_protocol_flag="generic_binary_mask",
+            mask_array=instance_mask,
+            width=width,
+            height=height,
+        )
+        sample.metadata["mask_decode"] = {
+            "mask_mode": "binary",
+            "binary_rule": binary_rule,
+            "positive_values": positive_values,
+        }
         samples.append(
-            _build_sample_from_mask(
-                image_path=image_path,
-                sample_id=frame_id,
-                frame_id=frame_id,
-                sequence_id=sequence_id,
-                frame_index=frame_index,
-                temporal_key=temporal_key,
-                track_id=None,
-                category="foreground",
-                device_source=device_source,
-                annotation_protocol_flag="generic_binary_mask",
-                mask_array=instance_mask,
-                width=width,
-                height=height,
-            )
+            sample
         )
         return samples
 
@@ -582,6 +605,11 @@ def _decode_coco_segmentation(segmentation: object, height: int, width: int) -> 
     if isinstance(segmentation, list):
         canvas = np.zeros((height, width), dtype=np.float32)
         for polygon in segmentation:
+            if polygon and isinstance(polygon[0], list):
+                for nested_polygon in polygon:
+                    if len(nested_polygon) >= 6:
+                        canvas = np.maximum(canvas, _polygon_to_mask(nested_polygon, height, width))
+                continue
             if len(polygon) < 6:
                 continue
             canvas = np.maximum(canvas, _polygon_to_mask(polygon, height, width))

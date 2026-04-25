@@ -7,6 +7,17 @@ from typing import Iterable, List, Tuple
 import numpy as np
 
 
+DEFAULT_BOX_PAD_RATIO = 0.15
+DEFAULT_BOX_MIN_PAD = 2.0
+DEFAULT_BOX_MIN_SIDE = 0.0
+DEFAULT_BOX_MAX_SIDE_MULTIPLIER = 2.0
+MASK_DERIVED_LOOSE_BOX_CENTROID_POINT_PROTOCOL = "mask_derived_adaptive_loose_box_centroid_point_v2"
+MASK_DERIVED_LEGACY_LOOSE_BOX_CENTROID_POINT_PROTOCOL = "mask_derived_loose_box_centroid_point_v1"
+MASK_DERIVED_TIGHT_BOX_CENTROID_POINT_PROTOCOL = "mask_derived_tight_box_centroid_point_v1"
+MASK_DERIVED_CENTROID_POINT_PROTOCOL = "mask_derived_centroid_point_v1"
+MASK_DERIVED_PROMPT_PROTOCOL = MASK_DERIVED_LOOSE_BOX_CENTROID_POINT_PROTOCOL
+
+
 def clamp_box_xyxy(box: Iterable[float], width: int, height: int) -> list[float]:
     x1, y1, x2, y2 = [float(v) for v in box]
     x1 = min(max(0.0, x1), max(0.0, width - 1.0))
@@ -23,12 +34,25 @@ def mask_to_tight_box(mask: np.ndarray) -> list[float]:
     return [float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1)]
 
 
-def expand_box_xyxy(box: Iterable[float], width: int, height: int, pad_ratio: float = 0.15, min_pad: float = 2.0, min_side: float = 12.0) -> list[float]:
+def expand_box_xyxy(
+    box: Iterable[float],
+    width: int,
+    height: int,
+    pad_ratio: float = DEFAULT_BOX_PAD_RATIO,
+    min_pad: float = DEFAULT_BOX_MIN_PAD,
+    min_side: float = DEFAULT_BOX_MIN_SIDE,
+    max_side_multiplier: float | None = DEFAULT_BOX_MAX_SIDE_MULTIPLIER,
+) -> list[float]:
     x1, y1, x2, y2 = [float(v) for v in box]
     bw = max(1.0, x2 - x1)
     bh = max(1.0, y2 - y1)
     pad_x = max(min_pad, bw * pad_ratio)
     pad_y = max(min_pad, bh * pad_ratio)
+    if max_side_multiplier is not None and max_side_multiplier > 0:
+        max_pad_x = max(0.0, (bw * float(max_side_multiplier) - bw) * 0.5)
+        max_pad_y = max(0.0, (bh * float(max_side_multiplier) - bh) * 0.5)
+        pad_x = min(pad_x, max_pad_x)
+        pad_y = min(pad_y, max_pad_y)
     loose = [x1 - pad_x, y1 - pad_y, x2 + pad_x, y2 + pad_y]
     if loose[2] - loose[0] < min_side:
         extra = 0.5 * (min_side - (loose[2] - loose[0]))
@@ -46,6 +70,23 @@ def mask_to_point_prompt(mask: np.ndarray) -> list[float]:
     if xs.size == 0 or ys.size == 0:
         return [0.0, 0.0]
     return [float(xs.mean()), float(ys.mean())]
+
+
+def mask_derived_prompt_metadata() -> dict[str, object]:
+    return {
+        "source": "gt_mask",
+        "protocol": "mask_derived_gt_prompt_rules_v1",
+        "loose_box_point_protocol": MASK_DERIVED_LOOSE_BOX_CENTROID_POINT_PROTOCOL,
+        "tight_box_point_protocol": MASK_DERIVED_TIGHT_BOX_CENTROID_POINT_PROTOCOL,
+        "point_protocol": MASK_DERIVED_CENTROID_POINT_PROTOCOL,
+        "tight_box_rule": "axis_aligned_foreground_bounding_rectangle",
+        "loose_box_rule": "expand_tight_box_with_adaptive_small_target_cap_then_clip_to_image",
+        "loose_box_pad_ratio": DEFAULT_BOX_PAD_RATIO,
+        "loose_box_min_pad": DEFAULT_BOX_MIN_PAD,
+        "loose_box_min_side": DEFAULT_BOX_MIN_SIDE,
+        "loose_box_max_side_multiplier": DEFAULT_BOX_MAX_SIDE_MULTIPLIER,
+        "point_rule": "foreground_pixel_centroid",
+    }
 
 
 def connected_components(mask: np.ndarray) -> List[np.ndarray]:

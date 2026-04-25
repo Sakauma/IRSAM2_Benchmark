@@ -43,6 +43,7 @@ class DatasetConfig:
     dataset_id: str
     adapter: str
     root: str
+    modality: str = "ir"
     images_dir: Optional[str] = None
     masks_dir: Optional[str] = None
     annotations_dir: Optional[str] = None
@@ -110,6 +111,8 @@ class AppConfig:
     evaluation: EvaluationConfig
     stages: StageConfig
     ablations: Dict[str, Any]
+    method: Dict[str, Any] = field(default_factory=dict)
+    modules: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def dataset_root(self) -> Path:
@@ -184,4 +187,6 @@ def load_app_config(config_path: str | Path) -> AppConfig:
         ),
         stages=StageConfig(**raw.get("stages", {})),
         ablations=raw.get("ablations", {}),
+        method=raw.get("method", {}),
+        modules=raw.get("modules", {}),
     )

@@ -13,7 +13,7 @@
   - 通用 `images/ + masks/` 数据集
 - 为 mask-only 数据集增加了确定性的 prompt synthesis：
   - tight box
-  - loose box
+  - adaptive loose box
   - point prompt
 - 增加了一等公民化的 SAM2 baseline：
   - `BBoxRectMaskBaseline`

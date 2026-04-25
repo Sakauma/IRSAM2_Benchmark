@@ -42,6 +42,8 @@ def _build_benchmark_spec(config: AppConfig, inference_mode: InferenceMode) -> D
         "protocol": config.evaluation.protocol,
         "inference_mode": inference_mode.value,
         "prompt_policy": _effective_prompt_policy(config, inference_mode),
+        "method": config.method,
+        "modules": config.modules,
         "config_path": str(config.config_path),
     }
 

@@ -13,6 +13,9 @@
 
 - `run_official_baseline_matrix.sh`：官方 SAM2 baseline matrix 的 shell 入口。
 - `run_official_baseline_matrix.py`：展开模型、数据集和模式组合的矩阵驱动脚本。
+- `run_paper_experiments.py`：展开 IR-only 论文实验矩阵，支持 `--paths`、`--group` 与 `--dry-run`。
+- `run_5090_full_benchmark.py`：面向单张 RTX 5090 的完整基准入口，展开 4 个 SAM2.1 checkpoint、4 种主 prompt policy、全部论文数据集，并额外运行 tight-box/loose-box 协议诊断。
+- `analyze_paper_results.py`：分析已完成的论文实验 artifacts，生成表格、显著性检验、错误分桶和 Markdown 报告。
 
 官方矩阵默认启用断点续跑：`MATRIX_RESUME=1`。如果某个组合已经包含完整的 `summary.json`、`results.json`、`eval_reports/rows.json`，并且 `run_metadata.json` 标记为 `completed`，脚本会跳过该组合并把它记为 `skipped`。如需强制重跑，设置：
 
@@ -31,3 +34,25 @@ MATRIX_RESUME=0 bash scripts/run_official_baseline_matrix.sh
 - `run_autodl_smoke.sh`：面向 `MultiModal` 或 `RBGT-Tiny` 的 smoke 运行辅助脚本。
 
 所有脚本都默认以仓库根目录作为工作目录锚点，并在需要时自动把 `src/` 注入到 `PYTHONPATH`。
+
+## 5090 单卡完整基准
+
+先编辑路径：
+
+```bash
+cp configs/local_paths.example.yaml configs/local_paths.yaml
+```
+
+然后检查展开的命令：
+
+```bash
+python scripts/run_5090_full_benchmark.py --paths configs/local_paths.yaml --dry-run
+```
+
+正式运行：
+
+```bash
+python scripts/run_5090_full_benchmark.py --paths configs/local_paths.yaml
+```
+
+详细说明见 `docs/server_5090_benchmark.md`。

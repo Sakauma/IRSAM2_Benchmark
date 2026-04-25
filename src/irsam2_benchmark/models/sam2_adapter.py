@@ -14,6 +14,25 @@ from ..core.interfaces import ModelCapabilities, PromptPolicy, PromptType
 from ..data.sample import Sample
 
 
+def _require_module(module_name: str, package_name: str):
+    try:
+        return importlib.import_module(module_name)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Required SAM2 runtime dependency is not available: {package_name}. "
+            f"Install the benchmark runtime dependencies and verify your PyTorch/CUDA environment."
+        ) from exc
+
+
+def check_sam2_runtime(repo: Path) -> None:
+    _require_module("torch", "torch>=2.5.1")
+    _require_module("torchvision", "torchvision>=0.20.1")
+    _require_module("hydra", "hydra-core>=1.3.2")
+    _require_module("iopath", "iopath>=0.1.10")
+    if not repo.exists():
+        raise RuntimeError(f"SAM2_REPO does not exist: {repo}")
+
+
 def load_image_rgb(path: Path) -> np.ndarray:
     raw = np.array(Image.open(path).convert("L"), dtype=np.uint8)
     min_v = float(raw.min())
@@ -45,6 +64,7 @@ class SAM2ModelAdapter:
     def ensure_loaded(self) -> None:
         if self.model is not None:
             return
+        check_sam2_runtime(self.repo)
         if str(self.repo) not in sys.path:
             sys.path.insert(0, str(self.repo))
         from hydra import initialize_config_module

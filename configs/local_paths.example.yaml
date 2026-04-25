@@ -1,0 +1,23 @@
+sam2:
+  repo: "/path/to/sam2"
+  checkpoint_root: "/path/to/sam2/checkpoints"
+
+artifacts:
+  root: "artifacts"
+
+datasets:
+  nuaa_sirst: "/path/to/NUAA-SIRST"
+  nudt_sirst: "/path/to/NUDT-SIRST"
+  irstd_1k: "/path/to/IRSTD-1K"
+  multimodal: "/path/to/MultiModal"
+  rbgt_tiny_ir_box: "/path/to/RBGT-Tiny"
+
+execution:
+  cuda_visible_devices: "0"
+  pytorch_cuda_alloc_conf: "expandable_segments:True"
+
+# Optional machine-level runtime override.
+# The 5090 full benchmark defaults to one deterministic seed because zero-shot
+# SAM2 inference does not need repeated training seeds.
+runtime:
+  seeds: [42]
