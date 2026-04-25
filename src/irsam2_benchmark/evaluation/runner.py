@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import time
+import traceback
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List
 
 import numpy as np
@@ -39,6 +42,81 @@ def _summarize_values(values: Iterable[str]) -> str:
     if len(unique) == 1:
         return unique[0]
     return "multiple"
+
+
+def _chunks(items: List[Sample], batch_size: int) -> Iterable[List[Sample]]:
+    for start in range(0, len(items), batch_size):
+        yield items[start : start + batch_size]
+
+
+def _is_cuda_oom(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return isinstance(exc, RuntimeError) and "cuda" in text and "out of memory" in text
+
+
+def _clear_cuda_cache() -> None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        return
+
+
+def _error_log_path(config: AppConfig | None):
+    output_dir = getattr(config, "output_dir", None)
+    if output_dir is None:
+        return None
+    return output_dir / "eval_reports" / "error_log.jsonl"
+
+
+def _reset_error_log(config: AppConfig | None) -> None:
+    path = _error_log_path(config)
+    if path is not None and path.exists():
+        path.unlink()
+
+
+def _write_sample_error(
+    *,
+    config: AppConfig | None,
+    method,
+    sample: Sample,
+    exc: Exception,
+    context: Dict[str, Any] | None = None,
+) -> None:
+    path = _error_log_path(config)
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "dataset_id": getattr(getattr(config, "dataset", None), "dataset_id", ""),
+        "model_id": getattr(getattr(config, "model", None), "model_id", ""),
+        "config_path": str(getattr(config, "config_path", "")),
+        "method_name": getattr(method, "name", method.__class__.__name__),
+        "inference_mode": getattr(getattr(method, "inference_mode", None), "value", str(getattr(method, "inference_mode", ""))),
+        "sample_id": sample.sample_id,
+        "frame_id": sample.frame_id,
+        "sequence_id": sample.sequence_id,
+        "track_id": sample.track_id,
+        "image_path": str(sample.image_path),
+        "mask_path": "" if sample.mask_path is None else str(sample.mask_path),
+        "error_type": exc.__class__.__name__,
+        "error_message": str(exc),
+        "traceback": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        **(context or {}),
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _merge_error_context(base: Dict[str, Any] | None, extra: Dict[str, Any]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    if base:
+        payload.update(base)
+    payload.update(extra)
+    return payload
 
 
 def _mask_box(mask: np.ndarray) -> list[float] | None:
@@ -85,7 +163,82 @@ def align_mask_to_sample(mask: np.ndarray, item: Sample) -> tuple[np.ndarray, Di
     return aligned, metadata
 
 
-def _image_level_row(items: List[Sample], elapsed_ms: float, instance_metrics: Dict[str, float], modality: str) -> Dict[str, Any]:
+def _predict_batch_with_fallback(
+    method,
+    batch: List[Sample],
+    config: AppConfig,
+    *,
+    track_name: str,
+    requested_batch_index: int,
+    error_context: Dict[str, Any] | None = None,
+) -> List[tuple[List[Sample], Dict[str, Dict[str, Any]], float]]:
+    start = time.perf_counter()
+    try:
+        predict_samples = getattr(method, "predict_samples", None)
+        if callable(predict_samples):
+            predictions = predict_samples(batch)
+        else:
+            predictions = {sample.sample_id: method.predict_sample(sample) for sample in batch}
+        _validate_batch_predictions(batch, predictions)
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        return [(batch, predictions, elapsed_ms)]
+    except Exception as exc:
+        if _is_cuda_oom(exc):
+            _clear_cuda_cache()
+        if len(batch) <= 1:
+            _write_sample_error(
+                config=config,
+                method=method,
+                sample=batch[0],
+                exc=exc,
+                context=_merge_error_context(
+                    error_context,
+                    {
+                        "track_name": track_name,
+                        "requested_batch_index": requested_batch_index,
+                        "requested_batch_size": len(batch),
+                        "stage": "prompted_batch_prediction",
+                    },
+                ),
+            )
+            return []
+        midpoint = len(batch) // 2
+        return _predict_batch_with_fallback(
+            method,
+            batch[:midpoint],
+            config,
+            track_name=track_name,
+            requested_batch_index=requested_batch_index,
+            error_context=error_context,
+        ) + _predict_batch_with_fallback(
+            method,
+            batch[midpoint:],
+            config,
+            track_name=track_name,
+            requested_batch_index=requested_batch_index,
+            error_context=error_context,
+        )
+
+
+def _validate_batch_predictions(batch: List[Sample], predictions: Dict[str, Dict[str, Any]]) -> None:
+    expected = [sample.sample_id for sample in batch]
+    if len(set(expected)) != len(expected):
+        raise RuntimeError(f"Batch contains duplicate sample_id values: {expected!r}.")
+    expected_set = set(expected)
+    actual_set = set(predictions)
+    if actual_set != expected_set:
+        missing = sorted(expected_set - actual_set)
+        extra = sorted(actual_set - expected_set)
+        raise RuntimeError(f"Batch prediction/sample_id mismatch. missing={missing!r}, extra={extra!r}.")
+
+
+def _image_level_row(
+    items: List[Sample],
+    elapsed_ms: float,
+    instance_metrics: Dict[str, float],
+    modality: str,
+    extra_metadata: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     representative = items[0]
     row = {
         "sample_id": representative.frame_id,
@@ -100,6 +253,7 @@ def _image_level_row(items: List[Sample], elapsed_ms: float, instance_metrics: D
         "annotation_protocol_flag": _summarize_values(item.annotation_protocol_flag for item in items),
         "LatencyMs": elapsed_ms,
         **instance_metrics,
+        **(extra_metadata or {}),
     }
     track_value = _summarize_values(item.track_id for item in items if item.track_id is not None)
     if track_value != "unknown":
@@ -114,35 +268,100 @@ def evaluate_method(
     config: AppConfig,
     track_name: str,
     inference_mode: InferenceMode,
+    error_context: Dict[str, Any] | None = None,
 ) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
     modality = getattr(getattr(config, "dataset", None), "modality", "ir")
+    run_error_context = dict(error_context or {})
 
     rows: List[Dict[str, Any]] = []
     if inference_mode == InferenceMode.VIDEO_PROPAGATION:
-        track_view = build_track_view(samples)
+        try:
+            track_view = build_track_view(samples)
+        except Exception as exc:
+            for item in samples:
+                _write_sample_error(
+                    config=config,
+                    method=method,
+                    sample=item,
+                    exc=exc,
+                    context=_merge_error_context(run_error_context, {"track_name": track_name, "stage": "video_track_view"}),
+                )
+            return {}, []
         sequence_metrics = []
         for (sequence_id, track_id), items in track_view.items():
+            group_sample_ids = [item.sample_id for item in items]
             frame_ids = {item.frame_id for item in items}
             if len(frame_ids) != len(items):
-                raise RuntimeError(
+                exc = RuntimeError(
                     f"Video propagation expects one sample per frame within a track, got duplicates for sequence_id={sequence_id!r}, track_id={track_id!r}."
                 )
+                for item in items:
+                    _write_sample_error(
+                        config=config,
+                        method=method,
+                        sample=item,
+                        exc=exc,
+                        context=_merge_error_context(
+                            run_error_context,
+                            {
+                                "track_name": track_name,
+                                "stage": "video_track_validation",
+                                "group_sample_ids": group_sample_ids,
+                            },
+                        ),
+                    )
+                continue
             start = time.perf_counter()
-            predictions = method.predict_sequence(items)
+            try:
+                predictions = method.predict_sequence(items)
+            except Exception as exc:
+                for item in items:
+                    _write_sample_error(
+                        config=config,
+                        method=method,
+                        sample=item,
+                        exc=exc,
+                        context=_merge_error_context(
+                            run_error_context,
+                            {
+                                "track_name": track_name,
+                                "stage": "video_sequence_prediction",
+                                "group_sample_ids": group_sample_ids,
+                            },
+                        ),
+                    )
+                continue
             elapsed_ms = (time.perf_counter() - start) * 1000.0 / max(1, len(items))
             sequence_rows = []
             for item in items:
-                pred_mask, mask_alignment = align_mask_to_sample(predictions[item.sample_id], item)
-                gt_mask = np.asarray(item.mask_array, dtype=np.float32) if item.mask_array is not None else np.zeros((item.height, item.width), dtype=np.float32)
-                row = build_segmentation_row(item, pred_mask, gt_mask, elapsed_ms, modality=modality, mask_alignment=mask_alignment)
-                row["track"] = track_name
-                row["track_id"] = track_id
-                sequence_rows.append({**row, "pred_mask": pred_mask})
-                rows.append(row)
-            temporal = compute_temporal_metrics(sequence_rows)
-            temporal["sequence_id"] = sequence_id
-            temporal["track_id"] = track_id
-            sequence_metrics.append(temporal)
+                try:
+                    pred_mask, mask_alignment = align_mask_to_sample(predictions[item.sample_id], item)
+                    gt_mask = np.asarray(item.mask_array, dtype=np.float32) if item.mask_array is not None else np.zeros((item.height, item.width), dtype=np.float32)
+                    row = build_segmentation_row(item, pred_mask, gt_mask, elapsed_ms, modality=modality, mask_alignment=mask_alignment)
+                    row["track"] = track_name
+                    row["track_id"] = track_id
+                    sequence_rows.append({**row, "pred_mask": pred_mask})
+                    rows.append(row)
+                except Exception as exc:
+                    _write_sample_error(
+                        config=config,
+                        method=method,
+                        sample=item,
+                        exc=exc,
+                        context=_merge_error_context(
+                            run_error_context,
+                            {
+                                "track_name": track_name,
+                                "stage": "video_row_build",
+                                "group_sample_ids": group_sample_ids,
+                            },
+                        ),
+                    )
+            if sequence_rows:
+                temporal = compute_temporal_metrics(sequence_rows)
+                temporal["sequence_id"] = sequence_id
+                temporal["track_id"] = track_id
+                sequence_metrics.append(temporal)
         summary = _aggregate(rows)
         if sequence_metrics:
             summary.update(_aggregate(sequence_metrics))
@@ -153,27 +372,107 @@ def evaluate_method(
         for _, items in image_view.items():
             representative = items[0]
             start = time.perf_counter()
-            pred = method.predict_sample(representative)
+            group_sample_ids = [item.sample_id for item in items]
+            try:
+                pred = method.predict_sample(representative)
+            except Exception as exc:
+                _write_sample_error(
+                    config=config,
+                    method=method,
+                    sample=representative,
+                    exc=exc,
+                    context=_merge_error_context(
+                        run_error_context,
+                        {
+                            "track_name": track_name,
+                            "stage": "auto_mask_prediction",
+                            "group_sample_ids": group_sample_ids,
+                        },
+                    ),
+                )
+                continue
             elapsed_ms = (time.perf_counter() - start) * 1000.0
-            gt_instances = [{"mask": item.mask_array} for item in items if item.mask_array is not None]
-            pred_instances = []
-            for instance in pred.get("instances", []):
-                aligned_mask, _ = align_mask_to_sample(instance["mask"], representative)
-                pred_instances.append({**instance, "mask": aligned_mask})
-            if gt_instances:
-                instance_metrics = greedy_match_instances(pred_instances, gt_instances)
-            else:
-                instance_metrics = {"num_pred_instances": float(len(pred_instances)), "num_gt_instances": 0.0}
-            rows.append(_image_level_row(items, elapsed_ms, instance_metrics, modality=modality))
+            try:
+                gt_instances = [{"mask": item.mask_array} for item in items if item.mask_array is not None]
+                pred_instances = []
+                for instance in pred.get("instances", []):
+                    aligned_mask, _ = align_mask_to_sample(instance["mask"], representative)
+                    pred_instances.append({**instance, "mask": aligned_mask})
+                if gt_instances:
+                    instance_metrics = greedy_match_instances(pred_instances, gt_instances)
+                else:
+                    instance_metrics = {"num_pred_instances": float(len(pred_instances)), "num_gt_instances": 0.0}
+                rows.append(
+                    _image_level_row(
+                        items,
+                        elapsed_ms,
+                        instance_metrics,
+                        modality=modality,
+                        extra_metadata={"AutoMaskPointsPerBatch": pred.get("auto_mask_points_per_batch")},
+                    )
+                )
+            except Exception as exc:
+                _write_sample_error(
+                    config=config,
+                    method=method,
+                    sample=representative,
+                    exc=exc,
+                    context=_merge_error_context(
+                        run_error_context,
+                        {
+                            "track_name": track_name,
+                            "stage": "auto_mask_row_build",
+                            "group_sample_ids": group_sample_ids,
+                        },
+                    ),
+                )
         return _aggregate(rows), rows
 
-    for item in samples:
-        start = time.perf_counter()
-        pred = method.predict_sample(item)
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
-        pred_mask, mask_alignment = align_mask_to_sample(pred["mask"], item)
-        gt_mask = np.asarray(item.mask_array, dtype=np.float32) if item.mask_array is not None else np.zeros((item.height, item.width), dtype=np.float32)
-        rows.append(build_segmentation_row(item, pred_mask, gt_mask, elapsed_ms, modality=modality, prompt=pred.get("prompt"), mask_alignment=mask_alignment))
+    configured_batch_size = max(1, int(getattr(getattr(config, "runtime", None), "image_batch_size", 1)))
+    batch_index = 0
+    for requested_batch_index, batch in enumerate(_chunks(samples, configured_batch_size)):
+        batch_results = _predict_batch_with_fallback(
+            method,
+            batch,
+            config,
+            track_name=track_name,
+            requested_batch_index=requested_batch_index,
+            error_context=run_error_context,
+        )
+        for batch_split_index, (actual_batch, predictions, batch_elapsed_ms) in enumerate(batch_results):
+            per_sample_elapsed_ms = batch_elapsed_ms / max(1, len(actual_batch))
+            for batch_item_index, item in enumerate(actual_batch):
+                try:
+                    pred = predictions[item.sample_id]
+                    pred_mask, mask_alignment = align_mask_to_sample(pred["mask"], item)
+                    gt_mask = np.asarray(item.mask_array, dtype=np.float32) if item.mask_array is not None else np.zeros((item.height, item.width), dtype=np.float32)
+                    row = build_segmentation_row(item, pred_mask, gt_mask, per_sample_elapsed_ms, modality=modality, prompt=pred.get("prompt"), mask_alignment=mask_alignment)
+                    row["BatchSize"] = len(actual_batch)
+                    row["BatchIndex"] = batch_index
+                    row["BatchRequestedIndex"] = requested_batch_index
+                    row["BatchSplitIndex"] = batch_split_index
+                    row["BatchItemIndex"] = batch_item_index
+                    row["BatchLatencyMs"] = batch_elapsed_ms
+                    rows.append(row)
+                except Exception as exc:
+                    _write_sample_error(
+                        config=config,
+                        method=method,
+                        sample=item,
+                        exc=exc,
+                        context=_merge_error_context(
+                            run_error_context,
+                            {
+                                "track_name": track_name,
+                                "stage": "prompted_row_build",
+                                "requested_batch_index": requested_batch_index,
+                                "batch_index": batch_index,
+                                "batch_split_index": batch_split_index,
+                                "batch_item_index": batch_item_index,
+                            },
+                        ),
+                    )
+            batch_index += 1
     return _aggregate(rows), rows
 
 

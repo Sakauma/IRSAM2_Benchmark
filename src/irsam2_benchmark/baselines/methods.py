@@ -36,6 +36,9 @@ class BaseMethod:
     def predict_sample(self, sample: Sample) -> Dict[str, Any]:
         raise NotImplementedError
 
+    def predict_samples(self, samples: List[Sample]) -> Dict[str, Dict[str, Any]]:
+        return {sample.sample_id: self.predict_sample(sample) for sample in samples}
+
     def predict_sequence(self, samples: List[Sample]) -> Dict[str, np.ndarray]:
         return {sample.sample_id: self.predict_sample(sample)["mask"] for sample in samples}
 
@@ -91,8 +94,7 @@ class ZeroShotSAM2(BaseMethod):
         }
         return payload
 
-    def predict_sample(self, sample: Sample) -> Dict[str, Any]:
-        image_rgb = load_image_rgb(sample.image_path)
+    def _predict_kwargs_and_prompt(self, sample: Sample) -> tuple[Dict[str, Any], Dict[str, Any]]:
         kwargs: Dict[str, Any] = {"multimask_output": self.inference_mode == InferenceMode.MULTI_MASK}
         box = self._sample_box(sample)
         point = sample.point_prompt
@@ -113,11 +115,40 @@ class ZeroShotSAM2(BaseMethod):
             prompt = self._prompt_payload(sample, box=box)
         else:
             raise ValueError(f"Unsupported zero-shot prompt mode: {self.inference_mode.value}")
-        result = self.adapter.predict_image(image_rgb, **kwargs)
+        return kwargs, prompt
+
+    def _prediction_from_result(self, result: Dict[str, Any], prompt: Dict[str, Any]) -> Dict[str, Any]:
         masks = result["masks"]
         scores = result["scores"]
         best_idx = int(np.argmax(scores))
         return {"mask": masks[best_idx].astype(np.float32), "score": float(scores[best_idx]), "prompt": prompt}
+
+    def predict_sample(self, sample: Sample) -> Dict[str, Any]:
+        image_rgb = load_image_rgb(sample.image_path)
+        kwargs, prompt = self._predict_kwargs_and_prompt(sample)
+        result = self.adapter.predict_image(image_rgb, **kwargs)
+        return self._prediction_from_result(result, prompt)
+
+    def predict_samples(self, samples: List[Sample]) -> Dict[str, Dict[str, Any]]:
+        if not samples:
+            return {}
+        images = [load_image_rgb(sample.image_path) for sample in samples]
+        kwargs_and_prompts = [self._predict_kwargs_and_prompt(sample) for sample in samples]
+        kwargs_list = [item[0] for item in kwargs_and_prompts]
+        prompts = [item[1] for item in kwargs_and_prompts]
+        results = self.adapter.predict_images(
+            images,
+            boxes=[kwargs.get("box") for kwargs in kwargs_list],
+            points=[kwargs.get("points") for kwargs in kwargs_list],
+            point_labels=[kwargs.get("point_labels") for kwargs in kwargs_list],
+            multimask_output=self.inference_mode == InferenceMode.MULTI_MASK,
+        )
+        if len(results) != len(samples):
+            raise RuntimeError(f"Batch prediction returned {len(results)} results for {len(samples)} samples.")
+        return {
+            sample.sample_id: self._prediction_from_result(result, prompt)
+            for sample, result, prompt in zip(samples, results, prompts)
+        }
 
 
 class NoPromptAutoMaskSAM2(BaseMethod):
@@ -144,7 +175,9 @@ class NoPromptAutoMaskSAM2(BaseMethod):
                     "score": float(item.get("predicted_iou", item.get("stability_score", 1.0))),
                 }
             )
-        return {"instances": instances}
+        runtime = getattr(getattr(self.adapter, "config", None), "runtime", None)
+        points_per_batch = int(getattr(runtime, "auto_mask_points_per_batch", 64))
+        return {"instances": instances, "auto_mask_points_per_batch": points_per_batch}
 
 
 def load_image_tensor(path) -> torch.Tensor:

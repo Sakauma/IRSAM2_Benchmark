@@ -15,6 +15,7 @@
 - `run_official_baseline_matrix.py`：展开模型、数据集和模式组合的矩阵驱动脚本。
 - `run_paper_experiments.py`：展开 IR-only 论文实验矩阵，支持 `--paths`、`--group` 与 `--dry-run`。
 - `run_5090_full_benchmark.py`：面向单张 RTX 5090 的完整基准入口，展开 4 个 SAM2.1 checkpoint、4 种主 prompt policy、全部论文数据集，并额外运行 tight-box/loose-box 协议诊断。
+- `run_5090_micro_benchmark.py`：和 5090 完整基准展开相同组合，但每个数据集只跑前 24 张图像，输出到 `paper_5090_micro/`。
 - `analyze_paper_results.py`：分析已完成的论文实验 artifacts，生成表格、显著性检验、错误分桶和 Markdown 报告。
 
 官方矩阵默认启用断点续跑：`MATRIX_RESUME=1`。如果某个组合已经包含完整的 `summary.json`、`results.json`、`eval_reports/rows.json`，并且 `run_metadata.json` 标记为 `completed`，脚本会跳过该组合并把它记为 `skipped`。如需强制重跑，设置：
@@ -27,6 +28,8 @@ MATRIX_RESUME=0 bash scripts/run_official_baseline_matrix.sh
 
 - `matrix_summary.json` / `matrix_summary.csv`：成功或跳过组合的汇总。
 - `matrix_failures.json` / `matrix_failures.csv`：失败组合清单。存在失败时脚本会继续跑剩余组合，但最终返回非零退出码。
+
+单图级异常不会中断当前 run。预测、指标计算或可视化阶段的坏图会写入该 run 的 `eval_reports/error_log.jsonl`，后续可按 `sample_id`、`image_path`、`stage` 和 `error_message` 定位并单独重跑。
 
 ## AutoDL 辅助脚本
 
@@ -47,11 +50,13 @@ cp configs/local_paths.example.yaml configs/local_paths.yaml
 
 ```bash
 python scripts/run_5090_full_benchmark.py --paths configs/local_paths.yaml --dry-run
+python scripts/run_5090_micro_benchmark.py --paths configs/local_paths.yaml --dry-run
 ```
 
 正式运行：
 
 ```bash
+python scripts/run_5090_micro_benchmark.py --paths configs/local_paths.yaml --stop-on-error
 python scripts/run_5090_full_benchmark.py --paths configs/local_paths.yaml
 ```
 

@@ -43,6 +43,9 @@ class ConfigExtensionTests(unittest.TestCase):
             self.assertEqual(config.dataset.modality, "ir")
             self.assertEqual(config.method, {})
             self.assertEqual(config.modules, {})
+            self.assertEqual(config.runtime.image_batch_size, 1)
+            self.assertEqual(config.runtime.auto_mask_points_per_batch, 64)
+            self.assertTrue(config.runtime.batch_oom_fallback)
 
     def test_method_modules_and_modality_can_be_loaded(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -86,4 +89,3 @@ class ConfigExtensionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

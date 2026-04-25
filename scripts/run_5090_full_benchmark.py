@@ -138,8 +138,9 @@ def _run_is_complete(output_dir: Path) -> bool:
     return all((output_dir / relative).exists() for relative in REQUIRED_RUN_FILES)
 
 
-def _runtime_config(base_runtime: Dict[str, Any], suite_config: Dict[str, Any], paths: Dict[str, Any], smoke_test: bool) -> Dict[str, Any]:
+def _runtime_config(base_runtime: Dict[str, Any], suite_config: Dict[str, Any], checkpoint: Dict[str, Any], paths: Dict[str, Any], smoke_test: bool) -> Dict[str, Any]:
     runtime = _deep_merge(base_runtime, suite_config.get("runtime", {}))
+    runtime = _deep_merge(runtime, checkpoint.get("runtime", {}))
     if smoke_test:
         runtime = _deep_merge(runtime, suite_config.get("smoke_test_runtime", {}))
     runtime = _deep_merge(runtime, paths.get("runtime", {}))
@@ -149,6 +150,7 @@ def _runtime_config(base_runtime: Dict[str, Any], suite_config: Dict[str, Any], 
 def _model_config(checkpoint: Dict[str, Any], paths: Dict[str, Any]) -> Dict[str, Any]:
     model = copy.deepcopy(checkpoint)
     model.pop("alias", None)
+    model.pop("runtime", None)
     if paths.get("sam2", {}).get("repo"):
         model["repo"] = _path_from_config(str(paths["sam2"]["repo"]))
     model["ckpt"] = _resolve_checkpoint_path(model, paths)
@@ -172,7 +174,7 @@ def _build_app_config(
     method_entry = _resolve_method(base_matrix["methods"], method_id)
     dataset_config = copy.deepcopy(dataset_entry["config"])
     dataset_config["root"] = _resolve_dataset_root(dataset_entry, paths, dataset_id)
-    runtime = _runtime_config(base_matrix.get("runtime_defaults", {}), suite_config, paths, smoke_test)
+    runtime = _runtime_config(base_matrix.get("runtime_defaults", {}), suite_config, checkpoint, paths, smoke_test)
     runtime["artifact_root"] = str(artifact_root)
     runtime["output_name"] = f"{suite_entry['experiment_id']}/{dataset_id}/{method_id}"
     evaluation = _deep_merge(base_matrix["evaluation_defaults"], method_entry.get("evaluation", {}))
@@ -218,6 +220,7 @@ def _build_generated_matrix(
     }
     model_defaults = copy.deepcopy(checkpoint)
     model_defaults.pop("alias", None)
+    model_defaults.pop("runtime", None)
     return {
         "model_defaults": model_defaults,
         "runtime_defaults": copy.deepcopy(base_matrix.get("runtime_defaults", {})),

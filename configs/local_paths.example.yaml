@@ -21,3 +21,8 @@ execution:
 # SAM2 inference does not need repeated training seeds.
 runtime:
   seeds: [42]
+  # Optional overrides for batched inference. Remove these keys to use the
+  # checkpoint-specific defaults in configs/server_5090_full_benchmark.yaml.
+  # image_batch_size: 8
+  # auto_mask_points_per_batch: 128
+  # batch_oom_fallback: true

@@ -49,6 +49,12 @@ datasets:
 execution:
   cuda_visible_devices: "0"
   pytorch_cuda_alloc_conf: "expandable_segments:True"
+
+# 可选：覆盖默认 batch 参数。默认值按 checkpoint 分级设置。
+runtime:
+  image_batch_size: 8
+  auto_mask_points_per_batch: 128
+  batch_oom_fallback: true
 ```
 
 ## 推荐流程
@@ -63,6 +69,13 @@ python scripts/run_5090_full_benchmark.py --paths configs/local_paths.yaml --dry
 
 ```bash
 python scripts/run_5090_full_benchmark.py --paths configs/local_paths.yaml --smoke-test
+```
+
+再跑 24 张图像级 micro test。它会展开和正式实验相同的组合，但每个数据集只跑前 24 张图像，输出到独立的 `paper_5090_micro/`：
+
+```bash
+python scripts/run_5090_micro_benchmark.py --paths configs/local_paths.yaml --dry-run
+python scripts/run_5090_micro_benchmark.py --paths configs/local_paths.yaml --stop-on-error
 ```
 
 正式运行全部组合：
@@ -120,6 +133,7 @@ python scripts/run_5090_full_benchmark.py \
 - `summary.json`
 - `results.json`
 - `eval_reports/rows.json`
+- `eval_reports/error_log.jsonl`：仅当存在坏图或单图异常时生成
 - `visuals/`
 
 每个 mask checkpoint 的分析目录包含：
@@ -138,7 +152,10 @@ python scripts/run_5090_full_benchmark.py \
 ## 注意事项
 
 - 单卡 5090 上不要并行启动多个 full benchmark 进程。
+- prompted 模式使用跨图像 batch；`LatencyMs` 是 batch 总耗时除以 batch 内样本数的摊销单图耗时。
+- `no_prompt` 使用 SAM2 官方自动网格点批次 `auto_mask_points_per_batch`，不是跨图像重写。
 - `no_prompt` 通常最慢，且容易产生大量 false alarm。
+- 如果某张图在预测、mask 对齐、指标计算或可视化阶段报错，当前 run 不会退出；错误会写入 `eval_reports/error_log.jsonl`，字段包含 `sample_id`、`frame_id`、`image_path`、`mask_path`、`stage`、`error_type`、`error_message` 和 `traceback`，后续可按这些字段单独重跑。
 - 默认 `seeds: [42]` 是有意设置；当前是 zero-shot 推理基准，不是训练稳定性实验。
 - `RBGT-Tiny` 的结果只能作为弱标注补充证据，不应写进 mask 主表。
 - 论文主文应把 `box` 写成 mask-derived loose-box oracle，不应写成数据集原生 box 标注。

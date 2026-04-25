@@ -26,21 +26,33 @@ checkpoints:
     family: "sam2"
     cfg: "configs/sam2.1/sam2.1_hiera_t.yaml"
     ckpt: "checkpoints/sam2.1_hiera_tiny.pt"
+    runtime:
+      image_batch_size: 32
+      auto_mask_points_per_batch: 256
   - alias: "small"
     model_id: "sam2.1_hiera_small"
     family: "sam2"
     cfg: "configs/sam2.1/sam2.1_hiera_s.yaml"
     ckpt: "checkpoints/sam2.1_hiera_small.pt"
+    runtime:
+      image_batch_size: 24
+      auto_mask_points_per_batch: 256
   - alias: "base_plus"
     model_id: "sam2.1_hiera_base_plus"
     family: "sam2"
     cfg: "configs/sam2.1/sam2.1_hiera_b+.yaml"
     ckpt: "checkpoints/sam2.1_hiera_base_plus.pt"
+    runtime:
+      image_batch_size: 16
+      auto_mask_points_per_batch: 192
   - alias: "large"
     model_id: "sam2.1_hiera_large"
     family: "sam2"
     cfg: "configs/sam2.1/sam2.1_hiera_l.yaml"
     ckpt: "checkpoints/sam2.1_hiera_large.pt"
+    runtime:
+      image_batch_size: 8
+      auto_mask_points_per_batch: 128
 
 modes:
   - method: "sam2_box_oracle"

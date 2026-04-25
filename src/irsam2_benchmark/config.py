@@ -69,6 +69,9 @@ class RuntimeConfig:
     visual_limit: int = 24
     update_reference_results: bool = True
     seeds: list[int] = field(default_factory=lambda: [42, 123, 456])
+    image_batch_size: int = 1
+    auto_mask_points_per_batch: int = 64
+    batch_oom_fallback: bool = True
 
 
 @dataclass

@@ -18,7 +18,7 @@ from ..core.interfaces import ArtifactRecord, InferenceMode, PipelineStage, Prom
 from ..data import build_dataset_adapter
 from ..data.views import build_image_view, build_track_view
 from ..evaluation.reporting import write_results
-from ..evaluation.runner import align_mask_to_sample, evaluate_method
+from ..evaluation.runner import _merge_error_context, _reset_error_log, _write_sample_error, align_mask_to_sample, evaluate_method
 from ..evaluation.visualization import save_visualizations
 from .stages import run_adapt_stage, run_distill_stage, run_quantize_stage, run_transfer_stage
 
@@ -208,6 +208,9 @@ def _build_visual_records(
     samples,
     inference_mode: InferenceMode,
     visual_limit: int,
+    config: AppConfig | None = None,
+    track_name: str = "",
+    error_context: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     if visual_limit <= 0:
         return []
@@ -217,50 +220,122 @@ def _build_visual_records(
         image_view = build_image_view(samples)
         for _, items in image_view.items():
             representative = items[0]
-            prediction = method.predict_sample(representative)
-            gt_instances = [{"mask": item.mask_array} for item in items if item.mask_array is not None]
-            pred_instances = []
-            for instance in prediction.get("instances", []):
-                aligned_mask, _ = align_mask_to_sample(instance["mask"], representative)
-                pred_instances.append({**instance, "mask": aligned_mask})
-            records.append(
-                {
-                    "sample": representative,
-                    "gt_instances": gt_instances,
-                    "pred_instances": pred_instances,
-                }
-            )
+            group_sample_ids = [item.sample_id for item in items]
+            try:
+                prediction = method.predict_sample(representative)
+                gt_instances = [{"mask": item.mask_array} for item in items if item.mask_array is not None]
+                pred_instances = []
+                for instance in prediction.get("instances", []):
+                    aligned_mask, _ = align_mask_to_sample(instance["mask"], representative)
+                    pred_instances.append({**instance, "mask": aligned_mask})
+                records.append(
+                    {
+                        "sample": representative,
+                        "gt_instances": gt_instances,
+                        "pred_instances": pred_instances,
+                    }
+                )
+            except Exception as exc:
+                _write_sample_error(
+                    config=config,
+                    method=method,
+                    sample=representative,
+                    exc=exc,
+                    context=_merge_error_context(
+                        error_context,
+                        {
+                            "track_name": track_name,
+                            "stage": "visual_auto_mask",
+                            "group_sample_ids": group_sample_ids,
+                        },
+                    ),
+                )
             if len(records) >= visual_limit:
                 break
         return records
 
     if inference_mode == InferenceMode.VIDEO_PROPAGATION:
-        track_view = build_track_view(samples)
-        for _, items in track_view.items():
-            predictions = method.predict_sequence(items)
-            for item in items:
-                pred_mask, _ = align_mask_to_sample(predictions[item.sample_id], item)
-                records.append(
-                    {
-                        "sample": item,
-                        "pred_mask": pred_mask,
-                        "gt_mask": _visual_gt_mask(item),
-                    }
+        try:
+            track_view = build_track_view(samples)
+        except Exception as exc:
+            for item in samples:
+                _write_sample_error(
+                    config=config,
+                    method=method,
+                    sample=item,
+                    exc=exc,
+                    context=_merge_error_context(error_context, {"track_name": track_name, "stage": "visual_video_track_view"}),
                 )
+            return records
+        for _, items in track_view.items():
+            group_sample_ids = [item.sample_id for item in items]
+            try:
+                predictions = method.predict_sequence(items)
+            except Exception as exc:
+                for item in items:
+                    _write_sample_error(
+                        config=config,
+                        method=method,
+                        sample=item,
+                        exc=exc,
+                        context=_merge_error_context(
+                            error_context,
+                            {
+                                "track_name": track_name,
+                                "stage": "visual_video_prediction",
+                                "group_sample_ids": group_sample_ids,
+                            },
+                        ),
+                    )
+                continue
+            for item in items:
+                try:
+                    pred_mask, _ = align_mask_to_sample(predictions[item.sample_id], item)
+                    records.append(
+                        {
+                            "sample": item,
+                            "pred_mask": pred_mask,
+                            "gt_mask": _visual_gt_mask(item),
+                        }
+                    )
+                except Exception as exc:
+                    _write_sample_error(
+                        config=config,
+                        method=method,
+                        sample=item,
+                        exc=exc,
+                        context=_merge_error_context(
+                            error_context,
+                            {
+                                "track_name": track_name,
+                                "stage": "visual_video_row_build",
+                                "group_sample_ids": group_sample_ids,
+                            },
+                        ),
+                    )
                 if len(records) >= visual_limit:
                     return records
         return records
 
     for item in samples[:visual_limit]:
-        prediction = method.predict_sample(item)
-        pred_mask, _ = align_mask_to_sample(prediction["mask"], item)
-        records.append(
-            {
-                "sample": item,
-                "pred_mask": pred_mask,
-                "gt_mask": _visual_gt_mask(item),
-            }
-        )
+        try:
+            prediction = method.predict_sample(item)
+            pred_mask, _ = align_mask_to_sample(prediction["mask"], item)
+            records.append(
+                {
+                    "sample": item,
+                    "pred_mask": pred_mask,
+                    "gt_mask": _visual_gt_mask(item),
+                }
+            )
+        except Exception as exc:
+            _write_sample_error(
+                config=config,
+                method=method,
+                sample=item,
+                exc=exc,
+                context=_merge_error_context(error_context, {"track_name": track_name, "stage": "visual_prompted"}),
+            )
     return records
 
 
@@ -356,15 +431,23 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
     ]
     results = []
     eval_rows: List[Dict[str, Any]] = []
+    _reset_error_log(config)
     for seed in config.runtime.seeds:
         set_global_seed(seed)
         _, method = _resolve_method(config, command, baseline_name)
+        error_context = {
+            "command": command,
+            "baseline_name": resolved_baseline_name,
+            "seed": seed,
+            "output_dir": str(output_dir),
+        }
         aggregate, rows = evaluate_method(
             method=method,
             samples=dataset.samples,
             config=config,
             track_name=config.evaluation.track,
             inference_mode=method.inference_mode,
+            error_context=error_context,
         )
         results.append(_seed_result(seed, aggregate))
         eval_rows.extend([{**row, "seed": seed} for row in rows])
@@ -374,6 +457,9 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
                 samples=dataset.samples,
                 inference_mode=method.inference_mode,
                 visual_limit=max(0, int(config.runtime.visual_limit)),
+                config=config,
+                track_name=config.evaluation.track,
+                error_context=error_context,
             )
             visual_paths = save_visualizations(
                 output_dir=output_dir,
@@ -400,6 +486,16 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
         "std": _std_numeric(results),
         "per_seed": results,
     }
+    output_artifacts = {
+        "benchmark_spec": output_dir / "benchmark_spec.json",
+        "artifact_manifest": output_dir / "artifact_manifest.json",
+        "summary": output_dir / "summary.json",
+        "results": output_dir / "results.json",
+        "eval_rows": output_dir / "eval_reports" / "rows.json",
+    }
+    error_log_path = output_dir / "eval_reports" / "error_log.jsonl"
+    if error_log_path.exists():
+        output_artifacts["error_log"] = error_log_path
     output_paths = write_results(
         output_dir,
         benchmark_spec=benchmark_spec,
@@ -412,19 +508,15 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
                     artifact_name=name,
                     metadata={"path": str(path)},
                 ).to_dict()
-                for name, path in {
-                    "benchmark_spec": output_dir / "benchmark_spec.json",
-                    "artifact_manifest": output_dir / "artifact_manifest.json",
-                    "summary": output_dir / "summary.json",
-                    "results": output_dir / "results.json",
-                    "eval_rows": output_dir / "eval_reports" / "rows.json",
-                }.items()
+                for name, path in output_artifacts.items()
             ]
         },
         summary=summary,
         results=results,
         eval_rows=eval_rows,
     )
+    if error_log_path.exists():
+        output_paths["error_log"] = error_log_path
     _write_run_metadata(
         output_dir=output_dir,
         config=config,

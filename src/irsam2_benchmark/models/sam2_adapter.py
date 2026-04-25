@@ -125,7 +125,7 @@ class SAM2ModelAdapter:
         for module_name, symbol_name in candidates:
             try:
                 cls = self._resolve_symbol(module_name, symbol_name)
-                return cls(self.model)
+                return cls(self.model, points_per_batch=int(self.config.runtime.auto_mask_points_per_batch))
             except Exception:
                 continue
         return None
@@ -153,6 +153,49 @@ class SAM2ModelAdapter:
             "scores": np.asarray(scores, dtype=np.float32),
             "logits": np.asarray(logits, dtype=np.float32),
         }
+
+    def predict_images(
+        self,
+        image_rgbs: list[np.ndarray],
+        *,
+        boxes: list[Optional[Iterable[float]]] | None = None,
+        points: list[Optional[np.ndarray]] | None = None,
+        point_labels: list[Optional[np.ndarray]] | None = None,
+        multimask_output: bool = False,
+    ) -> list[dict[str, Any]]:
+        if not image_rgbs:
+            return []
+        self.ensure_loaded()
+        if len(image_rgbs) == 1 or not hasattr(self.image_predictor, "set_image_batch") or not hasattr(self.image_predictor, "predict_batch"):
+            return [
+                self.predict_image(
+                    image_rgbs[idx],
+                    box=None if boxes is None else boxes[idx],
+                    points=None if points is None else points[idx],
+                    point_labels=None if point_labels is None else point_labels[idx],
+                    multimask_output=multimask_output,
+                )
+                for idx in range(len(image_rgbs))
+            ]
+        box_batch = None if boxes is None else [None if box is None else np.array(box, dtype=np.float32) for box in boxes]
+        point_batch = None if points is None else points
+        label_batch = None if point_labels is None else point_labels
+        self.image_predictor.set_image_batch(image_rgbs)
+        masks, scores, logits = self.image_predictor.predict_batch(
+            point_coords_batch=point_batch,
+            point_labels_batch=label_batch,
+            box_batch=box_batch,
+            multimask_output=multimask_output,
+            return_logits=True,
+        )
+        return [
+            {
+                "masks": np.asarray(masks[idx], dtype=np.float32),
+                "scores": np.asarray(scores[idx], dtype=np.float32),
+                "logits": np.asarray(logits[idx], dtype=np.float32),
+            }
+            for idx in range(len(image_rgbs))
+        ]
 
     def predict_auto_masks(self, image_rgb: np.ndarray) -> list[dict[str, Any]]:
         self.ensure_loaded()
