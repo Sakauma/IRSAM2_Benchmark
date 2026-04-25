@@ -34,9 +34,11 @@ def expected_runs(matrix: Dict[str, Any], experiment_ids: set[str]) -> List[Dict
         if str(experiment.get("status", "planned")).startswith("planned_after"):
             continue
         for dataset in experiment.get("datasets", []):
+            if dataset not in matrix.get("datasets", {}):
+                raise KeyError(f"Dataset {dataset!r} is not defined in the experiment matrix.")
             for method in experiment.get("methods", []):
                 if method not in matrix.get("methods", {}):
-                    continue
+                    raise KeyError(f"Method {method!r} is not defined in the experiment matrix.")
                 runs.append({"experiment_id": experiment_id, "dataset": dataset, "method": method})
     return runs
 
@@ -83,4 +85,3 @@ def flatten_rows(runs: List[RunRecord]) -> List[Dict[str, Any]]:
     for run in runs:
         rows.extend(run.rows)
     return rows
-

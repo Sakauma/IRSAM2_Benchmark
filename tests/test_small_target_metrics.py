@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 
 from irsam2_benchmark.evaluation.prompt_metrics import prompt_metrics
+from irsam2_benchmark.evaluation.image_metrics import boundary_f1, boundary_f1_tolerance
 from irsam2_benchmark.evaluation.small_target_metrics import small_target_metrics
 
 
@@ -27,7 +28,13 @@ class SmallTargetMetricTests(unittest.TestCase):
         self.assertEqual(metrics["PromptBoxCoverage"], 1.0)
         self.assertLess(metrics["PromptDistanceToCentroid"], 1.0)
 
+    def test_boundary_f1_tolerance_handles_one_pixel_shift(self):
+        gt = np.zeros((8, 8), dtype=np.float32)
+        pred = np.zeros((8, 8), dtype=np.float32)
+        gt[2:4, 2:4] = 1.0
+        pred[2:4, 3:5] = 1.0
+        self.assertLess(boundary_f1(pred, gt), boundary_f1_tolerance(pred, gt, radius=1))
+
 
 if __name__ == "__main__":
     unittest.main()
-

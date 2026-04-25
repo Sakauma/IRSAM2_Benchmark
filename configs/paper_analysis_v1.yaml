@@ -12,6 +12,7 @@ primary_metric: "mIoU"
 metrics:
   - "mIoU"
   - "Dice"
+  - "BoundaryF1Tol1"
   - "TargetRecallIoU25"
   - "FalseAlarmPixelsPerMP"
   - "LatencyMs"
@@ -24,6 +25,8 @@ lower_is_better:
 group_keys:
   - "dataset"
   - "method"
+  - "eval_unit"
+  - "supervision_type"
   - "target_scale"
   - "annotation_protocol_flag"
 
@@ -46,9 +49,3 @@ statistics:
     - name: "sam2_point_oracle_vs_sam2_box_oracle"
       baseline: "sam2_box_oracle"
       candidate: "sam2_point_oracle"
-    - name: "sam2_no_prompt_auto_mask_vs_sam2_box_oracle"
-      baseline: "sam2_box_oracle"
-      candidate: "sam2_no_prompt_auto_mask"
-    - name: "sam2_physics_auto_prompt_vs_sam2_no_prompt_auto_mask"
-      baseline: "sam2_no_prompt_auto_mask"
-      candidate: "sam2_physics_auto_prompt"

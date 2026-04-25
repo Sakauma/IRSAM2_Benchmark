@@ -34,6 +34,31 @@ def _boundary(mask: np.ndarray) -> np.ndarray:
 def boundary_f1(pred: np.ndarray, target: np.ndarray) -> float:
     pred_b = _boundary(pred) > 0.5
     target_b = _boundary(target) > 0.5
+    return boundary_f1_from_masks(pred_b, target_b)
+
+
+def _dilate(binary: np.ndarray, radius: int) -> np.ndarray:
+    if radius <= 0:
+        return binary
+    output = np.zeros_like(binary, dtype=bool)
+    h, w = binary.shape
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dy * dy + dx * dx > radius * radius:
+                continue
+            src_y1 = max(0, -dy)
+            src_y2 = min(h, h - dy)
+            src_x1 = max(0, -dx)
+            src_x2 = min(w, w - dx)
+            dst_y1 = max(0, dy)
+            dst_y2 = min(h, h + dy)
+            dst_x1 = max(0, dx)
+            dst_x2 = min(w, w + dx)
+            output[dst_y1:dst_y2, dst_x1:dst_x2] |= binary[src_y1:src_y2, src_x1:src_x2]
+    return output
+
+
+def boundary_f1_from_masks(pred_b: np.ndarray, target_b: np.ndarray) -> float:
     tp = float(np.logical_and(pred_b, target_b).sum())
     pred_sum = float(pred_b.sum())
     target_sum = float(target_b.sum())
@@ -43,6 +68,24 @@ def boundary_f1(pred: np.ndarray, target: np.ndarray) -> float:
         return 0.0
     precision = tp / pred_sum
     recall = tp / target_sum
+    if precision + recall <= 0.0:
+        return 0.0
+    return 2.0 * precision * recall / (precision + recall)
+
+
+def boundary_f1_tolerance(pred: np.ndarray, target: np.ndarray, radius: int = 1) -> float:
+    pred_b = _boundary(pred) > 0.5
+    target_b = _boundary(target) > 0.5
+    pred_sum = float(pred_b.sum())
+    target_sum = float(target_b.sum())
+    if pred_sum <= 0.0 and target_sum <= 0.0:
+        return 1.0
+    if pred_sum <= 0.0 or target_sum <= 0.0:
+        return 0.0
+    target_dilated = _dilate(target_b, radius)
+    pred_dilated = _dilate(pred_b, radius)
+    precision = float(np.logical_and(pred_b, target_dilated).sum()) / pred_sum
+    recall = float(np.logical_and(target_b, pred_dilated).sum()) / target_sum
     if precision + recall <= 0.0:
         return 0.0
     return 2.0 * precision * recall / (precision + recall)

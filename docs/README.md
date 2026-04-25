@@ -13,6 +13,7 @@
 - `server_5090_benchmark.md`：单张 RTX 5090 上的完整基准运行方案
 - `server_benchmark_runbook.md`：服务器运行、验收和 artifact 归档清单
 - `eval_v2_roadmap.md`：后续评估分析模块改进计划
+- `benchmark_improvement_plan.md`：当前 SAM2 baseline 评估风险与改进计划
 
 ## 实现说明
 

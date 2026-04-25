@@ -7,12 +7,13 @@
 默认脚本执行以下组合：
 
 - checkpoint：`tiny`、`small`、`base_plus`、`large`
-- 主 prompt policy：`box`、`point`、`box_point`、`no_prompt`
+- Track A prompted policy：`box`、`point`、`box_point`
+- Track B automatic-mask policy：`no_prompt`
 - mask 主数据集：`NUAA-SIRST`、`NUDT-SIRST`、`IRSTD-1K`、`MultiModal`
 - 弱标注补充数据集：`RBGT-Tiny` 的 IR 分支
 - 额外诊断：`base_plus` 上运行 `tight_box` vs `loose_box`，检查 mask-derived box 生成策略是否改变结论
 
-mask 数据集会进入自动分析和显著性检验。`RBGT-Tiny` 只有 box 标注，脚本会保存原始结果，但不会把它混入 mask 指标统计。
+mask 数据集会进入自动分析和显著性检验。Track A 和 Track B 分开分析，默认不做跨 track paired test。`RBGT-Tiny` 只有 box 标注，脚本会保存原始结果，但不会把它混入 mask 指标统计。
 
 主 `box` policy 使用 `mask_derived_adaptive_loose_box_centroid_point_v2` 协议：
 
@@ -70,7 +71,7 @@ python scripts/run_5090_full_benchmark.py --paths configs/local_paths.yaml --smo
 python scripts/run_5090_full_benchmark.py --paths configs/local_paths.yaml
 ```
 
-如果中断后继续运行，直接重复正式命令。脚本默认检查每个组合的 `benchmark_spec.json`、`summary.json`、`results.json` 和 `eval_reports/rows.json`，完整组合会自动跳过。
+如果中断后继续运行，直接重复正式命令。脚本默认检查每个组合的 `benchmark_spec.json`、`run_metadata.json`、`summary.json`、`results.json` 和 `eval_reports/rows.json`，完整组合会自动跳过。
 
 强制重跑：
 
@@ -96,6 +97,7 @@ python scripts/run_5090_full_benchmark.py \
 /root/autodl-tmp/irsam2_artifacts/paper_5090/
 ├── runs/
 │   ├── mask/{tiny,small,base_plus,large}/T5090_mask_prompt_modes/{dataset}/{method}/
+│   ├── auto_mask/{tiny,small,base_plus,large}/T5090_no_prompt_auto_mask/{dataset}/sam2_no_prompt_auto_mask/
 │   ├── prompt_box_protocol/base_plus/T5090_prompt_box_protocol_ablation/{dataset}/{method}/
 │   └── rbgt_box/{tiny,small,base_plus,large}/T5090_rbgt_box_prompt_modes/rbgt_tiny_ir_box/{method}/
 ├── analysis/
@@ -114,6 +116,7 @@ python scripts/run_5090_full_benchmark.py \
 每个 run 目录包含：
 
 - `benchmark_spec.json`
+- `run_metadata.json`
 - `summary.json`
 - `results.json`
 - `eval_reports/rows.json`

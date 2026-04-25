@@ -122,6 +122,7 @@ class Full5090BenchmarkTests(unittest.TestCase):
             run_dir = root / "paper_5090" / "runs" / "mask" / "tiny" / "T" / "d" / "m"
             run_dir.mkdir(parents=True)
             (run_dir / "benchmark_spec.json").write_text("{}", encoding="utf-8")
+            (run_dir / "run_metadata.json").write_text("{}", encoding="utf-8")
             (run_dir / "results.json").write_text("[]", encoding="utf-8")
             (run_dir / "eval_reports").mkdir()
             (run_dir / "eval_reports" / "rows.json").write_text("[]", encoding="utf-8")

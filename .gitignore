@@ -39,21 +39,5 @@ reference_results/*
 
 # Local agent/project instructions
 AGENTS.md
-
-# Legacy one-off workflow files. Some are already tracked in history; ignore
-# only prevents re-adding them after local cleanup.
-docs/remote_session_handoff.md
-configs/benchmark_quick10.yaml
-configs/benchmark_smoke.yaml
-configs/benchmark_v1.yaml
-configs/benchmark_quick10_rbgt_tiny.yaml
-configs/benchmark_smoke_rbgt_tiny.yaml
-configs/benchmark_v1_rbgt_tiny.yaml
-scripts/run_baseline.sh
-scripts/run_smoke.sh
-scripts/run_smoke.ps1
-scripts/run_autodl_smoke.sh
-scripts/setup_autodl_server.sh
-scripts/run_official_baseline_matrix.py
-scripts/run_official_baseline_matrix.sh
-tests/test_official_baseline_matrix.py
+.codex
+.codex/

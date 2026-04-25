@@ -4,7 +4,9 @@
 
 - `mIoU`：预测 mask 与 GT mask 的 IoU
 - `Dice`：Sørensen-Dice 分数
-- `BoundaryF1`：边界感知 F1
+- `BoundaryF1`：兼容字段，当前等同于 exact boundary F1
+- `BoundaryF1Exact`：无容忍半径的边界 F1，仅建议作诊断
+- `BoundaryF1Tol1`：1 像素容忍半径的边界 F1，优先用于红外小目标论文表格
 - `LatencyMs`：单样本或单帧推理时延
 
 ## Prompt / 协议审计指标
@@ -17,6 +19,8 @@
 - `PromptHitRate`：自动 point prompt 是否落在 GT mask 内
 - `PromptDistanceToCentroid`：自动 point prompt 与 GT mask 质心的像素距离
 - `PromptBoxCoverage`：自动 box prompt 覆盖的 GT mask 像素比例
+- `PromptBoxBBoxIoU`：box-only 数据中 prompt box 与 GT bbox 的 IoU
+- `PromptPointInBBox`：box-only 数据中 point prompt 是否落在 GT bbox 内
 
 ## 红外小目标指标
 

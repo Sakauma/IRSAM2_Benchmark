@@ -80,6 +80,17 @@ def _paired_values(rows: List[Dict[str, Any]], dataset: str, baseline: str, cand
     return np.array([baseline_rows[key] for key in keys], dtype=np.float64), np.array([candidate_rows[key] for key in keys], dtype=np.float64)
 
 
+def _metric_eval_units(rows: List[Dict[str, Any]], dataset: str, method: str, metric: str) -> set[str]:
+    units = set()
+    for row in rows:
+        if str(row.get("dataset")) != dataset or row.get("method") != method:
+            continue
+        if not isinstance(row.get(metric), (int, float)) or isinstance(row.get(metric), bool):
+            continue
+        units.add(str(row.get("eval_unit", "unknown")))
+    return units
+
+
 def run_paired_tests(rows: List[Dict[str, Any]], analysis_config: Dict[str, Any]) -> List[Dict[str, Any]]:
     stats_config = analysis_config.get("statistics", {})
     comparisons = stats_config.get("comparisons", [])
@@ -96,18 +107,31 @@ def run_paired_tests(rows: List[Dict[str, Any]], analysis_config: Dict[str, Any]
             baseline = comparison["baseline"]
             candidate = comparison["candidate"]
             for metric in metrics:
-                baseline_values, candidate_values = _paired_values(rows, dataset, baseline, candidate, metric)
-                n_pairs = int(len(baseline_values))
+                baseline_units = _metric_eval_units(rows, dataset, baseline, metric)
+                candidate_units = _metric_eval_units(rows, dataset, candidate, metric)
+                unit_mismatch = bool(baseline_units and candidate_units and baseline_units != candidate_units)
                 payload: Dict[str, Any] = {
                     "dataset": dataset,
                     "comparison": comparison.get("name", f"{candidate}_vs_{baseline}"),
                     "baseline": baseline,
                     "candidate": candidate,
                     "metric": metric,
-                    "n_pairs": n_pairs,
-                    "status": "ok" if n_pairs > 0 else "skipped_no_pairs",
-                    "low_power": n_pairs < low_power_threshold,
+                    "baseline_eval_unit": ",".join(sorted(baseline_units)) if baseline_units else "",
+                    "candidate_eval_unit": ",".join(sorted(candidate_units)) if candidate_units else "",
                 }
+                if unit_mismatch:
+                    payload.update({"n_pairs": 0, "status": "skipped_eval_unit_mismatch", "low_power": True})
+                    results.append(payload)
+                    continue
+                baseline_values, candidate_values = _paired_values(rows, dataset, baseline, candidate, metric)
+                n_pairs = int(len(baseline_values))
+                payload.update(
+                    {
+                        "n_pairs": n_pairs,
+                        "status": "ok" if n_pairs > 0 else "skipped_no_pairs",
+                        "low_power": n_pairs < low_power_threshold,
+                    }
+                )
                 if n_pairs == 0:
                     results.append(payload)
                     continue
@@ -145,4 +169,3 @@ def _holm_correct(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if "wilcoxon_p_holm" not in row and "wilcoxon_p" in row:
             row["wilcoxon_p_holm"] = row["wilcoxon_p"]
     return rows
-

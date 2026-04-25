@@ -21,30 +21,44 @@ class PaperExperimentMatrixTests(unittest.TestCase):
     def test_dry_run_expands_p0_auto_prompt(self):
         runner = _load_runner()
         matrix_path = Path(__file__).resolve().parents[1] / "configs" / "paper_experiments_v1.yaml"
-        paths_path = Path(__file__).resolve().parents[1] / "configs" / "local_paths.example.yaml"
-        output = io.StringIO()
-        with redirect_stdout(output):
-            self.assertEqual(
-                runner.main(
-                    [
-                        "--matrix",
-                        str(matrix_path),
-                        "--paths",
-                        str(paths_path),
-                        "--group",
-                        "p0_auto_prompt",
-                        "--dry-run",
-                        "--python-bin",
-                        "python",
-                    ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths_path = Path(temp_dir) / "paths.yaml"
+            paths_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "sam2": {"repo": "/path/to/sam2", "checkpoint_root": "/path/to/sam2/checkpoints"},
+                        "artifacts": {"root": str(Path(temp_dir) / "artifacts")},
+                        "datasets": {"multimodal": "/path/to/MultiModal"},
+                    },
+                    sort_keys=False,
                 ),
-                0,
+                encoding="utf-8",
             )
-        text = output.getvalue()
-        self.assertIn("sam2_no_prompt_auto_mask", text)
-        self.assertIn("sam2_physics_auto_prompt", text)
-        self.assertIn("/path/to/MultiModal", text)
-        self.assertNotIn("DATASET_ROOT=", text)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    runner.main(
+                        [
+                            "--matrix",
+                            str(matrix_path),
+                            "--paths",
+                            str(paths_path),
+                            "--group",
+                            "p0_auto_prompt",
+                            "--dry-run",
+                            "--python-bin",
+                            "python",
+                        ]
+                    ),
+                    0,
+                )
+            text = output.getvalue()
+            self.assertIn("sam2_no_prompt_auto_mask", text)
+            self.assertIn("sam2_physics_auto_prompt", text)
+            self.assertIn("/path/to/MultiModal", text)
+            self.assertIn("paper_v1/generated/run_configs/p0_auto_prompt", text)
+            self.assertNotIn("DATASET_ROOT=", text)
+            self.assertTrue((Path(temp_dir) / "artifacts" / "paper_v1" / "generated" / "run_configs" / "p0_auto_prompt").exists())
 
     def test_paths_yaml_overrides_dataset_and_sam2_paths(self):
         runner = _load_runner()

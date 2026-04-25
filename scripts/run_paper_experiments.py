@@ -7,7 +7,6 @@ import copy
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
@@ -23,6 +22,7 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
 
 
 def _write_yaml(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
 
@@ -70,6 +70,16 @@ def _resolve_checkpoint_path(model: Dict[str, Any], paths: Dict[str, Any]) -> st
     return str(ckpt)
 
 
+def _resolve_project_path(value: str | Path) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _artifact_root(matrix: Dict[str, Any], paths: Dict[str, Any]) -> Path:
+    raw = paths.get("artifacts", {}).get("root", matrix.get("runtime_defaults", {}).get("artifact_root", "artifacts"))
+    return _resolve_project_path(str(raw))
+
+
 def _build_app_config(
     matrix: Dict[str, Any],
     experiment: Dict[str, Any],
@@ -113,9 +123,11 @@ def _iter_runs(matrix: Dict[str, Any], group: str, paths: Dict[str, Any]) -> Ite
         if str(experiment.get("status", "planned")).startswith("planned_after"):
             continue
         for dataset_id in experiment.get("datasets", []):
+            if dataset_id not in matrix["datasets"]:
+                raise KeyError(f"Dataset {dataset_id!r} is not defined in the experiment matrix.")
             for method_id in experiment.get("methods", []):
                 if method_id not in matrix["methods"]:
-                    continue
+                    raise KeyError(f"Method {method_id!r} is not defined in the experiment matrix.")
                 method_entry = _resolve_method(matrix["methods"], method_id)
                 yield {
                     "experiment": experiment,
@@ -140,7 +152,19 @@ def _command_for(config_path: Path, baseline: str, python_bin: str) -> list[str]
 
 
 def _format_dry_run(command: list[str], config: Dict[str, Any]) -> str:
-    return f"# dataset_root={config['dataset']['root']}\n# sam2_repo={config['model'].get('repo', '')}\n" + " ".join(command)
+    return f"# config_path={command[5]}\n# dataset_root={config['dataset']['root']}\n# sam2_repo={config['model'].get('repo', '')}\n" + " ".join(command)
+
+
+def _build_env(paths: Dict[str, Any]) -> Dict[str, str]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{PROJECT_ROOT / 'src'}{os.pathsep}{env.get('PYTHONPATH', '')}".rstrip(os.pathsep)
+    execution = paths.get("execution", {})
+    if execution.get("cuda_visible_devices") is not None:
+        env["CUDA_VISIBLE_DEVICES"] = str(execution["cuda_visible_devices"])
+    alloc_conf = execution.get("pytorch_cuda_alloc_conf")
+    if alloc_conf and "PYTORCH_CUDA_ALLOC_CONF" not in env:
+        env["PYTORCH_CUDA_ALLOC_CONF"] = str(alloc_conf)
+    return env
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -158,18 +182,16 @@ def main(argv: list[str] | None = None) -> int:
     if not runs:
         raise RuntimeError(f"No runnable experiments matched group={args.group!r}.")
 
-    with tempfile.TemporaryDirectory(prefix="irsam2_paper_matrix_") as temp_dir:
-        temp_root = Path(temp_dir)
-        for idx, run in enumerate(runs, start=1):
-            config_path = temp_root / f"{idx:04d}_{run['dataset_id']}_{run['method_id']}.yaml"
-            _write_yaml(config_path, run["config"])
-            command = _command_for(config_path, run["baseline"], args.python_bin)
-            if args.dry_run:
-                print(_format_dry_run(command, run["config"]))
-                continue
-            env = os.environ.copy()
-            env["PYTHONPATH"] = f"{PROJECT_ROOT / 'src'}{os.pathsep}{env.get('PYTHONPATH', '')}".rstrip(os.pathsep)
-            subprocess.run(command, cwd=PROJECT_ROOT, env=env, check=True)
+    generated_root = _artifact_root(matrix, paths) / "paper_v1" / "generated" / "run_configs" / args.group
+    env = _build_env(paths)
+    for idx, run in enumerate(runs, start=1):
+        config_path = generated_root / f"{idx:04d}_{run['experiment']['experiment_id']}_{run['dataset_id']}_{run['method_id']}.yaml"
+        _write_yaml(config_path, run["config"])
+        command = _command_for(config_path, run["baseline"], args.python_bin)
+        if args.dry_run:
+            print(_format_dry_run(command, run["config"]))
+            continue
+        subprocess.run(command, cwd=PROJECT_ROOT, env=env, check=True)
     return 0
 
 

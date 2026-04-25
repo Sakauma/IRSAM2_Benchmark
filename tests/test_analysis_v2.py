@@ -30,6 +30,8 @@ def _write_run(root: Path, experiment: str, dataset: str, method: str, metric_sh
             "LatencyMs": 10.0 + metric_shift,
             "GTAreaPixels": 4.0,
             "PredAreaPixels": 4.0 + metric_shift,
+            "eval_unit": "instance",
+            "supervision_type": "mask",
             "target_scale": "small",
             "annotation_protocol_flag": "mask",
         },
@@ -43,6 +45,8 @@ def _write_run(root: Path, experiment: str, dataset: str, method: str, metric_sh
             "LatencyMs": 11.0 + metric_shift,
             "GTAreaPixels": 8.0,
             "PredAreaPixels": 8.0 + metric_shift,
+            "eval_unit": "instance",
+            "supervision_type": "mask",
             "target_scale": "small",
             "annotation_protocol_flag": "mask",
         },
@@ -58,6 +62,9 @@ def _write_matrix(path: Path) -> None:
         "methods": {
             "bbox_rect": {"baseline": "bbox_rect"},
             "sam2_box_oracle": {"baseline": "sam2_zero_shot"},
+        },
+        "datasets": {
+            "dummy_dataset": {"config": {"dataset_id": "dummy"}},
         },
         "experiments": [
             {
@@ -135,6 +142,15 @@ class AnalysisV2Tests(unittest.TestCase):
         self.assertEqual(table[0]["sample_count"], 2)
         self.assertAlmostEqual(table[0]["mIoU_mean"], 0.3)
 
+    def test_table_builder_keeps_missing_metrics_as_null(self):
+        rows = [
+            {"dataset": "d", "method": "m", "sample_id": "a", "seed": 1, "LatencyMs": 1.0},
+        ]
+        table = main_baseline_table(rows, ["mIoU"])
+        self.assertIsNone(table[0]["mIoU_mean"])
+        self.assertIsNone(table[0]["mIoU_std"])
+        self.assertEqual(table[0]["mIoU_count"], 0)
+
     def test_paired_stats_skips_mismatched_samples(self):
         rows = [
             {"dataset": "d", "method": "a", "sample_id": "one", "seed": 1, "mIoU": 0.1},
@@ -148,6 +164,20 @@ class AnalysisV2Tests(unittest.TestCase):
             },
         )
         self.assertEqual(result[0]["status"], "skipped_no_pairs")
+
+    def test_paired_stats_skips_eval_unit_mismatch(self):
+        rows = [
+            {"dataset": "d", "method": "a", "sample_id": "one", "seed": 1, "eval_unit": "instance", "LatencyMs": 0.1},
+            {"dataset": "d", "method": "b", "sample_id": "one", "seed": 1, "eval_unit": "image", "LatencyMs": 0.2},
+        ]
+        result = run_paired_tests(
+            rows,
+            {
+                "metrics": ["LatencyMs"],
+                "statistics": {"comparisons": [{"baseline": "a", "candidate": "b"}], "n_bootstrap": 10},
+            },
+        )
+        self.assertEqual(result[0]["status"], "skipped_eval_unit_mismatch")
 
     def test_script_dry_run(self):
         script_path = Path(__file__).resolve().parents[1] / "scripts" / "analyze_paper_results.py"
@@ -166,4 +196,3 @@ class AnalysisV2Tests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

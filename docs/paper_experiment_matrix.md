@@ -74,7 +74,7 @@ python scripts/run_paper_experiments.py --matrix configs/paper_experiments_v1.ya
 
 Purpose:
 
-- Compare no-prompt SAM2 automatic masks with IR physics-prior automatic prompting.
+- Evaluate IR physics-prior automatic prompting as a Track A prompted segmentation method.
 
 Datasets:
 
@@ -85,7 +85,6 @@ Datasets:
 
 Methods:
 
-- `sam2_no_prompt_auto_mask`
 - `sam2_physics_auto_prompt`
 
 Command:
@@ -93,6 +92,20 @@ Command:
 ```bash
 python scripts/run_paper_experiments.py --matrix configs/paper_experiments_v1.yaml --paths configs/local_paths.yaml --group p0_auto_prompt
 ```
+
+### T7 No-Prompt Auto Mask
+
+Purpose:
+
+- Evaluate no-prompt SAM2 automatic masks as a separate Track B image-level baseline.
+
+Methods:
+
+- `sam2_no_prompt_auto_mask`
+
+Note:
+
+- Track B results are not paired with Track A prompted segmentation in the default statistical tests.
 
 ### T3 Prior And Prompt Ablation
 
@@ -179,7 +192,7 @@ Planned modules:
 
 - `mIoU`
 - `Dice`
-- `BoundaryF1`
+- `BoundaryF1Tol1`
 - `TargetRecallIoU10`
 - `TargetRecallIoU25`
 - `TargetRecallIoU50`

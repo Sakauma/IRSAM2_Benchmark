@@ -20,6 +20,7 @@ def make_sample(
     bbox_tight: list[float] | None = None,
     bbox_loose: list[float] | None = None,
     mask_array: np.ndarray | None = None,
+    supervision_type: str = "mask",
 ) -> Sample:
     return Sample(
         image_path=Path("dummy.png"),
@@ -34,7 +35,7 @@ def make_sample(
         target_scale=target_scale,
         device_source="cam",
         annotation_protocol_flag="mask",
-        supervision_type="mask",
+        supervision_type=supervision_type,
         track_id=track_id,
         bbox_tight=bbox_tight,
         bbox_loose=bbox_loose,
@@ -59,6 +60,38 @@ class EvaluationRunnerTests(unittest.TestCase):
 
         self.assertEqual(row["BBoxIoU"], 0.0)
         self.assertGreater(row["LooseBoxMaskIoU"], 0.0)
+        self.assertEqual(row["eval_unit"], "instance")
+        self.assertEqual(row["supervision_type"], "mask")
+        self.assertIn("BoundaryF1Exact", row)
+        self.assertIn("BoundaryF1Tol1", row)
+
+    def test_bbox_only_row_does_not_emit_mask_metrics(self):
+        pred_mask = box_to_area([0, 0, 2, 2], 4, 4)
+        item = make_sample(
+            sample_id="frame_0__box_0",
+            frame_id="frame_0",
+            bbox_tight=[0, 0, 2, 2],
+            bbox_loose=[0, 0, 3, 3],
+            mask_array=None,
+            supervision_type="bbox",
+        )
+
+        row = build_segmentation_row(
+            item,
+            pred_mask,
+            np.zeros((4, 4), dtype=np.float32),
+            elapsed_ms=1.0,
+            prompt={"box": [0, 0, 2, 2], "point": [1, 1]},
+        )
+
+        self.assertEqual(row["supervision_type"], "bbox")
+        self.assertEqual(row["BBoxIoU"], 1.0)
+        self.assertNotIn("mIoU", row)
+        self.assertNotIn("Dice", row)
+        self.assertNotIn("BoundaryF1", row)
+        self.assertNotIn("TargetRecallIoU25", row)
+        self.assertEqual(row["PromptBoxBBoxIoU"], 1.0)
+        self.assertEqual(row["PromptPointInBBox"], 1.0)
 
     def test_auto_mask_evaluates_once_per_image(self):
         mask_a = box_to_area([0, 0, 2, 2], 4, 4)
@@ -93,6 +126,8 @@ class EvaluationRunnerTests(unittest.TestCase):
         self.assertEqual(method.calls, 1)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["sample_id"], "frame_0")
+        self.assertEqual(rows[0]["eval_unit"], "image")
+        self.assertEqual(rows[0]["supervision_type"], "mask")
         self.assertEqual(rows[0]["category_name"], "multiple")
         self.assertEqual(summary["instance_precision"], 1.0)
         self.assertEqual(summary["instance_recall"], 1.0)

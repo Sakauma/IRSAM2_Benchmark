@@ -107,7 +107,7 @@ python scripts/analyze_paper_results.py \
 可选实验组：
 
 - `p0_baselines`：oracle prompt baseline。
-- `p0_auto_prompt`：no-prompt SAM2 与 physics auto-prompt。
+- `p0_auto_prompt`：Track A physics auto-prompt 与单独的 Track B no-prompt auto-mask。
 - `p0_ablation`：physics prior 和 prompt 后处理消融。
 - `p0_all`：以上全部 P0 实验。
 
@@ -175,6 +175,7 @@ python -m irsam2_benchmark.cli run baseline --config configs/benchmark_smoke.yam
 每次运行会写出：
 
 - `benchmark_spec.json`
+- `run_metadata.json`
 - `artifact_manifest.json`
 - `summary.json`
 - `results.json`
@@ -188,6 +189,7 @@ artifacts/
 └── paper_v1/
     ├── T1_oracle_prompt_baselines/
     ├── T2_ir_auto_prompt/
+    ├── T7_no_prompt_auto_mask/
     └── T3_prior_prompt_ablation/
 ```
 
@@ -197,7 +199,7 @@ artifacts/
 
 - `mIoU`
 - `Dice`
-- `BoundaryF1`
+- `BoundaryF1Tol1`
 - `LatencyMs`
 - `BBoxIoU`
 

@@ -3,6 +3,7 @@
 每次单组 benchmark 运行都必须写出以下文件：
 
 - `benchmark_spec.json`
+- `run_metadata.json`
 - `artifact_manifest.json`
 - `summary.json`
 - `results.json`
@@ -17,11 +18,15 @@
 
 这是 benchmark 可复现性的锚点之一。
 
+## Run Metadata
+
+每个正式 benchmark run 都会写出：
+
+- `run_metadata.json`：记录命令、展开后的配置、数据集路径、checkpoint 路径/大小/mtime/sha256、SAM2 repo、Git commit、Python、PyTorch、CUDA 和 GPU 信息。
+
 ## 官方矩阵附加产物
 
-通过 `scripts/run_official_baseline_matrix.py` 运行官方矩阵时，每个组合的输出目录还会写出：
-
-- `run_metadata.json`：记录组合状态、命令、展开后的配置、数据集路径、checkpoint 路径/大小/mtime/sha256、关键环境变量、Git commit、Python 版本和 GPU 信息。
+通过 `scripts/run_official_baseline_matrix.py` 运行官方矩阵时，矩阵根目录还会额外写出：
 
 矩阵根目录会额外写出：
 

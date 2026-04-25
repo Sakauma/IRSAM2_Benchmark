@@ -93,11 +93,14 @@ def run_analysis(analysis_path: str | Path, *, dry_run: bool = False) -> Dict[st
 def _filter_methods(rows: list[Dict[str, Any]], methods: set[str], metrics: list[str]) -> list[Dict[str, Any]]:
     from .tables import summarize_by
 
-    return summarize_by([row for row in rows if row.get("method") in methods], ["dataset", "method"], metrics)
+    return summarize_by([row for row in rows if row.get("method") in methods], ["dataset", "method", "eval_unit"], metrics)
 
 
 def _filter_prefix(rows: list[Dict[str, Any]], prefix: str, metrics: list[str]) -> list[Dict[str, Any]]:
     from .tables import summarize_by
 
-    return summarize_by([row for row in rows if str(row.get("method", "")).startswith(prefix) or row.get("method") == "sam2_physics_auto_prompt"], ["dataset", "method"], metrics)
-
+    return summarize_by(
+        [row for row in rows if str(row.get("method", "")).startswith(prefix) or row.get("method") == "sam2_physics_auto_prompt"],
+        ["dataset", "method", "eval_unit"],
+        metrics,
+    )

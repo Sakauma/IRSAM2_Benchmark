@@ -21,6 +21,7 @@ MAIN_PY = PROJECT_ROOT / "main.py"
 ANALYSIS_PY = PROJECT_ROOT / "scripts" / "analyze_paper_results.py"
 REQUIRED_RUN_FILES = (
     "benchmark_spec.json",
+    "run_metadata.json",
     "summary.json",
     "results.json",
     "eval_reports/rows.json",
@@ -246,7 +247,7 @@ def _analysis_config(
         "primary_metric": suite_entry.get("primary_metric", "mIoU"),
         "metrics": list(suite_entry.get("metrics", ["mIoU", "Dice", "LatencyMs"])),
         "lower_is_better": list(suite_entry.get("lower_is_better", ["LatencyMs"])),
-        "group_keys": ["dataset", "method", "target_scale", "annotation_protocol_flag"],
+        "group_keys": ["dataset", "method", "eval_unit", "supervision_type", "target_scale", "annotation_protocol_flag"],
         "case_selection": {"top_k": 8, "primary_metric": suite_entry.get("primary_metric", "mIoU")},
         "statistics": {
             "n_bootstrap": 10000,

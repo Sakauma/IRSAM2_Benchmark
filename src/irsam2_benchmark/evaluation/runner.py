@@ -11,7 +11,7 @@ from ..core.interfaces import InferenceMode
 from ..data.prompt_synthesis import mask_to_tight_box
 from ..data.sample import Sample
 from ..data.views import build_image_view, build_track_view
-from .image_metrics import bbox_iou, boundary_f1, dice_score, mask_iou
+from .image_metrics import bbox_iou, boundary_f1, boundary_f1_tolerance, dice_score, mask_iou
 from .instance_metrics import greedy_match_instances
 from .prompt_metrics import prompt_metrics
 from .small_target_metrics import small_target_metrics
@@ -53,7 +53,9 @@ def _image_level_row(items: List[Sample], elapsed_ms: float, instance_metrics: D
         "sample_id": representative.frame_id,
         "frame_id": representative.frame_id,
         "sequence_id": representative.sequence_id,
+        "eval_unit": "image",
         "modality": modality,
+        "supervision_type": _summarize_values(item.supervision_type for item in items),
         "category_name": _summarize_values(item.category for item in items),
         "target_scale": _summarize_values(item.target_scale for item in items),
         "device_source": _summarize_values(item.device_source for item in items),
@@ -116,7 +118,11 @@ def evaluate_method(
             pred = method.predict_sample(representative)
             elapsed_ms = (time.perf_counter() - start) * 1000.0
             gt_instances = [{"mask": item.mask_array} for item in items if item.mask_array is not None]
-            instance_metrics = greedy_match_instances(pred.get("instances", []), gt_instances)
+            pred_instances = pred.get("instances", [])
+            if gt_instances:
+                instance_metrics = greedy_match_instances(pred_instances, gt_instances)
+            else:
+                instance_metrics = {"num_pred_instances": float(len(pred_instances)), "num_gt_instances": 0.0}
             rows.append(_image_level_row(items, elapsed_ms, instance_metrics, modality=modality))
         return _aggregate(rows), rows
 
@@ -144,6 +150,7 @@ def build_segmentation_row(
     gt_box = item.bbox_tight
     height = max(1, item.height)
     width = max(1, item.width)
+    has_mask_gt = item.mask_array is not None and item.supervision_type == "mask"
     prompt_metadata: Dict[str, Any] = {}
     if prompt:
         prompt_metadata = {
@@ -176,24 +183,44 @@ def build_segmentation_row(
         "sample_id": item.sample_id,
         "frame_id": item.frame_id,
         "sequence_id": item.sequence_id,
+        "eval_unit": "instance",
         "modality": modality,
+        "supervision_type": item.supervision_type,
         "category_name": item.category,
         "target_scale": item.target_scale,
         "device_source": item.device_source,
         "annotation_protocol_flag": item.annotation_protocol_flag,
-        "mIoU": mask_iou(pred_mask, gt_mask),
-        "Dice": dice_score(pred_mask, gt_mask),
-        "BoundaryF1": boundary_f1(pred_mask, gt_mask),
         "LatencyMs": elapsed_ms,
         "BBoxIoU": bbox_iou(pred_box, gt_box),
-        "TightBoxMaskIoU": mask_iou(box_to_area(item.bbox_tight, item.height, item.width), gt_mask) if item.bbox_tight else 0.0,
-        "LooseBoxMaskIoU": mask_iou(box_to_area(item.bbox_loose, item.height, item.width), gt_mask) if item.bbox_loose else 0.0,
         "PredAreaRatio": pred_area / float(height * width),
-        "GTAreaRatio": gt_area / float(height * width),
-        **small_target_metrics(pred_mask, gt_mask),
-        **prompt_metrics(prompt, gt_mask),
+        "PredAreaPixels": pred_area,
         **prompt_metadata,
     }
+    if has_mask_gt:
+        exact_boundary_f1 = boundary_f1(pred_mask, gt_mask)
+        row.update(
+            {
+                "mIoU": mask_iou(pred_mask, gt_mask),
+                "Dice": dice_score(pred_mask, gt_mask),
+                "BoundaryF1": exact_boundary_f1,
+                "BoundaryF1Exact": exact_boundary_f1,
+                "BoundaryF1Tol1": boundary_f1_tolerance(pred_mask, gt_mask, radius=1),
+                "TightBoxMaskIoU": mask_iou(box_to_area(item.bbox_tight, item.height, item.width), gt_mask) if item.bbox_tight else 0.0,
+                "LooseBoxMaskIoU": mask_iou(box_to_area(item.bbox_loose, item.height, item.width), gt_mask) if item.bbox_loose else 0.0,
+                "GTAreaRatio": gt_area / float(height * width),
+                **small_target_metrics(pred_mask, gt_mask),
+                **prompt_metrics(prompt, gt_mask),
+            }
+        )
+    elif prompt:
+        prompt_box = prompt.get("box")
+        prompt_point = prompt.get("point")
+        if isinstance(prompt_box, list):
+            row["PromptBoxBBoxIoU"] = bbox_iou([float(value) for value in prompt_box[:4]], item.bbox_tight)
+        if isinstance(prompt_point, list) and len(prompt_point) >= 2 and item.bbox_tight is not None:
+            x, y = float(prompt_point[0]), float(prompt_point[1])
+            x1, y1, x2, y2 = item.bbox_tight
+            row["PromptPointInBBox"] = 1.0 if x1 <= x <= x2 and y1 <= y <= y2 else 0.0
     if item.track_id is not None:
         row["track_id"] = item.track_id
     return row

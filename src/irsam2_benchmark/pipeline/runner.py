@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import platform
 import random
 import shutil
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -46,6 +52,110 @@ def _build_benchmark_spec(config: AppConfig, inference_mode: InferenceMode) -> D
         "modules": config.modules,
         "config_path": str(config.config_path),
     }
+
+
+def _run_text(command: List[str], cwd: Any) -> str:
+    try:
+        result = subprocess.run(command, cwd=cwd, check=False, text=True, capture_output=True)
+    except Exception:
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _git_info(config: AppConfig) -> Dict[str, Any]:
+    status = _run_text(["git", "status", "--short"], config.root)
+    return {
+        "commit": _run_text(["git", "rev-parse", "HEAD"], config.root),
+        "branch": _run_text(["git", "branch", "--show-current"], config.root),
+        "dirty": bool(status),
+        "status_short": status.splitlines(),
+    }
+
+
+def _torch_info() -> Dict[str, Any]:
+    try:
+        import torch
+
+        cuda_available = bool(torch.cuda.is_available())
+        gpu_name = torch.cuda.get_device_name(0) if cuda_available and torch.cuda.device_count() else ""
+        return {
+            "torch": torch.__version__,
+            "cuda_available": cuda_available,
+            "cuda_version": getattr(torch.version, "cuda", ""),
+            "gpu_name": gpu_name,
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def _sha256(path: Any) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _file_info(path: Any) -> Dict[str, Any]:
+    path = path if hasattr(path, "exists") else Path(path)
+    if not path.exists():
+        return {"path": str(path), "exists": False}
+    stat = path.stat()
+    return {
+        "path": str(path),
+        "exists": True,
+        "size_bytes": stat.st_size,
+        "mtime": stat.st_mtime,
+        "sha256": _sha256(path),
+    }
+
+
+def _sam2_info(config: AppConfig) -> Dict[str, Any]:
+    repo = config.sam2_repo
+    return {
+        "repo": str(repo),
+        "commit": _run_text(["git", "rev-parse", "HEAD"], repo) if repo.exists() else "",
+        "dirty": bool(_run_text(["git", "status", "--short"], repo)) if repo.exists() else False,
+    }
+
+
+def _checkpoint_path(config: AppConfig) -> Path:
+    path = Path(config.model.ckpt)
+    return path if path.is_absolute() else config.sam2_repo / path
+
+
+def _write_run_metadata(
+    *,
+    output_dir: Any,
+    config: AppConfig,
+    command: str,
+    baseline_name: str | None,
+    benchmark_spec: Dict[str, Any],
+    dataset_manifest: Dict[str, Any] | None = None,
+    output_paths: Dict[str, Any] | None = None,
+) -> None:
+    metadata = {
+        "command": command,
+        "baseline_name": baseline_name,
+        "config_path": str(config.config_path),
+        "benchmark_spec": benchmark_spec,
+        "git": _git_info(config),
+        "python": {
+            "executable": sys.executable,
+            "version": sys.version,
+            "platform": platform.platform(),
+        },
+        "torch": _torch_info(),
+        "sam2": _sam2_info(config),
+        "checkpoint": _file_info(_checkpoint_path(config)),
+        "dataset": {
+            "dataset_id": config.dataset.dataset_id,
+            "root": str(config.dataset_root),
+            "manifest": dataset_manifest or {},
+        },
+        "outputs": {name: str(path) for name, path in (output_paths or {}).items()},
+    }
+    (output_dir / "run_metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _seed_result(seed: int, aggregate: Dict[str, Any]) -> Dict[str, Any]:
@@ -310,6 +420,15 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
         summary=summary,
         results=results,
         eval_rows=eval_rows,
+    )
+    _write_run_metadata(
+        output_dir=output_dir,
+        config=config,
+        command=command,
+        baseline_name=resolved_baseline_name,
+        benchmark_spec=benchmark_spec,
+        dataset_manifest=dataset.manifest.to_dict(),
+        output_paths=output_paths,
     )
     if command == "baseline" and config.runtime.update_reference_results:
         _snapshot_reference_outputs(config, resolved_baseline_name, output_dir)

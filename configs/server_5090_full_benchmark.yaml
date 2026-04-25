@@ -58,14 +58,14 @@ suites:
   mask:
     experiment_id: "T5090_mask_prompt_modes"
     purpose: "SAM2 prompt-mode and checkpoint sweep on IR mask datasets."
-    modes: ["sam2_box_oracle", "sam2_point_oracle", "sam2_box_point_oracle", "sam2_no_prompt_auto_mask"]
+    modes: ["sam2_box_oracle", "sam2_point_oracle", "sam2_box_point_oracle"]
     datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal"]
     run_analysis: true
     primary_metric: "mIoU"
     metrics:
       - "mIoU"
       - "Dice"
-      - "BoundaryF1"
+      - "BoundaryF1Tol1"
       - "TargetRecallIoU25"
       - "FalseAlarmPixelsPerMP"
       - "LatencyMs"
@@ -80,9 +80,24 @@ suites:
       - name: "box_point_vs_box"
         baseline: "sam2_box_oracle"
         candidate: "sam2_box_point_oracle"
-      - name: "no_prompt_vs_box"
-        baseline: "sam2_box_oracle"
-        candidate: "sam2_no_prompt_auto_mask"
+  auto_mask:
+    experiment_id: "T5090_no_prompt_auto_mask"
+    purpose: "Track B image-level SAM2 automatic mask generation on IR mask datasets."
+    modes: ["sam2_no_prompt_auto_mask"]
+    datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal"]
+    run_analysis: true
+    primary_metric: "instance_f1"
+    metrics:
+      - "instance_precision"
+      - "instance_recall"
+      - "instance_f1"
+      - "matched_instance_iou"
+      - "num_pred_instances"
+      - "LatencyMs"
+    lower_is_better:
+      - "num_pred_instances"
+      - "LatencyMs"
+    comparisons: []
   rbgt_box:
     experiment_id: "T5090_rbgt_box_prompt_modes"
     purpose: "RBGT-Tiny IR-only weak-label supplement; keep separate from mask metrics."
@@ -101,7 +116,7 @@ suites:
     metrics:
       - "mIoU"
       - "Dice"
-      - "BoundaryF1"
+      - "BoundaryF1Tol1"
       - "TargetRecallIoU25"
       - "FalseAlarmPixelsPerMP"
       - "PromptBoxCoverage"

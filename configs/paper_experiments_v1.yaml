@@ -313,24 +313,30 @@ methods:
 
 groups:
   p0_baselines: ["T1_oracle_prompt_baselines"]
-  p0_auto_prompt: ["T2_ir_auto_prompt"]
+  p0_auto_prompt: ["T2_ir_auto_prompt", "T7_no_prompt_auto_mask"]
   p0_ablation: ["T3_prior_prompt_ablation"]
   p0_prompt_protocol: ["T6_prompt_generation_protocol_ablation"]
-  p0_all: ["T1_oracle_prompt_baselines", "T2_ir_auto_prompt", "T3_prior_prompt_ablation"]
+  p0_all: ["T1_oracle_prompt_baselines", "T2_ir_auto_prompt", "T7_no_prompt_auto_mask", "T3_prior_prompt_ablation"]
 
 experiments:
   - experiment_id: "T1_oracle_prompt_baselines"
     status: "planned"
     datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal"]
     methods: ["bbox_rect", "sam2_box_oracle", "sam2_point_oracle", "sam2_box_point_oracle"]
-    metrics: ["mIoU", "Dice", "BoundaryF1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "LatencyMs"]
+    metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "LatencyMs"]
     purpose: "Measure oracle-prompt SAM2 upper bound and box-rectangle baseline on IR mask datasets."
   - experiment_id: "T2_ir_auto_prompt"
     status: "planned"
     datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal"]
-    methods: ["sam2_no_prompt_auto_mask", "sam2_physics_auto_prompt"]
+    methods: ["sam2_physics_auto_prompt"]
     metrics: ["mIoU", "Dice", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "PromptHitRate", "PromptBoxCoverage", "LatencyMs"]
-    purpose: "Compare no-prompt SAM2 with IR physics-prior automatic prompting."
+    purpose: "Evaluate IR physics-prior automatic prompting as a Track A prompted segmentation method."
+  - experiment_id: "T7_no_prompt_auto_mask"
+    status: "planned"
+    datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal"]
+    methods: ["sam2_no_prompt_auto_mask"]
+    metrics: ["instance_precision", "instance_recall", "instance_f1", "matched_instance_iou", "num_pred_instances", "LatencyMs"]
+    purpose: "Evaluate no-prompt SAM2 automatic mask generation as a separate Track B image-level baseline."
   - experiment_id: "T3_prior_prompt_ablation"
     status: "planned"
     datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal"]
@@ -350,7 +356,7 @@ experiments:
     status: "planned"
     datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal"]
     methods: ["sam2_box_oracle", "sam2_tight_box_oracle"]
-    metrics: ["mIoU", "Dice", "BoundaryF1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "PromptBoxCoverage", "LatencyMs"]
+    metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "PromptBoxCoverage", "LatencyMs"]
     purpose: "Measure whether mask-derived loose-box expansion changes the SAM2 oracle prompt conclusion relative to tight GT boxes."
   - experiment_id: "T4_trainable_adapter_placeholder"
     status: "planned_after_p0"

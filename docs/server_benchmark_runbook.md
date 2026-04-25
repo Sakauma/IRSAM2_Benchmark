@@ -6,11 +6,12 @@
 
 默认完整基准会运行 88 个组合：
 
-- `mask` 主实验：4 个 mask 数据集 × 4 个 prompt mode × 4 个 SAM2 checkpoint，共 64 个 run。
+- `mask` 主实验：4 个 mask 数据集 × 3 个 prompted mode × 4 个 SAM2 checkpoint，共 48 个 run。
+- `auto_mask` Track B 实验：4 个 mask 数据集 × `no_prompt` × 4 个 checkpoint，共 16 个 run。
 - `rbgt_box` 补充实验：`RBGT-Tiny` 红外分支 × 4 个 prompt mode × 4 个 checkpoint，共 16 个 run。
 - `prompt_box_protocol` 协议诊断：4 个 mask 数据集 × `adaptive loose box` 和 `tight box` × `base_plus`，共 8 个 run。
 
-主实验只针对红外图像。`RBGT-Tiny` 只作为弱标注补充证据，不应混入 mask 主表。
+主实验只针对红外图像。`no_prompt` 是图像级 Track B automatic-mask 评估，不和 Track A prompted segmentation 做 paired test。`RBGT-Tiny` 只作为弱标注补充证据，不应混入 mask 主表。
 
 当前 `box` prompt 协议是 `mask_derived_adaptive_loose_box_centroid_point_v2`：
 
@@ -114,7 +115,7 @@ python scripts/run_5090_full_benchmark.py \
   --checkpoints base_plus,large
 ```
 
-如果中断，直接重复正式命令。脚本会跳过已经完整生成 `benchmark_spec.json`、`summary.json`、`results.json`、`eval_reports/rows.json` 的 run。
+如果中断，直接重复正式命令。脚本会跳过已经完整生成 `benchmark_spec.json`、`run_metadata.json`、`summary.json`、`results.json`、`eval_reports/rows.json` 的 run。
 
 强制重跑时才使用：
 
@@ -153,6 +154,7 @@ cat /root/autodl-tmp/irsam2_artifacts/paper_5090/benchmark_manifest_latest.json
 - `analysis/checkpoint_sweep_summary.csv` 存在。
 - `analysis/mask/{checkpoint}/tables/main_baseline_table.csv` 存在。
 - `analysis/mask/{checkpoint}/tables/significance_tests.csv` 存在。
+- `analysis/auto_mask/{checkpoint}/tables/main_baseline_table.csv` 存在。
 - `analysis/prompt_box_protocol/base_plus/tables/significance_tests.csv` 存在。
 
 如果 `run_failures_latest.json` 非空，先不要删除任何 run 目录。优先保留完整 artifact，后续可以根据 `config_path` 和 `command` 定位失败组合。
@@ -177,6 +179,7 @@ cat /root/autodl-tmp/irsam2_artifacts/paper_5090/benchmark_manifest_latest.json
 - `paper_5090/generated/`
 - `paper_5090/analysis/`
 - `paper_5090/runs/**/benchmark_spec.json`
+- `paper_5090/runs/**/run_metadata.json`
 - `paper_5090/runs/**/summary.json`
 - `paper_5090/runs/**/results.json`
 - `paper_5090/runs/**/eval_reports/rows.json`
@@ -242,6 +245,7 @@ scp user@server:/root/autodl-tmp/irsam2_artifacts/paper_5090_artifacts.tar.gz \
 - `paper_5090/analysis/mask/{checkpoint}/stats-appendix.md`
 - `paper_5090/analysis/mask/{checkpoint}/tables/main_baseline_table.csv`
 - `paper_5090/analysis/mask/{checkpoint}/tables/significance_tests.csv`
+- `paper_5090/analysis/auto_mask/{checkpoint}/tables/main_baseline_table.csv`
 - `paper_5090/analysis/prompt_box_protocol/base_plus/tables/significance_tests.csv`
 - `paper_5090/analysis/*/*/figures/qualitative_cases/`
 - `paper_5090/runs/**/eval_reports/rows.json`

@@ -15,14 +15,17 @@ def _numeric_values(rows: List[Dict[str, Any]], metric: str) -> List[float]:
     return values
 
 
-def _mean(values: Sequence[float]) -> float:
-    return float(sum(values) / len(values)) if values else 0.0
+def _mean(values: Sequence[float]) -> float | None:
+    return float(sum(values) / len(values)) if values else None
 
 
-def _std(values: Sequence[float]) -> float:
+def _std(values: Sequence[float]) -> float | None:
+    if not values:
+        return None
     if len(values) < 2:
         return 0.0
     mean = _mean(values)
+    assert mean is not None
     return float((sum((value - mean) ** 2 for value in values) / (len(values) - 1)) ** 0.5)
 
 
@@ -77,4 +80,3 @@ def _add_area_bucket(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         area = row.get("GTAreaPixels", 0.0)
         output.append({**row, "area_bucket": _area_bucket(float(area) if isinstance(area, (int, float)) else 0.0)})
     return output
-

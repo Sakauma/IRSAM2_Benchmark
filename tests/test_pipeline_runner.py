@@ -243,6 +243,11 @@ class PipelineRunnerSeedTests(unittest.TestCase):
                 run_command(config, "baseline", baseline_name="bbox_rect")
 
             snapshot_mock.assert_not_called()
+            metadata = json.loads((config.output_dir / "run_metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["baseline_name"], "bbox_rect")
+            self.assertEqual(metadata["config_path"], str(config.config_path))
+            self.assertIn("git", metadata)
+            self.assertIn("torch", metadata)
 
 
 if __name__ == "__main__":
