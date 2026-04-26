@@ -52,4 +52,9 @@ class Sample:
         }
 
     def has_mask(self) -> bool:
-        return self.mask_array is not None or self.mask_path is not None
+        source = self.metadata.get("mask_source")
+        return (
+            self.mask_array is not None
+            or self.mask_path is not None
+            or (isinstance(source, dict) and source.get("type") == "polygon")
+        )

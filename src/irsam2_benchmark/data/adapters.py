@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from ..config import AppConfig
+from .masks import MASK_SOURCE_KEY, polygon_to_mask
 from .prompt_synthesis import connected_components, expand_box_xyxy, mask_derived_prompt_metadata, mask_to_point_prompt, mask_to_tight_box
 from .sample import Sample
 
@@ -97,10 +98,7 @@ def _image_size(image_path: Path) -> tuple[int, int]:
 
 
 def _polygon_to_mask(points: Sequence[float], height: int, width: int) -> np.ndarray:
-    canvas = Image.new("L", (width, height), 0)
-    xy = [(float(points[i]), float(points[i + 1])) for i in range(0, len(points), 2)]
-    ImageDraw.Draw(canvas).polygon(xy, outline=1, fill=1)
-    return np.array(canvas, dtype=np.float32)
+    return polygon_to_mask(points, height=height, width=width)
 
 
 def _sorted_files(root: Path, extensions: Sequence[str]) -> List[Path]:
@@ -155,11 +153,16 @@ def _build_sample_from_mask(
     mask_array: np.ndarray,
     width: int,
     height: int,
+    store_mask_array: bool = True,
+    mask_source: Optional[Dict[str, object]] = None,
 ) -> Sample:
     tight = mask_to_tight_box(mask_array)
     loose = expand_box_xyxy(tight, width=width, height=height)
     point = mask_to_point_prompt(mask_array)
     target_scale = _target_scale_from_area(float((mask_array > 0.5).sum()))
+    metadata: Dict[str, object] = {"prompt_generation": mask_derived_prompt_metadata()}
+    if mask_source is not None:
+        metadata[MASK_SOURCE_KEY] = mask_source
     return Sample(
         image_path=image_path,
         sample_id=f"{sample_id}::{category}::{annotation_protocol_flag}",
@@ -178,8 +181,8 @@ def _build_sample_from_mask(
         bbox_tight=tight,
         bbox_loose=loose,
         point_prompt=point,
-        mask_array=mask_array.astype(np.float32),
-        metadata={"prompt_generation": mask_derived_prompt_metadata()},
+        mask_array=mask_array.astype(np.float32) if store_mask_array else None,
+        metadata=metadata,
     )
 
 
@@ -235,6 +238,12 @@ class MultiModalAdapter(DatasetAdapter):
                     continue
                 mask_array = _polygon_to_mask(polygon, height=height, width=width)
                 sample_id = f"{frame_id}__inst_{inst_idx}"
+                mask_source = {
+                    "type": "polygon",
+                    "points": [float(value) for value in polygon],
+                    "height": height,
+                    "width": width,
+                }
                 samples.append(
                     _build_sample_from_mask(
                         image_path=image_path,
@@ -250,6 +259,8 @@ class MultiModalAdapter(DatasetAdapter):
                         mask_array=mask_array,
                         width=width,
                         height=height,
+                        store_mask_array=False,
+                        mask_source=mask_source,
                     )
                 )
                 if _limit_reached(config.runtime.max_samples, len(samples)):

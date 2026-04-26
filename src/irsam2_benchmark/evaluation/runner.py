@@ -12,6 +12,7 @@ import numpy as np
 
 from ..config import AppConfig
 from ..core.interfaces import InferenceMode
+from ..data.masks import sample_mask_array, sample_mask_or_zeros
 from ..data.prompt_synthesis import mask_to_tight_box
 from ..data.sample import Sample
 from ..data.views import build_image_view, build_track_view
@@ -381,7 +382,7 @@ def evaluate_method(
                 for item in items:
                     try:
                         pred_mask, mask_alignment = align_mask_to_sample(predictions[item.sample_id], item)
-                        gt_mask = np.asarray(item.mask_array, dtype=np.float32) if item.mask_array is not None else np.zeros((item.height, item.width), dtype=np.float32)
+                        gt_mask = sample_mask_or_zeros(item)
                         row = build_segmentation_row(item, pred_mask, gt_mask, elapsed_ms, modality=modality, mask_alignment=mask_alignment)
                         row["track"] = track_name
                         row["track_id"] = track_id
@@ -454,7 +455,11 @@ def evaluate_method(
                     continue
                 elapsed_ms = (time.perf_counter() - start) * 1000.0
                 try:
-                    gt_instances = [{"mask": item.mask_array} for item in items if item.mask_array is not None]
+                    gt_instances = []
+                    for item in items:
+                        gt_mask = sample_mask_array(item)
+                        if gt_mask is not None:
+                            gt_instances.append({"mask": gt_mask})
                     pred_instances = []
                     for instance in pred.get("instances", []):
                         aligned_mask, _ = align_mask_to_sample(instance["mask"], representative)
@@ -520,7 +525,7 @@ def evaluate_method(
                     try:
                         pred = predictions[item.sample_id]
                         pred_mask, mask_alignment = align_mask_to_sample(pred["mask"], item)
-                        gt_mask = np.asarray(item.mask_array, dtype=np.float32) if item.mask_array is not None else np.zeros((item.height, item.width), dtype=np.float32)
+                        gt_mask = sample_mask_or_zeros(item)
                         row = build_segmentation_row(item, pred_mask, gt_mask, per_sample_elapsed_ms, modality=modality, prompt=pred.get("prompt"), mask_alignment=mask_alignment)
                         row["BatchSize"] = len(actual_batch)
                         row["BatchIndex"] = batch_index
@@ -571,7 +576,7 @@ def build_segmentation_row(
     gt_box = item.bbox_tight
     height = max(1, item.height)
     width = max(1, item.width)
-    has_mask_gt = item.mask_array is not None and item.supervision_type == "mask"
+    has_mask_gt = item.has_mask() and item.supervision_type == "mask"
     prompt_metadata: Dict[str, Any] = {}
     if prompt:
         prompt_metadata = {

@@ -16,6 +16,7 @@ from ..baselines import build_baseline_registry
 from ..config import AppConfig
 from ..core.interfaces import ArtifactRecord, InferenceMode, PipelineStage, PromptPolicy, PromptSource, PromptType
 from ..data import build_dataset_adapter
+from ..data.masks import sample_mask_array, sample_mask_or_zeros
 from ..data.views import build_image_view, build_track_view
 from ..evaluation.reporting import write_results
 from ..evaluation.runner import _merge_error_context, _reset_error_log, _write_sample_error, align_mask_to_sample, evaluate_method
@@ -228,9 +229,7 @@ def _snapshot_reference_outputs(config: AppConfig, baseline_name: str, output_di
 
 
 def _visual_gt_mask(sample) -> np.ndarray:
-    if sample.mask_array is not None:
-        return np.asarray(sample.mask_array, dtype=np.float32)
-    return np.zeros((sample.height, sample.width), dtype=np.float32)
+    return sample_mask_or_zeros(sample)
 
 
 def _build_visual_records(
@@ -254,7 +253,11 @@ def _build_visual_records(
             group_sample_ids = [item.sample_id for item in items]
             try:
                 prediction = method.predict_sample(representative)
-                gt_instances = [{"mask": item.mask_array} for item in items if item.mask_array is not None]
+                gt_instances = []
+                for item in items:
+                    gt_mask = sample_mask_array(item)
+                    if gt_mask is not None:
+                        gt_instances.append({"mask": gt_mask})
                 pred_instances = []
                 for instance in prediction.get("instances", []):
                     aligned_mask, _ = align_mask_to_sample(instance["mask"], representative)
