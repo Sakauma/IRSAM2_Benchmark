@@ -4,6 +4,9 @@ from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Sequence
 
 
+SMALL_TARGET_AREA_PX = 32 * 32
+
+
 def _numeric_values(rows: List[Dict[str, Any]], metric: str) -> List[float]:
     values = []
     for row in rows:
@@ -54,6 +57,17 @@ def main_baseline_table(rows: List[Dict[str, Any]], metrics: Iterable[str]) -> L
     return summarize_by(rows, ["dataset", "method"], metrics)
 
 
+def multimodal_size_table(rows: List[Dict[str, Any]], metrics: Iterable[str]) -> List[Dict[str, Any]]:
+    multimodal_rows = [row for row in rows if str(row.get("dataset", "")).lower() == "multimodal"]
+    expanded_rows: List[Dict[str, Any]] = []
+    for row in multimodal_rows:
+        expanded_rows.append({**row, "mask_size_group": "overall"})
+        expanded_rows.append({**row, "mask_size_group": _small_large_group(row)})
+    table = summarize_by(expanded_rows, ["dataset", "method", "mask_size_group"], metrics)
+    group_order = {"overall": 0, "small_target": 1, "large_target": 2}
+    return sorted(table, key=lambda item: (str(item.get("dataset", "")), str(item.get("method", "")), group_order.get(str(item.get("mask_size_group", "")), 99)))
+
+
 def bucket_table(rows: List[Dict[str, Any]], metrics: Iterable[str]) -> List[Dict[str, Any]]:
     output: List[Dict[str, Any]] = []
     output.extend(summarize_by(rows, ["dataset", "method", "target_scale"], metrics))
@@ -72,6 +86,16 @@ def _area_bucket(area: float) -> str:
     if area < 1024:
         return "256_1023_px"
     return "ge_1024_px"
+
+
+def _small_large_group(row: Dict[str, Any]) -> str:
+    area = row.get("GTAreaPixels")
+    if isinstance(area, bool):
+        area = None
+    if isinstance(area, (int, float)):
+        return "small_target" if float(area) < float(SMALL_TARGET_AREA_PX) else "large_target"
+    target_scale = str(row.get("target_scale", "")).lower()
+    return "small_target" if target_scale == "small" else "large_target"
 
 
 def _add_area_bucket(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

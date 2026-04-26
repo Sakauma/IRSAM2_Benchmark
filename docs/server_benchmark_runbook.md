@@ -47,30 +47,29 @@ ls /path/to/sam2
 ls /path/to/sam2/checkpoints
 ```
 
-## 路径配置
+## 完整配置
 
-复制路径模板：
+复制完整 benchmark 配置模板：
 
 ```bash
-cp configs/local_paths.example.yaml configs/local_paths.yaml
+cp configs/server_benchmark_full.example.yaml configs/server_benchmark_full.local.yaml
 ```
 
-编辑 `configs/local_paths.yaml`：
+编辑 `configs/server_benchmark_full.local.yaml`。服务器运行的路径、模型、方法、数据集、seed、suite 和分析参数都在这个文件中：
 
 ```yaml
-sam2:
-  repo: "/root/sam2"
-  checkpoint_root: "/root/autodl-tmp/sam2/checkpoints"
-
-artifacts:
-  root: "/root/autodl-tmp/irsam2_artifacts"
-
-datasets:
-  nuaa_sirst: "/root/autodl-tmp/datasets/NUAA-SIRST"
-  nudt_sirst: "/root/autodl-tmp/datasets/NUDT-SIRST"
-  irstd_1k: "/root/autodl-tmp/datasets/IRSTD-1K"
-  multimodal: "/root/autodl-tmp/datasets/MultiModal"
-  rbgt_tiny_ir_box: "/root/autodl-tmp/datasets/RBGT-Tiny"
+paths:
+  sam2:
+    repo: "/root/sam2"
+    checkpoint_root: "/root/autodl-tmp/sam2/checkpoints"
+  artifacts:
+    root: "/root/autodl-tmp/irsam2_artifacts"
+  datasets:
+    nuaa_sirst: "/root/autodl-tmp/datasets/NUAA-SIRST"
+    nudt_sirst: "/root/autodl-tmp/datasets/NUDT-SIRST"
+    irstd_1k: "/root/autodl-tmp/datasets/IRSTD-1K"
+    multimodal: "/root/autodl-tmp/datasets/MultiModal"
+    rbgt_tiny_ir_box: "/root/autodl-tmp/datasets/RBGT-Tiny"
 
 execution:
   cuda_visible_devices: "0"
@@ -80,7 +79,7 @@ runtime:
   seeds: [42]
 ```
 
-`configs/local_paths.yaml` 是机器私有文件，建议保存在 artifact 中用于追溯，但不要提交到公开仓库。
+`configs/server_benchmark_full.local.yaml` 是机器私有文件，建议保存在 artifact 中用于追溯，但不要提交到公开仓库。
 
 ## 推荐运行流程
 
@@ -88,7 +87,7 @@ runtime:
 
 ```bash
 python scripts/run_5090_full_benchmark.py \
-  --paths configs/local_paths.yaml \
+  --config configs/server_benchmark_full.local.yaml \
   --dry-run
 ```
 
@@ -96,7 +95,7 @@ python scripts/run_5090_full_benchmark.py \
 
 ```bash
 python scripts/run_5090_full_benchmark.py \
-  --paths configs/local_paths.yaml \
+  --config configs/server_benchmark_full.local.yaml \
   --smoke-test
 ```
 
@@ -104,14 +103,14 @@ python scripts/run_5090_full_benchmark.py \
 
 ```bash
 python scripts/run_5090_full_benchmark.py \
-  --paths configs/local_paths.yaml
+  --config configs/server_benchmark_full.local.yaml
 ```
 
 如果服务器上只准备了 `base_plus` 和 `large` 两个 checkpoint：
 
 ```bash
 python scripts/run_5090_full_benchmark.py \
-  --paths configs/local_paths.yaml \
+  --config configs/server_benchmark_full.local.yaml \
   --checkpoints base_plus,large
 ```
 
@@ -121,13 +120,13 @@ python scripts/run_5090_full_benchmark.py \
 
 ```bash
 python scripts/run_5090_full_benchmark.py \
-  --paths configs/local_paths.yaml \
+  --config configs/server_benchmark_full.local.yaml \
   --rerun
 ```
 
 ## 运行完成后的验收
 
-假设 `artifacts.root` 是 `/root/autodl-tmp/irsam2_artifacts`，正式输出目录是：
+假设 `paths.artifacts.root` 是 `/root/autodl-tmp/irsam2_artifacts`，正式输出目录是：
 
 ```text
 /root/autodl-tmp/irsam2_artifacts/paper_5090/
@@ -187,9 +186,8 @@ cat /root/autodl-tmp/irsam2_artifacts/paper_5090/benchmark_manifest_latest.json
 
 建议额外保存这几个配置文件，方便之后复现实验：
 
-- `configs/local_paths.yaml`
-- `configs/server_5090_full_benchmark.yaml`
-- `configs/paper_experiments_v1.yaml`
+- `configs/server_benchmark_full.local.yaml`
+- `configs/server_benchmark_full.example.yaml`
 - `configs/paper_analysis_v1.yaml`
 
 建议把代码状态也写入 artifact：

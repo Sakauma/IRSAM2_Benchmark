@@ -53,11 +53,11 @@ def _selected_experiments(matrix: Dict[str, Any], group: str) -> List[Dict[str, 
 def _resolve_dataset_root(dataset_entry: Dict[str, Any], paths: Dict[str, Any], dataset_id: str) -> str:
     configured = paths.get("datasets", {}).get(dataset_id)
     if configured:
-        return str(configured)
+        return str(_resolve_project_path(str(configured)))
     root_env = dataset_entry.get("root_env")
     if root_env and os.environ.get(root_env):
-        return str(os.environ[root_env])
-    return str(dataset_entry["config"]["root"])
+        return str(_resolve_project_path(os.environ[root_env]))
+    return str(_resolve_project_path(str(dataset_entry["config"]["root"])))
 
 
 def _resolve_checkpoint_path(model: Dict[str, Any], paths: Dict[str, Any]) -> str:
@@ -66,8 +66,11 @@ def _resolve_checkpoint_path(model: Dict[str, Any], paths: Dict[str, Any]) -> st
         return str(ckpt)
     checkpoint_root = paths.get("sam2", {}).get("checkpoint_root")
     if checkpoint_root:
-        return str(Path(str(checkpoint_root)) / ckpt.name)
-    return str(ckpt)
+        return str(_resolve_project_path(str(checkpoint_root)) / ckpt.name)
+    sam2_repo = paths.get("sam2", {}).get("repo")
+    if sam2_repo:
+        return str(_resolve_project_path(str(sam2_repo)) / ckpt)
+    return str(_resolve_project_path(ckpt))
 
 
 def _resolve_project_path(value: str | Path) -> Path:
@@ -77,6 +80,14 @@ def _resolve_project_path(value: str | Path) -> Path:
 
 def _artifact_root(matrix: Dict[str, Any], paths: Dict[str, Any]) -> Path:
     raw = paths.get("artifacts", {}).get("root", matrix.get("runtime_defaults", {}).get("artifact_root", "artifacts"))
+    return _resolve_project_path(str(raw))
+
+
+def _reference_results_root(matrix: Dict[str, Any], paths: Dict[str, Any]) -> Path:
+    raw = paths.get("reference_results", {}).get(
+        "root",
+        matrix.get("runtime_defaults", {}).get("reference_results_root", "reference_results"),
+    )
     return _resolve_project_path(str(raw))
 
 
@@ -91,13 +102,13 @@ def _build_app_config(
     method_entry = _resolve_method(matrix["methods"], method_id)
     model = copy.deepcopy(matrix["model_defaults"])
     if paths.get("sam2", {}).get("repo"):
-        model["repo"] = str(paths["sam2"]["repo"])
+        model["repo"] = str(_resolve_project_path(str(paths["sam2"]["repo"])))
     model["ckpt"] = _resolve_checkpoint_path(model, paths)
     dataset_config = copy.deepcopy(dataset_entry["config"])
     dataset_config["root"] = _resolve_dataset_root(dataset_entry, paths, dataset_id)
     runtime = copy.deepcopy(matrix["runtime_defaults"])
-    if paths.get("artifacts", {}).get("root"):
-        runtime["artifact_root"] = str(paths["artifacts"]["root"])
+    runtime["artifact_root"] = str(_artifact_root(matrix, paths))
+    runtime["reference_results_root"] = str(_reference_results_root(matrix, paths))
     runtime["output_name"] = f"paper_v1/{experiment['experiment_id']}/{dataset_id}/{method_id}"
     evaluation = _deep_merge(matrix["evaluation_defaults"], method_entry.get("evaluation", {}))
     return {

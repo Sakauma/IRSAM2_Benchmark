@@ -1,6 +1,8 @@
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 import numpy as np
@@ -56,12 +58,16 @@ class DummyConfig:
 
 
 class LoggingConfig:
-    def __init__(self, output_dir: Path, *, image_batch_size: int = 1):
+    def __init__(self, output_dir: Path, *, image_batch_size: int = 1, show_progress: bool = False):
         self.output_dir = output_dir
         self.config_path = output_dir / "config.yaml"
         self.dataset = type("Dataset", (), {"modality": "ir", "dataset_id": "dummy_dataset"})()
         self.model = type("Model", (), {"model_id": "dummy_model"})()
-        self.runtime = type("Runtime", (), {"image_batch_size": image_batch_size, "batch_oom_fallback": True})()
+        self.runtime = type(
+            "Runtime",
+            (),
+            {"image_batch_size": image_batch_size, "batch_oom_fallback": True, "show_progress": show_progress, "progress_update_interval_s": 0.0},
+        )()
 
 
 def read_error_records(config: LoggingConfig) -> list[dict]:
@@ -205,6 +211,37 @@ class EvaluationRunnerTests(unittest.TestCase):
         self.assertEqual([row["BatchIndex"] for row in rows], [0, 0, 1, 1, 2])
         self.assertEqual([row["BatchItemIndex"] for row in rows], [0, 1, 0, 1, 0])
         self.assertTrue(all("BatchLatencyMs" in row for row in rows))
+
+    def test_evaluate_method_reports_tqdm_progress_when_enabled(self):
+        mask = box_to_area([0, 0, 4, 4], 4, 4)
+        samples = [
+            make_sample(sample_id=f"frame_{idx}__inst_0", frame_id=f"frame_{idx}", mask_array=mask)
+            for idx in range(2)
+        ]
+
+        class DummyBatchMethod:
+            def predict_samples(self, batch):
+                return {
+                    sample.sample_id: {"mask": np.ones((4, 4), dtype=np.float32), "prompt": None}
+                    for sample in batch
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = LoggingConfig(Path(temp_dir) / "out", image_batch_size=1, show_progress=True)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                _, rows = evaluate_method(
+                    method=DummyBatchMethod(),
+                    samples=samples,
+                    config=config,
+                    track_name="track_a_mask_prompt",
+                    inference_mode=InferenceMode.BOX,
+                )
+
+        self.assertEqual(len(rows), 2)
+        progress_text = stderr.getvalue()
+        self.assertIn("dummy_dataset", progress_text)
+        self.assertIn("2/2", progress_text)
 
     def test_evaluate_method_logs_batch_prediction_key_mismatch_and_skips_samples(self):
         mask = box_to_area([0, 0, 4, 4], 4, 4)

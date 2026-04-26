@@ -2,10 +2,11 @@
 
 ## 论文实验矩阵
 
+- `server_benchmark_full.example.yaml`：服务器 benchmark 的完整配置模板，包含路径、模型、方法、数据集、seed、suite 和分析参数。复制为 `server_benchmark_full.local.yaml` 后运行 5090/full、micro 或 official matrix。
 - `paper_experiments_v1.yaml`：IR-only 论文实验矩阵，配合 `scripts/run_paper_experiments.py` 使用。
 - `local_paths.example.yaml`：机器本地路径配置模板，复制为 `local_paths.yaml` 后填写数据集、SAM2 和 artifact 路径。
 - `paper_analysis_v1.yaml`：论文基准结果分析配置，配合 `scripts/analyze_paper_results.py` 使用。
-- `server_5090_full_benchmark.yaml`：单张 RTX 5090 完整基准的 checkpoint、prompt policy、suite 和分析默认配置。
+- `server_5090_full_benchmark.yaml`：旧版单张 RTX 5090 suite 配置，仍可通过兼容参数使用；新服务器运行推荐用完整 YAML。
 
 本目录按运行规模与数据集组织 benchmark 配置。
 

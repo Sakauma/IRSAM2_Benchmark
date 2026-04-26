@@ -158,6 +158,37 @@ def _write_run_metadata(
     (output_dir / "run_metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _count_error_records(path: Path) -> int:
+    if not path.exists():
+        return 0
+    with path.open("r", encoding="utf-8") as handle:
+        return sum(1 for line in handle if line.strip())
+
+
+def _validate_evaluation_outputs(
+    *,
+    command: str,
+    config: AppConfig,
+    sample_count: int,
+    eval_rows: List[Dict[str, Any]],
+    error_log_path: Path,
+) -> None:
+    if command not in {"baseline", "evaluate"}:
+        return
+    if sample_count <= 0:
+        raise RuntimeError(f"{command} loaded zero samples for dataset_id={config.dataset.dataset_id!r}.")
+    if eval_rows:
+        return
+    error_count = _count_error_records(error_log_path)
+    message = (
+        f"{command} produced zero evaluation rows for dataset_id={config.dataset.dataset_id!r} "
+        f"with sample_count={sample_count} and error_count={error_count}."
+    )
+    if error_log_path.exists():
+        message += f" See error log: {error_log_path}"
+    raise RuntimeError(message)
+
+
 def _seed_result(seed: int, aggregate: Dict[str, Any]) -> Dict[str, Any]:
     payload = {"seed": seed}
     payload.update({k: v for k, v in aggregate.items() if not isinstance(v, list)})
@@ -525,6 +556,13 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
         benchmark_spec=benchmark_spec,
         dataset_manifest=dataset.manifest.to_dict(),
         output_paths=output_paths,
+    )
+    _validate_evaluation_outputs(
+        command=command,
+        config=config,
+        sample_count=len(dataset.samples),
+        eval_rows=eval_rows,
+        error_log_path=error_log_path,
     )
     if command == "baseline" and config.runtime.update_reference_results:
         _snapshot_reference_outputs(config, resolved_baseline_name, output_dir)

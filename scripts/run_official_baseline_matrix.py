@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import copy
 import csv
 import hashlib
 import json
@@ -19,9 +21,25 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MAIN_PY = PROJECT_ROOT / "main.py"
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from run_5090_full_benchmark import (  # noqa: E402
+    DEFAULT_BENCHMARK_CONFIG,
+    _artifact_base,
+    _base_matrix_from_complete_config,
+    _build_app_config,
+    _build_env,
+    _model_config,
+    _resolve_method,
+    _suite_config_from_complete_config,
+)
+
 REQUIRED_RUN_OUTPUTS = ("summary.json", "results.json", "eval_reports/rows.json", "run_metadata.json")
 TRACKED_ENV_VARS = (
     "ARTIFACT_ROOT",
+    "BENCHMARK_CONFIG",
     "CHECKPOINT_ROOT",
     "CUDA_VISIBLE_DEVICES",
     "DATASET_ROOT",
@@ -71,111 +89,6 @@ FAILURE_FIELDNAMES = [
 ]
 CHECKPOINT_METADATA_CACHE: dict[str, dict[str, Any]] = {}
 
-MODELS = [
-    {
-        "alias": "tiny",
-        "model_id": "sam2.1_hiera_tiny",
-        "cfg": "configs/sam2.1/sam2.1_hiera_t.yaml",
-        "ckpt": "checkpoints/sam2.1_hiera_tiny.pt",
-    },
-    {
-        "alias": "small",
-        "model_id": "sam2.1_hiera_small",
-        "cfg": "configs/sam2.1/sam2.1_hiera_s.yaml",
-        "ckpt": "checkpoints/sam2.1_hiera_small.pt",
-    },
-    {
-        "alias": "base_plus",
-        "model_id": "sam2.1_hiera_base_plus",
-        "cfg": "configs/sam2.1/sam2.1_hiera_b+.yaml",
-        "ckpt": "checkpoints/sam2.1_hiera_base_plus.pt",
-    },
-    {
-        "alias": "large",
-        "model_id": "sam2.1_hiera_large",
-        "cfg": "configs/sam2.1/sam2.1_hiera_l.yaml",
-        "ckpt": "checkpoints/sam2.1_hiera_large.pt",
-    },
-]
-
-BASELINES = [
-    {
-        "name": "sam2_zero_shot",
-        "alias": "box",
-        "track": "track_a_image_prompted",
-        "inference_mode": "box",
-        "prompt_policy": {
-            "name": "box_prompt",
-            "prompt_type": "box",
-            "prompt_source": "gt",
-            "prompt_budget": 1,
-            "refresh_interval": 10,
-            "multi_mask": False,
-            "notes": "Official matrix box prompt baseline.",
-        },
-    },
-    {
-        "name": "sam2_zero_shot_point",
-        "alias": "point",
-        "track": "track_a_image_prompted",
-        "inference_mode": "point",
-        "prompt_policy": {
-            "name": "point_prompt",
-            "prompt_type": "point",
-            "prompt_source": "gt",
-            "prompt_budget": 1,
-            "refresh_interval": 10,
-            "multi_mask": False,
-            "notes": "Official matrix point prompt baseline.",
-        },
-    },
-    {
-        "name": "sam2_zero_shot_box_point",
-        "alias": "box_point",
-        "track": "track_a_image_prompted",
-        "inference_mode": "box+point",
-        "prompt_policy": {
-            "name": "box_point_prompt",
-            "prompt_type": "box+point",
-            "prompt_source": "gt",
-            "prompt_budget": 2,
-            "refresh_interval": 10,
-            "multi_mask": False,
-            "notes": "Official matrix box+point prompt baseline.",
-        },
-    },
-    {
-        "name": "sam2_no_prompt_auto_mask",
-        "alias": "no_prompt",
-        "track": "track_b_auto_mask",
-        "inference_mode": "no_prompt_auto_mask",
-        "prompt_policy": {
-            "name": "no_prompt_auto_mask",
-            "prompt_type": "none",
-            "prompt_source": "none",
-            "prompt_budget": 0,
-            "refresh_interval": None,
-            "multi_mask": True,
-            "notes": "Official matrix no-prompt automatic mask baseline.",
-        },
-    },
-]
-
-DATASETS = [
-    {
-        "alias": "multimodal",
-        "config_path": PROJECT_ROOT / "configs" / "benchmark_v1.yaml",
-        "dataset_root_env": "MULTIMODAL_DATASET_ROOT",
-        "dataset_root_default": "/root/autodl-tmp/datasets/MultiModalCOCOClean",
-    },
-    {
-        "alias": "rbgt",
-        "config_path": PROJECT_ROOT / "configs" / "benchmark_v1_rbgt_tiny.yaml",
-        "dataset_root_env": "RBGT_DATASET_ROOT",
-        "dataset_root_default": "/root/autodl-tmp/datasets/RBGT-Tiny",
-    },
-]
-
 
 def _split_csv_env(name: str, default: list[str]) -> list[str]:
     raw = os.environ.get(name, "")
@@ -185,7 +98,7 @@ def _split_csv_env(name: str, default: list[str]) -> list[str]:
 
 
 def _load_yaml(path: Path) -> dict:
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
 def _write_yaml(path: Path, payload: dict) -> None:
@@ -212,36 +125,64 @@ def _selected_rows(rows: list[dict], aliases: list[str], key: str) -> list[dict]
     return [row for row in rows if row[key] in allowed]
 
 
-def _checkpoint_root() -> Path:
-    explicit = os.environ.get("SAM2_CKPT_ROOT") or os.environ.get("CHECKPOINT_ROOT")
-    if explicit:
-        return Path(explicit)
-    sam2_repo = Path(os.environ.get("SAM2_REPO", "/root/sam2"))
-    return sam2_repo / "checkpoints"
+def _resolve_project_path(path: Path) -> Path:
+    return path if path.is_absolute() else PROJECT_ROOT / path
 
 
-def _resolve_model_ckpt(model: dict) -> str:
-    raw = Path(model["ckpt"])
-    if raw.is_absolute():
-        if not raw.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {raw}")
-        return str(raw)
+def _default_config_from_env() -> Path:
+    configured = os.environ.get("BENCHMARK_CONFIG")
+    return _resolve_project_path(Path(configured)) if configured else DEFAULT_BENCHMARK_CONFIG
 
-    candidate = _checkpoint_root() / raw.name
-    if candidate.exists():
-        return str(candidate)
 
-    sam2_repo_candidate = Path(os.environ.get("SAM2_REPO", "/root/sam2")) / raw
-    if sam2_repo_candidate.exists():
-        return str(sam2_repo_candidate)
+def _resolve_model_ckpt(model: dict, paths: dict) -> str:
+    effective_paths = copy.deepcopy(paths)
+    sam2_paths = effective_paths.setdefault("sam2", {})
+    if os.environ.get("SAM2_CKPT_ROOT") or os.environ.get("CHECKPOINT_ROOT"):
+        sam2_paths["checkpoint_root"] = os.environ.get("SAM2_CKPT_ROOT") or os.environ.get("CHECKPOINT_ROOT")
+    if os.environ.get("SAM2_REPO"):
+        sam2_paths["repo"] = os.environ["SAM2_REPO"]
+    resolved = Path(_model_config(model, effective_paths)["ckpt"])
+    if not resolved.exists():
+        raise FileNotFoundError(
+            "Official SAM2 checkpoint not found for matrix run.\n"
+            f"  model alias: {model['alias']}\n"
+            f"  resolved path: {resolved}\n"
+            "Set paths.sam2.checkpoint_root in the benchmark YAML, or set SAM2_CKPT_ROOT/CHECKPOINT_ROOT in the environment."
+        )
+    return str(resolved)
 
-    raise FileNotFoundError(
-        "Official SAM2 checkpoint not found for matrix run.\n"
-        f"  model alias: {model['alias']}\n"
-        f"  expected under checkpoint root: {_checkpoint_root() / raw.name}\n"
-        f"  fallback repo-relative path: {sam2_repo_candidate}\n"
-        "Please set SAM2_CKPT_ROOT (or CHECKPOINT_ROOT) to the directory that contains the official SAM2.1 .pt files."
-    )
+
+def _load_benchmark_config(config_path: Path) -> tuple[dict, dict, dict]:
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Complete benchmark config not found: {config_path}\n"
+            "Create it from configs/server_benchmark_full.example.yaml or pass --config."
+        )
+    raw = _load_yaml(config_path)
+    return raw.get("paths", {}), _suite_config_from_complete_config(raw, config_path), _base_matrix_from_complete_config(raw, config_path)
+
+
+def _mode_alias_map(suite_config: dict) -> dict[str, str]:
+    return {str(item["method"]): str(item.get("alias", item["method"])) for item in suite_config.get("modes", [])}
+
+
+def _selected_method_rows(base_matrix: dict, suite_config: dict, method_ids: list[str]) -> list[dict]:
+    alias_map = _mode_alias_map(suite_config)
+    rows = []
+    for method_id in method_ids:
+        method_entry = _resolve_method(base_matrix["methods"], method_id)
+        evaluation = method_entry.get("evaluation", {})
+        rows.append(
+            {
+                "method_id": method_id,
+                "name": method_entry["baseline"],
+                "alias": alias_map.get(method_id, method_id),
+                "track": evaluation.get("track", base_matrix["evaluation_defaults"]["track"]),
+                "inference_mode": evaluation.get("inference_mode", base_matrix["evaluation_defaults"]["inference_mode"]),
+                "prompt_policy": evaluation.get("prompt_policy", base_matrix["evaluation_defaults"]["prompt_policy"]),
+            }
+        )
+    return rows
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -334,8 +275,8 @@ def _env_snapshot(env: dict[str, str]) -> dict[str, str]:
     return {key: env[key] for key in TRACKED_ENV_VARS if key in env}
 
 
-def _run_output_name(dataset: dict, model: dict, baseline: dict) -> str:
-    return f"official_baseline_matrix/{dataset['alias']}/{model['alias']}/{baseline['alias']}"
+def _run_output_name(dataset: dict, model: dict, baseline: dict, artifact_subdir: str = "official_baseline_matrix") -> str:
+    return f"{artifact_subdir}/{dataset['alias']}/{model['alias']}/{baseline['alias']}"
 
 
 def _is_completed_run(output_dir: Path) -> bool:
@@ -433,23 +374,54 @@ def _write_matrix_outputs(matrix_root: Path, summary_rows: list[dict], failures:
     _write_csv(matrix_root / "matrix_failures.csv", failures, FAILURE_FIELDNAMES)
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run the official SAM2 baseline matrix from a complete benchmark YAML.")
+    parser.add_argument("--config", type=Path, default=_default_config_from_env())
+    args = parser.parse_args(argv)
+
+    config_path = _resolve_project_path(args.config)
+    paths, suite_config, base_matrix = _load_benchmark_config(config_path)
+    official_config = suite_config.get("official_matrix", {})
+    artifact_subdir = str(official_config.get("artifact_subdir", "official_baseline_matrix"))
+
     python_bin = os.environ.get("PYTHON_BIN", sys.executable or "python")
-    artifact_root = Path(os.environ.get("ARTIFACT_ROOT", str(PROJECT_ROOT / "artifacts")))
-    matrix_root = artifact_root / "official_baseline_matrix"
+    artifact_root = Path(os.environ.get("ARTIFACT_ROOT", str(_artifact_base(paths))))
+    matrix_root = artifact_root / artifact_subdir
     matrix_root.mkdir(parents=True, exist_ok=True)
 
-    selected_model_aliases = _split_csv_env("MATRIX_MODELS", [row["alias"] for row in MODELS])
-    selected_dataset_aliases = _split_csv_env("MATRIX_DATASETS", [row["alias"] for row in DATASETS])
-    selected_baseline_aliases = _split_csv_env("MATRIX_MODES", [row["alias"] for row in BASELINES])
-    selected_seeds = [int(value) for value in _split_csv_env("MATRIX_SEEDS", ["42"])]
-    visual_limit = int(os.environ.get("VISUAL_LIMIT", "24"))
-    resume_enabled = _bool_env("MATRIX_RESUME", True)
+    models = suite_config.get("checkpoints", [])
+    dataset_rows = [{"alias": dataset_id, "dataset_id": dataset_id} for dataset_id in base_matrix.get("datasets", {})]
+    default_method_ids = official_config.get("methods") or [str(item["method"]) for item in suite_config.get("modes", [])]
+    method_rows = _selected_method_rows(base_matrix, suite_config, [str(item) for item in default_method_ids])
+
+    selected_model_aliases = _split_csv_env("MATRIX_MODELS", [str(item) for item in official_config.get("models", [row["alias"] for row in models])])
+    selected_dataset_aliases = _split_csv_env(
+        "MATRIX_DATASETS",
+        [str(item) for item in official_config.get("datasets", [row["alias"] for row in dataset_rows])],
+    )
+    selected_baseline_aliases = _split_csv_env("MATRIX_MODES", [row["alias"] for row in method_rows])
+    selected_seeds = [
+        int(value)
+        for value in _split_csv_env(
+            "MATRIX_SEEDS",
+            [str(item) for item in official_config.get("seeds", base_matrix.get("runtime_defaults", {}).get("seeds", [42]))],
+        )
+    ]
+    visual_limit = int(os.environ.get("VISUAL_LIMIT", str(official_config.get("visual_limit", base_matrix.get("runtime_defaults", {}).get("visual_limit", 24)))))
+    resume_enabled = _bool_env("MATRIX_RESUME", bool(official_config.get("resume", True)))
     common_metadata = _collect_common_metadata(python_bin)
 
-    selected_models = _selected_rows(MODELS, selected_model_aliases, "alias")
-    selected_datasets = _selected_rows(DATASETS, selected_dataset_aliases, "alias")
-    selected_baselines = _selected_rows(BASELINES, selected_baseline_aliases, "alias")
+    selected_models = _selected_rows(models, selected_model_aliases, "alias")
+    selected_datasets = _selected_rows(dataset_rows, selected_dataset_aliases, "alias")
+    selected_baselines = [
+        row for row in method_rows if row["alias"] in selected_baseline_aliases or row["method_id"] in selected_baseline_aliases
+    ]
+    if not selected_models:
+        raise RuntimeError("No models selected for official matrix.")
+    if not selected_datasets:
+        raise RuntimeError("No datasets selected for official matrix.")
+    if not selected_baselines:
+        raise RuntimeError("No methods selected for official matrix.")
 
     summary_rows: list[dict] = []
     failures: list[dict] = []
@@ -459,8 +431,6 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="irsam2_matrix_") as temp_dir:
         temp_root = Path(temp_dir)
         for dataset in selected_datasets:
-            base_config = _load_yaml(dataset["config_path"])
-            dataset_root = os.environ.get(dataset["dataset_root_env"], dataset["dataset_root_default"])
             for model in selected_models:
                 for baseline in selected_baselines:
                     completed += 1
@@ -468,7 +438,8 @@ def main() -> int:
                         f"[{completed}/{run_count}] dataset={dataset['alias']} model={model['alias']} mode={baseline['alias']}",
                         flush=True,
                     )
-                    output_dir = artifact_root / _run_output_name(dataset, model, baseline)
+                    output_name = _run_output_name(dataset, model, baseline, artifact_subdir)
+                    output_dir = artifact_root / output_name
                     if resume_enabled and _is_completed_run(output_dir):
                         print(f"[skip] completed run found at {output_dir}", flush=True)
                         summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
@@ -479,29 +450,41 @@ def main() -> int:
                     started_perf = time.perf_counter()
                     metadata: dict[str, Any] | None = None
                     try:
-                        payload = json.loads(json.dumps(base_config))
-                        resolved_ckpt = _resolve_model_ckpt(model)
-                        payload["model"]["model_id"] = model["model_id"]
-                        payload["model"]["cfg"] = model["cfg"]
+                        suite_entry = {
+                            "experiment_id": artifact_subdir,
+                            "datasets": [dataset["dataset_id"]],
+                            "modes": [baseline["method_id"]],
+                        }
+                        payload = _build_app_config(
+                            base_matrix=base_matrix,
+                            suite_config=suite_config,
+                            paths=paths,
+                            suite_key="official_matrix",
+                            suite_entry=suite_entry,
+                            checkpoint=model,
+                            dataset_id=dataset["dataset_id"],
+                            method_id=baseline["method_id"],
+                            artifact_root=artifact_root,
+                            smoke_test=False,
+                        )
+                        resolved_ckpt = _resolve_model_ckpt(model, paths)
                         payload["model"]["ckpt"] = resolved_ckpt
                         payload["runtime"]["save_visuals"] = True
                         payload["runtime"]["visual_limit"] = visual_limit
                         payload["runtime"]["update_reference_results"] = False
                         payload["runtime"]["seeds"] = selected_seeds
-                        payload["runtime"]["output_name"] = _run_output_name(dataset, model, baseline)
+                        payload["runtime"]["output_name"] = output_name
                         payload["evaluation"]["benchmark_version"] = "irsam2-benchmark-v1-official-matrix"
                         payload["evaluation"]["track"] = baseline["track"]
                         payload["evaluation"]["inference_mode"] = baseline["inference_mode"]
                         payload["evaluation"]["prompt_policy"] = baseline["prompt_policy"]
+                        dataset_root = payload["dataset"]["root"]
 
                         temp_config = temp_root / f"{dataset['alias']}_{model['alias']}_{baseline['alias']}.yaml"
                         _write_yaml(temp_config, payload)
 
-                        env = os.environ.copy()
-                        env["PYTHONPATH"] = f"{PROJECT_ROOT / 'src'}{os.pathsep}{env.get('PYTHONPATH', '')}".rstrip(
-                            os.pathsep
-                        )
-                        env["DATASET_ROOT"] = dataset_root
+                        env = _build_env(paths)
+                        env.pop("DATASET_ROOT", None)
                         env["ARTIFACT_ROOT"] = str(artifact_root)
                         command = [
                             python_bin,

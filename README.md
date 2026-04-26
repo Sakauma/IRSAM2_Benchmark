@@ -27,13 +27,22 @@ pip install -e .
 
 如果 CUDA 版本不是 `cu124`，请用 PyTorch 官网生成的安装命令替换第一行。
 
-`SAM2` 官方源码不复制进本仓库。你需要在本机保留一个 `facebookresearch/sam2` 仓库，并在 `configs/local_paths.yaml` 中配置它的位置。
+`SAM2` 官方源码不复制进本仓库。你需要在本机保留一个 `facebookresearch/sam2` 仓库，并在运行用 YAML 中配置它的位置。
 
-## 路径配置
+## 配置方式
 
-论文实验不推荐使用 `export DATASET_ROOT=...` 这种方式。请使用 YAML 记录机器相关路径。
+服务器 benchmark 推荐使用单一完整 YAML。这个 YAML 同时记录路径、模型、方法、数据集、suite、seed、batch 和分析参数。
 
 先复制模板：
+
+```bash
+cp configs/server_benchmark_full.example.yaml configs/server_benchmark_full.local.yaml
+```
+
+然后编辑 `configs/server_benchmark_full.local.yaml` 中的 `paths`、`runtime`、`models`、`datasets`、`methods`、`suites` 和 `analysis`。该文件包含真实服务器路径，已经被 `.gitignore` 的 `configs/*.local.yaml` 规则排除，不建议提交。
+
+旧的论文矩阵入口 `run_paper_experiments.py` 仍支持 `configs/local_paths.yaml`。如果只运行旧入口，可以继续复制路径模板：
+
 
 ```bash
 cp configs/local_paths.example.yaml configs/local_paths.yaml
@@ -63,8 +72,6 @@ execution:
 runtime:
   seeds: [42]
 ```
-
-`configs/local_paths.yaml` 应该是本机私有配置，不建议提交到远端。模板文件 `configs/local_paths.example.yaml` 可以提交和共享。
 
 ## 论文实验入口
 
@@ -104,6 +111,8 @@ python scripts/analyze_paper_results.py \
 
 分析产物默认写入 `artifacts/paper_v1/analysis/`，包括论文表格、显著性检验、错误分桶、案例索引和 Markdown 报告。
 
+`run_paper_experiments.py` 会把每个展开后的运行配置持久化到 `artifacts/paper_v1/generated/run_configs/<group>/`，便于复跑和审计。
+
 可选实验组：
 
 - `p0_baselines`：oracle prompt baseline。
@@ -116,9 +125,9 @@ python scripts/analyze_paper_results.py \
 如果要在单张 RTX 5090 服务器上跑完整基准，推荐使用专用入口：
 
 ```bash
-python scripts/run_5090_full_benchmark.py --paths configs/local_paths.yaml --dry-run
-python scripts/run_5090_full_benchmark.py --paths configs/local_paths.yaml --smoke-test
-python scripts/run_5090_full_benchmark.py --paths configs/local_paths.yaml
+python scripts/run_5090_full_benchmark.py --config configs/server_benchmark_full.local.yaml --dry-run
+python scripts/run_5090_full_benchmark.py --config configs/server_benchmark_full.local.yaml --smoke-test
+python scripts/run_5090_full_benchmark.py --config configs/server_benchmark_full.local.yaml
 ```
 
 该入口默认展开：
@@ -170,7 +179,7 @@ python -m irsam2_benchmark.cli run baseline --config configs/benchmark_smoke.yam
 
 ## 结果输出
 
-默认输出目录由 `configs/local_paths.yaml` 中的 `artifacts.root` 控制。
+服务器 benchmark 的默认输出目录由 `configs/server_benchmark_full.local.yaml` 中的 `paths.artifacts.root` 控制；旧论文矩阵入口仍由 `configs/local_paths.yaml` 中的 `artifacts.root` 控制。
 
 每次运行会写出：
 

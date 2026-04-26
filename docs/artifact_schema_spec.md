@@ -9,6 +9,8 @@
 - `results.json`
 - `eval_reports/rows.json`
 
+一个 baseline/evaluate run 只有在 `eval_reports/rows.json` 非空且 `summary.json` 中的 `mean` 非空时，才应被矩阵 runner 视为完成。所有样本都失败时必须保留 `eval_reports/error_log.jsonl`，并让上层 runner 记录失败。
+
 `artifact_manifest.json` 至少需要记录：
 
 - stage 名称
@@ -27,8 +29,6 @@
 ## 官方矩阵附加产物
 
 通过 `scripts/run_official_baseline_matrix.py` 运行官方矩阵时，矩阵根目录还会额外写出：
-
-矩阵根目录会额外写出：
 
 - `matrix_summary.json`
 - `matrix_summary.csv`

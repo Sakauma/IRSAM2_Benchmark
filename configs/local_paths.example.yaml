@@ -22,7 +22,7 @@ execution:
 runtime:
   seeds: [42]
   # Optional overrides for batched inference. Remove these keys to use the
-  # checkpoint-specific defaults in configs/server_5090_full_benchmark.yaml.
+  # checkpoint-specific defaults now live in configs/server_benchmark_full.example.yaml.
   # image_batch_size: 8
   # auto_mask_points_per_batch: 128
   # batch_oom_fallback: true

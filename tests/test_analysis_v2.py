@@ -9,7 +9,7 @@ import yaml
 from irsam2_benchmark.analysis.collector import collect_runs
 from irsam2_benchmark.analysis.runner import run_analysis
 from irsam2_benchmark.analysis.stats import run_paired_tests
-from irsam2_benchmark.analysis.tables import main_baseline_table
+from irsam2_benchmark.analysis.tables import main_baseline_table, multimodal_size_table
 
 
 def _write_json(path: Path, payload):
@@ -115,6 +115,7 @@ class AnalysisV2Tests(unittest.TestCase):
 
             self.assertEqual(manifest["run_count"], 2)
             self.assertTrue((output_dir / "tables" / "main_baseline_table.csv").exists())
+            self.assertTrue((output_dir / "tables" / "multimodal_size_table.csv").exists())
             self.assertTrue((output_dir / "tables" / "significance_tests.json").exists())
             self.assertTrue((output_dir / "analysis-report.md").exists())
             self.assertTrue((output_dir / "stats-appendix.md").exists())
@@ -150,6 +151,23 @@ class AnalysisV2Tests(unittest.TestCase):
         self.assertIsNone(table[0]["mIoU_mean"])
         self.assertIsNone(table[0]["mIoU_std"])
         self.assertEqual(table[0]["mIoU_count"], 0)
+
+    def test_multimodal_size_table_splits_by_gt_mask_area(self):
+        rows = [
+            {"dataset": "multimodal", "method": "sam2_box_oracle", "sample_id": "small", "seed": 42, "GTAreaPixels": 100.0, "mIoU": 0.4, "Dice": 0.5},
+            {"dataset": "multimodal", "method": "sam2_box_oracle", "sample_id": "large", "seed": 42, "GTAreaPixels": 2000.0, "mIoU": 0.8, "Dice": 0.9},
+            {"dataset": "nuaa_sirst", "method": "sam2_box_oracle", "sample_id": "ignored", "seed": 42, "GTAreaPixels": 100.0, "mIoU": 0.1, "Dice": 0.2},
+        ]
+        table = multimodal_size_table(rows, ["mIoU", "Dice"])
+        by_group = {row["mask_size_group"]: row for row in table}
+
+        self.assertEqual(list(by_group), ["overall", "small_target", "large_target"])
+        self.assertEqual(by_group["overall"]["sample_count"], 2)
+        self.assertAlmostEqual(by_group["overall"]["mIoU_mean"], 0.6)
+        self.assertEqual(by_group["small_target"]["sample_count"], 1)
+        self.assertAlmostEqual(by_group["small_target"]["mIoU_mean"], 0.4)
+        self.assertEqual(by_group["large_target"]["sample_count"], 1)
+        self.assertAlmostEqual(by_group["large_target"]["mIoU_mean"], 0.8)
 
     def test_paired_stats_skips_mismatched_samples(self):
         rows = [

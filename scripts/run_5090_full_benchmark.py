@@ -19,6 +19,9 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MAIN_PY = PROJECT_ROOT / "main.py"
 ANALYSIS_PY = PROJECT_ROOT / "scripts" / "analyze_paper_results.py"
+DEFAULT_BENCHMARK_CONFIG = PROJECT_ROOT / "configs" / "server_benchmark_full.local.yaml"
+DEFAULT_LEGACY_PATHS = PROJECT_ROOT / "configs" / "local_paths.yaml"
+DEFAULT_LEGACY_SUITE_CONFIG = PROJECT_ROOT / "configs" / "server_5090_full_benchmark.yaml"
 REQUIRED_RUN_FILES = (
     "benchmark_spec.json",
     "run_metadata.json",
@@ -29,7 +32,7 @@ REQUIRED_RUN_FILES = (
 
 
 def _load_yaml(path: Path) -> Dict[str, Any]:
-    return yaml.safe_load(path.read_text(encoding="utf-8"))
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
 def _write_yaml(path: Path, payload: Dict[str, Any]) -> None:
@@ -96,9 +99,105 @@ def _split_filter(raw: str | None) -> set[str] | None:
     return {item.strip() for item in raw.split(",") if item.strip()}
 
 
+def _resolve_optional_project_path(path: Path | None) -> Path | None:
+    if path is None:
+        return None
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _default_config_from_env() -> Path | None:
+    configured = os.environ.get("BENCHMARK_CONFIG")
+    if configured:
+        return _resolve_project_path(configured)
+    return DEFAULT_BENCHMARK_CONFIG if DEFAULT_BENCHMARK_CONFIG.exists() else None
+
+
+def _base_matrix_from_complete_config(raw: Dict[str, Any], source: Path) -> Dict[str, Any]:
+    required = ("runtime_defaults", "evaluation_defaults", "datasets", "methods")
+    missing = [key for key in required if key not in raw]
+    if missing:
+        raise KeyError(f"Complete benchmark config {source} is missing required section(s): {', '.join(missing)}")
+    return {
+        "model_defaults": copy.deepcopy(raw.get("model_defaults", {})),
+        "runtime_defaults": copy.deepcopy(raw["runtime_defaults"]),
+        "evaluation_defaults": copy.deepcopy(raw["evaluation_defaults"]),
+        "stage_defaults": copy.deepcopy(raw.get("stage_defaults", {})),
+        "datasets": copy.deepcopy(raw["datasets"]),
+        "methods": copy.deepcopy(raw["methods"]),
+        "groups": copy.deepcopy(raw.get("groups", {})),
+        "experiments": copy.deepcopy(raw.get("experiments", [])),
+    }
+
+
+def _suite_config_from_complete_config(raw: Dict[str, Any], source: Path) -> Dict[str, Any]:
+    benchmark = raw.get("benchmark", {})
+    checkpoints = raw.get("checkpoints", raw.get("models", []))
+    if not checkpoints:
+        raise KeyError(f"Complete benchmark config {source} must define `models` or `checkpoints`.")
+    if "modes" not in raw:
+        raise KeyError(f"Complete benchmark config {source} must define `modes`.")
+    if "suites" not in raw:
+        raise KeyError(f"Complete benchmark config {source} must define `suites`.")
+    return {
+        "suite_name": raw.get("suite_name", benchmark.get("suite_name", source.stem)),
+        "artifact_subdir": raw.get("artifact_subdir", benchmark.get("artifact_subdir", "paper_5090")),
+        "runtime": copy.deepcopy(raw.get("runtime", {})),
+        "smoke_test_runtime": copy.deepcopy(raw.get("smoke_test_runtime", {})),
+        "micro_runtime": copy.deepcopy(raw.get("micro_runtime", {})),
+        "checkpoints": copy.deepcopy(checkpoints),
+        "modes": copy.deepcopy(raw["modes"]),
+        "suites": copy.deepcopy(raw["suites"]),
+        "analysis": copy.deepcopy(raw.get("analysis", {})),
+        "official_matrix": copy.deepcopy(raw.get("official_matrix", {})),
+    }
+
+
+def _load_complete_benchmark_config(config_path: Path, paths_override: Path | None = None) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, str | None]]:
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"Complete benchmark config not found: {config_path}\n"
+            "Create it from configs/server_benchmark_full.example.yaml or pass --paths/--suite-config for the legacy mode."
+        )
+    raw = _load_yaml(config_path)
+    paths = copy.deepcopy(raw.get("paths", {}))
+    if paths_override is not None:
+        if not paths_override.exists():
+            raise FileNotFoundError(f"Path override config not found: {paths_override}")
+        paths = _deep_merge(paths, _load_yaml(paths_override))
+    base_matrix = _base_matrix_from_complete_config(raw, config_path)
+    suite_config = _suite_config_from_complete_config(raw, config_path)
+    return paths, suite_config, base_matrix, {
+        "mode": "complete",
+        "config": str(config_path.resolve()),
+        "paths_config": str(paths_override.resolve()) if paths_override is not None else None,
+        "suite_config": None,
+    }
+
+
+def _load_legacy_benchmark_config(paths_path: Path, suite_config_path: Path) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, str | None]]:
+    if not paths_path.exists():
+        raise FileNotFoundError(f"Path config not found: {paths_path}")
+    if not suite_config_path.exists():
+        raise FileNotFoundError(f"Suite config not found: {suite_config_path}")
+    paths = _load_yaml(paths_path)
+    suite_config = _load_yaml(suite_config_path)
+    base_matrix = _load_yaml(_resolve_project_path(suite_config.get("matrix_source", "configs/paper_experiments_v1.yaml")))
+    return paths, suite_config, base_matrix, {
+        "mode": "legacy",
+        "config": None,
+        "paths_config": str(paths_path.resolve()),
+        "suite_config": str(suite_config_path.resolve()),
+    }
+
+
 def _artifact_base(paths: Dict[str, Any]) -> Path:
     raw = paths.get("artifacts", {}).get("root", "artifacts")
     return _resolve_project_path(str(raw))
+
+
+def _reference_results_root(paths: Dict[str, Any]) -> Path | None:
+    raw = paths.get("reference_results", {}).get("root")
+    return _resolve_project_path(str(raw)) if raw else None
 
 
 def _path_from_config(value: str) -> str:
@@ -134,16 +233,41 @@ def _run_output_dir(artifact_root: Path, experiment_id: str, dataset_id: str, me
     return artifact_root / experiment_id / dataset_id / method_id
 
 
+def _read_json_if_valid(path: Path) -> Any | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 def _run_is_complete(output_dir: Path) -> bool:
-    return all((output_dir / relative).exists() for relative in REQUIRED_RUN_FILES)
+    if not all((output_dir / relative).exists() for relative in REQUIRED_RUN_FILES):
+        return False
+    summary = _read_json_if_valid(output_dir / "summary.json")
+    rows = _read_json_if_valid(output_dir / "eval_reports" / "rows.json")
+    if not isinstance(summary, dict) or not isinstance(rows, list):
+        return False
+    mean_metrics = summary.get("mean", {})
+    if not isinstance(mean_metrics, dict) or not mean_metrics:
+        return False
+    return len(rows) > 0
 
 
-def _runtime_config(base_runtime: Dict[str, Any], suite_config: Dict[str, Any], checkpoint: Dict[str, Any], paths: Dict[str, Any], smoke_test: bool) -> Dict[str, Any]:
+def _runtime_config(
+    base_runtime: Dict[str, Any],
+    suite_config: Dict[str, Any],
+    checkpoint: Dict[str, Any],
+    paths: Dict[str, Any],
+    smoke_test: bool,
+) -> Dict[str, Any]:
     runtime = _deep_merge(base_runtime, suite_config.get("runtime", {}))
     runtime = _deep_merge(runtime, checkpoint.get("runtime", {}))
     if smoke_test:
         runtime = _deep_merge(runtime, suite_config.get("smoke_test_runtime", {}))
     runtime = _deep_merge(runtime, paths.get("runtime", {}))
+    reference_root = _reference_results_root(paths)
+    if reference_root is not None:
+        runtime["reference_results_root"] = str(reference_root)
     return runtime
 
 
@@ -241,24 +365,40 @@ def _analysis_config(
     matrix_path: Path,
     artifact_root: Path,
     analysis_root: Path,
+    analysis_defaults: Dict[str, Any],
 ) -> Dict[str, Any]:
+    primary_metric = suite_entry.get("primary_metric", analysis_defaults.get("primary_metric", "mIoU"))
+    case_selection = _deep_merge(
+        {"top_k": 8, "primary_metric": primary_metric},
+        analysis_defaults.get("case_selection", {}),
+    )
+    case_selection = _deep_merge(case_selection, suite_entry.get("case_selection", {}))
+    case_selection["primary_metric"] = case_selection.get("primary_metric", primary_metric)
+    statistics = _deep_merge(
+        {"n_bootstrap": 10000, "ci": 0.95, "random_seed": 42, "low_power_threshold": 20},
+        analysis_defaults.get("statistics", {}),
+    )
+    statistics = _deep_merge(statistics, suite_entry.get("statistics", {}))
+    statistics["comparisons"] = list(suite_entry.get("comparisons", statistics.get("comparisons", [])))
     return {
         "artifact_root": str(artifact_root),
         "output_dir": str(analysis_root / suite_key / checkpoint_alias),
         "matrix": str(matrix_path),
         "experiment_groups": [suite_entry["experiment_id"]],
-        "primary_metric": suite_entry.get("primary_metric", "mIoU"),
-        "metrics": list(suite_entry.get("metrics", ["mIoU", "Dice", "LatencyMs"])),
-        "lower_is_better": list(suite_entry.get("lower_is_better", ["LatencyMs"])),
-        "group_keys": ["dataset", "method", "eval_unit", "supervision_type", "target_scale", "annotation_protocol_flag"],
-        "case_selection": {"top_k": 8, "primary_metric": suite_entry.get("primary_metric", "mIoU")},
-        "statistics": {
-            "n_bootstrap": 10000,
-            "ci": 0.95,
-            "random_seed": 42,
-            "low_power_threshold": 20,
-            "comparisons": list(suite_entry.get("comparisons", [])),
-        },
+        "primary_metric": primary_metric,
+        "metrics": list(suite_entry.get("metrics", analysis_defaults.get("metrics", ["mIoU", "Dice", "LatencyMs"]))),
+        "lower_is_better": list(suite_entry.get("lower_is_better", analysis_defaults.get("lower_is_better", ["LatencyMs"]))),
+        "group_keys": list(
+            suite_entry.get(
+                "group_keys",
+                analysis_defaults.get(
+                    "group_keys",
+                    ["dataset", "method", "eval_unit", "supervision_type", "target_scale", "annotation_protocol_flag"],
+                ),
+            )
+        ),
+        "case_selection": case_selection,
+        "statistics": statistics,
     }
 
 
@@ -334,7 +474,7 @@ def _iter_requested_suites(suite_config: Dict[str, Any], selected_suites: set[st
 
 
 def _suite_checkpoints(all_checkpoints: List[Dict[str, Any]], suite_entry: Dict[str, Any]) -> List[Dict[str, Any]]:
-    selected = suite_entry.get("checkpoints")
+    selected = suite_entry.get("checkpoints", suite_entry.get("models"))
     if not selected:
         return all_checkpoints
     selected_aliases = {str(item) for item in selected}
@@ -407,8 +547,13 @@ def _write_final_manifest(manifest_dir: Path, manifest: Dict[str, Any]) -> None:
 
 def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the 5090 single-GPU full SAM2 IR benchmark and analysis.")
-    parser.add_argument("--paths", type=Path, default=PROJECT_ROOT / "configs" / "local_paths.yaml")
-    parser.add_argument("--suite-config", type=Path, default=PROJECT_ROOT / "configs" / "server_5090_full_benchmark.yaml")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        help="Complete benchmark YAML containing paths, models, datasets, methods, suites, runtime, and analysis settings.",
+    )
+    parser.add_argument("--paths", type=Path, help="Legacy path YAML, or optional path override for --config.")
+    parser.add_argument("--suite-config", type=Path, help="Legacy suite YAML used only when --config is not provided.")
     parser.add_argument("--suites", help="Comma-separated suite keys. Default: all suites from suite config.")
     parser.add_argument("--checkpoints", help="Comma-separated checkpoint aliases. Default: all four official SAM2.1 checkpoints.")
     parser.add_argument("--modes", help="Comma-separated method ids. Default: all configured modes.")
@@ -420,11 +565,16 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument("--stop-on-error", action="store_true")
     args = parser.parse_args(argv)
 
-    if not args.paths.exists():
-        raise FileNotFoundError(f"Path config not found: {args.paths}")
-    suite_config = _load_yaml(args.suite_config)
-    paths = _load_yaml(args.paths)
-    base_matrix = _load_yaml(_resolve_project_path(suite_config.get("matrix_source", "configs/paper_experiments_v1.yaml")))
+    config_path = _resolve_optional_project_path(args.config) or _default_config_from_env()
+    paths_path = _resolve_optional_project_path(args.paths)
+    suite_config_path = _resolve_optional_project_path(args.suite_config)
+    if config_path is not None:
+        paths, suite_config, base_matrix, config_sources = _load_complete_benchmark_config(config_path, paths_path)
+    else:
+        paths, suite_config, base_matrix, config_sources = _load_legacy_benchmark_config(
+            paths_path or DEFAULT_LEGACY_PATHS,
+            suite_config_path or DEFAULT_LEGACY_SUITE_CONFIG,
+        )
     artifact_subdir = str(suite_config.get("artifact_subdir", "paper_5090"))
     if args.smoke_test:
         artifact_subdir = f"{artifact_subdir}_smoke"
@@ -481,6 +631,7 @@ def main(argv: List[str] | None = None) -> int:
                         matrix_path=matrix_path,
                         artifact_root=artifact_root,
                         analysis_root=analysis_root,
+                        analysis_defaults=suite_config.get("analysis", {}),
                     ),
                 )
                 analysis_records.append(
@@ -626,8 +777,10 @@ def main(argv: List[str] | None = None) -> int:
     manifest = {
         "created_at": created_at,
         "project_root": str(PROJECT_ROOT),
-        "paths_config": str(args.paths.resolve()),
-        "suite_config": str(args.suite_config.resolve()),
+        "config_mode": config_sources["mode"],
+        "config": config_sources["config"],
+        "paths_config": config_sources["paths_config"],
+        "suite_config": config_sources["suite_config"],
         "artifact_root": str(manifest_dir),
         "dry_run": args.dry_run,
         "smoke_test": args.smoke_test,

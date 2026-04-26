@@ -12,7 +12,7 @@
 ## Benchmark 自动化
 
 - `run_official_baseline_matrix.sh`：官方 SAM2 baseline matrix 的 shell 入口。
-- `run_official_baseline_matrix.py`：展开模型、数据集和模式组合的矩阵驱动脚本。
+- `run_official_baseline_matrix.py`：从完整 benchmark YAML 展开模型、数据集和模式组合的矩阵驱动脚本。
 - `run_paper_experiments.py`：展开 IR-only 论文实验矩阵，支持 `--paths`、`--group` 与 `--dry-run`。
 - `run_5090_full_benchmark.py`：面向单张 RTX 5090 的完整基准入口，展开 4 个 SAM2.1 checkpoint、4 种主 prompt policy、全部论文数据集，并额外运行 tight-box/loose-box 协议诊断。
 - `run_5090_micro_benchmark.py`：和 5090 完整基准展开相同组合，但每个数据集只跑前 24 张图像，输出到 `paper_5090_micro/`。
@@ -22,6 +22,12 @@
 
 ```bash
 MATRIX_RESUME=0 bash scripts/run_official_baseline_matrix.sh
+```
+
+官方矩阵脚本默认读取 `configs/server_benchmark_full.local.yaml`。如需指定其他完整配置：
+
+```bash
+BENCHMARK_CONFIG=configs/server_benchmark_full.local.yaml bash scripts/run_official_baseline_matrix.sh
 ```
 
 每个组合会在自己的输出目录写入 `run_metadata.json`，记录命令、配置、数据集路径、checkpoint 信息、关键环境变量、Git commit、Python 版本和 GPU 信息。矩阵根目录还会生成：
@@ -40,24 +46,24 @@ MATRIX_RESUME=0 bash scripts/run_official_baseline_matrix.sh
 
 ## 5090 单卡完整基准
 
-先编辑路径：
+先复制完整配置模板，并在其中填写服务器路径、模型、数据集、方法、seed 和分析参数：
 
 ```bash
-cp configs/local_paths.example.yaml configs/local_paths.yaml
+cp configs/server_benchmark_full.example.yaml configs/server_benchmark_full.local.yaml
 ```
 
 然后检查展开的命令：
 
 ```bash
-python scripts/run_5090_full_benchmark.py --paths configs/local_paths.yaml --dry-run
-python scripts/run_5090_micro_benchmark.py --paths configs/local_paths.yaml --dry-run
+python scripts/run_5090_full_benchmark.py --config configs/server_benchmark_full.local.yaml --dry-run
+python scripts/run_5090_micro_benchmark.py --config configs/server_benchmark_full.local.yaml --dry-run
 ```
 
 正式运行：
 
 ```bash
-python scripts/run_5090_micro_benchmark.py --paths configs/local_paths.yaml --stop-on-error
-python scripts/run_5090_full_benchmark.py --paths configs/local_paths.yaml
+python scripts/run_5090_micro_benchmark.py --config configs/server_benchmark_full.local.yaml --stop-on-error
+python scripts/run_5090_full_benchmark.py --config configs/server_benchmark_full.local.yaml
 ```
 
 详细说明见 `docs/server_5090_benchmark.md`。

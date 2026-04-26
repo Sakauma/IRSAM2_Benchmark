@@ -1,0 +1,373 @@
+benchmark:
+  suite_name: "server_benchmark_full"
+  artifact_subdir: "paper_5090"
+
+paths:
+  sam2:
+    repo: "/path/to/sam2"
+    checkpoint_root: "/path/to/sam2/checkpoints"
+  artifacts:
+    root: "artifacts"
+  reference_results:
+    root: "reference_results"
+  datasets:
+    nuaa_sirst: "/path/to/NUAA-SIRST"
+    nudt_sirst: "/path/to/NUDT-SIRST"
+    irstd_1k: "/path/to/IRSTD-1K"
+    multimodal: "/path/to/MultiModal"
+    rbgt_tiny_ir_box: "/path/to/RBGT-Tiny"
+
+execution:
+  cuda_visible_devices: "0"
+  pytorch_cuda_alloc_conf: "expandable_segments:True"
+
+model_defaults:
+  model_id: "sam2.1_hiera_base_plus"
+  family: "sam2"
+  cfg: "configs/sam2.1/sam2.1_hiera_b+.yaml"
+  ckpt: "checkpoints/sam2.1_hiera_base_plus.pt"
+  repo: ""
+
+runtime_defaults:
+  artifact_root: "artifacts"
+  reference_results_root: "reference_results"
+  output_name: "paper_5090/default"
+  device: "cuda"
+  num_workers: 0
+  smoke_test: false
+  max_samples: 0
+  max_images: 0
+  save_visuals: true
+  visual_limit: 24
+  update_reference_results: false
+  seeds: [42]
+  image_batch_size: 1
+  auto_mask_points_per_batch: 64
+  batch_oom_fallback: true
+  show_progress: true
+  progress_update_interval_s: 1.0
+
+runtime:
+  device: "cuda"
+  num_workers: 0
+  smoke_test: false
+  max_samples: 0
+  max_images: 0
+  save_visuals: true
+  visual_limit: 64
+  update_reference_results: false
+  seeds: [42]
+
+smoke_test_runtime:
+  smoke_test: true
+  max_samples: 10
+  max_images: 10
+  visual_limit: 8
+  seeds: [42]
+
+micro_artifact_subdir: "paper_5090_micro"
+micro_runtime:
+  smoke_test: false
+  max_samples: 0
+  max_images: 24
+  visual_limit: 24
+  seeds: [42]
+
+evaluation_defaults:
+  benchmark_version: "irsam2-paper-v1-ir-only"
+  track: "track_a_image_prompted"
+  protocol: "ir_only_mask_segmentation"
+  inference_mode: "box"
+  split_version: "paper_split_v1"
+  prompt_policy_version: "paper_prompt_policy_v1"
+  metric_schema_version: "paper_metric_schema_v1"
+  reference_result_version: "paper_reference_results_v1"
+  temporal_eval_policy: "image_only"
+  prompt_policy:
+    name: "paper_default_ir_prompt"
+    prompt_type: "box"
+    prompt_source: "gt"
+    prompt_budget: 1
+    refresh_interval: null
+    multi_mask: false
+    notes: "IR-only paper benchmark prompt policy."
+
+stage_defaults:
+  transfer: {}
+  adapt: {}
+  distill: {}
+  quantize: {}
+
+datasets:
+  nuaa_sirst:
+    root_env: "NUAA_SIRST_ROOT"
+    config:
+      dataset_id: "NUAA-SIRST"
+      adapter: "generic_image_mask"
+      root: "datasets/NUAA-SIRST"
+      modality: "ir"
+      images_dir: "images"
+      masks_dir: "masks"
+      mask_mode: "binary"
+      class_map: {}
+  nudt_sirst:
+    root_env: "NUDT_SIRST_ROOT"
+    config:
+      dataset_id: "NUDT-SIRST"
+      adapter: "generic_image_mask"
+      root: "datasets/NUDT-SIRST"
+      modality: "ir"
+      images_dir: "images"
+      masks_dir: "masks"
+      mask_mode: "binary"
+      class_map: {}
+  irstd_1k:
+    root_env: "IRSTD_1K_ROOT"
+    config:
+      dataset_id: "IRSTD-1K"
+      adapter: "generic_image_mask"
+      root: "datasets/IRSTD-1K"
+      modality: "ir"
+      images_dir: "images"
+      masks_dir: "masks"
+      mask_mode: "binary"
+      class_map: {}
+  multimodal:
+    root_env: "MULTIMODAL_DATASET_ROOT"
+    config:
+      dataset_id: "MultiModal"
+      adapter: "multimodal_raw"
+      root: "datasets/MultiModal"
+      modality: "ir"
+      images_dir: "img"
+      mask_mode: "auto"
+      class_map: {}
+  rbgt_tiny_ir_box:
+    root_env: "RBGT_TINY_ROOT"
+    config:
+      dataset_id: "RBGT-Tiny"
+      adapter: "rbgt_tiny_ir_only"
+      root: "datasets/RBGT-Tiny"
+      modality: "ir"
+      images_dir: "image"
+      annotations_dir: "annotations_coco"
+      mask_mode: "auto"
+      class_map: {}
+
+methods:
+  sam2_box_oracle:
+    baseline: "sam2_zero_shot"
+    method:
+      name: "sam2_box_oracle"
+      family: "sam2_oracle_prompt"
+      modality: "ir"
+      prompt_generation_protocol: "mask_derived_adaptive_loose_box_centroid_point_v2"
+      box_variant: "loose"
+    modules: {}
+    evaluation:
+      inference_mode: "box"
+      prompt_policy:
+        name: "mask_derived_loose_box"
+        prompt_type: "box"
+        prompt_source: "gt"
+        prompt_budget: 1
+        refresh_interval: null
+        multi_mask: false
+        notes: "SAM2 with adaptive loose box deterministically derived from the ground-truth mask."
+    ablation_tags: ["sam2", "oracle_box", "mask_derived_prompt", "loose_box"]
+  sam2_tight_box_oracle:
+    baseline: "sam2_zero_shot_tight_box"
+    method:
+      name: "sam2_tight_box_oracle"
+      family: "sam2_oracle_prompt"
+      modality: "ir"
+      prompt_generation_protocol: "mask_derived_tight_box_centroid_point_v1"
+      box_variant: "tight"
+    modules: {}
+    evaluation:
+      inference_mode: "box"
+      prompt_policy:
+        name: "mask_derived_tight_box"
+        prompt_type: "box"
+        prompt_source: "gt"
+        prompt_budget: 1
+        refresh_interval: null
+        multi_mask: false
+        notes: "SAM2 with tight box deterministically derived from the ground-truth mask."
+    ablation_tags: ["sam2", "oracle_box", "mask_derived_prompt", "tight_box"]
+  sam2_point_oracle:
+    baseline: "sam2_zero_shot_point"
+    method:
+      name: "sam2_point_oracle"
+      family: "sam2_oracle_prompt"
+      modality: "ir"
+      prompt_generation_protocol: "mask_derived_centroid_point_v1"
+      point_variant: "foreground_centroid"
+    modules: {}
+    evaluation:
+      inference_mode: "point"
+      prompt_policy:
+        name: "mask_derived_centroid_point"
+        prompt_type: "point"
+        prompt_source: "gt"
+        prompt_budget: 1
+        refresh_interval: null
+        multi_mask: false
+        notes: "SAM2 with foreground-centroid point deterministically derived from the ground-truth mask."
+    ablation_tags: ["sam2", "oracle_point", "mask_derived_prompt", "centroid_point"]
+  sam2_box_point_oracle:
+    baseline: "sam2_zero_shot_box_point"
+    method:
+      name: "sam2_box_point_oracle"
+      family: "sam2_oracle_prompt"
+      modality: "ir"
+      prompt_generation_protocol: "mask_derived_adaptive_loose_box_centroid_point_v2"
+      box_variant: "loose"
+      point_variant: "foreground_centroid"
+    modules: {}
+    evaluation:
+      inference_mode: "box+point"
+      prompt_policy:
+        name: "mask_derived_loose_box_centroid_point"
+        prompt_type: "box+point"
+        prompt_source: "gt"
+        prompt_budget: 2
+        refresh_interval: null
+        multi_mask: false
+        notes: "SAM2 with adaptive loose box and foreground-centroid point deterministically derived from the ground-truth mask."
+    ablation_tags: ["sam2", "oracle_box_point", "mask_derived_prompt", "loose_box", "centroid_point"]
+  sam2_no_prompt_auto_mask:
+    baseline: "sam2_no_prompt_auto_mask"
+    method:
+      name: "sam2_no_prompt_auto_mask"
+      family: "sam2_auto_mask"
+      modality: "ir"
+    modules: {}
+    evaluation:
+      track: "track_b_auto_mask"
+      inference_mode: "no_prompt_auto_mask"
+      prompt_policy:
+        name: "no_prompt_auto_mask"
+        prompt_type: "none"
+        prompt_source: "none"
+        prompt_budget: 0
+        refresh_interval: null
+        multi_mask: true
+        notes: "SAM2 automatic mask generator without external prompts."
+    ablation_tags: ["sam2", "auto_mask", "no_prompt"]
+
+models:
+  - alias: "tiny"
+    model_id: "sam2.1_hiera_tiny"
+    family: "sam2"
+    cfg: "configs/sam2.1/sam2.1_hiera_t.yaml"
+    ckpt: "checkpoints/sam2.1_hiera_tiny.pt"
+    runtime:
+      image_batch_size: 32
+      auto_mask_points_per_batch: 256
+  - alias: "small"
+    model_id: "sam2.1_hiera_small"
+    family: "sam2"
+    cfg: "configs/sam2.1/sam2.1_hiera_s.yaml"
+    ckpt: "checkpoints/sam2.1_hiera_small.pt"
+    runtime:
+      image_batch_size: 24
+      auto_mask_points_per_batch: 256
+  - alias: "base_plus"
+    model_id: "sam2.1_hiera_base_plus"
+    family: "sam2"
+    cfg: "configs/sam2.1/sam2.1_hiera_b+.yaml"
+    ckpt: "checkpoints/sam2.1_hiera_base_plus.pt"
+    runtime:
+      image_batch_size: 16
+      auto_mask_points_per_batch: 192
+  - alias: "large"
+    model_id: "sam2.1_hiera_large"
+    family: "sam2"
+    cfg: "configs/sam2.1/sam2.1_hiera_l.yaml"
+    ckpt: "checkpoints/sam2.1_hiera_large.pt"
+    runtime:
+      image_batch_size: 8
+      auto_mask_points_per_batch: 128
+
+modes:
+  - method: "sam2_box_oracle"
+    alias: "box"
+  - method: "sam2_tight_box_oracle"
+    alias: "tight_box"
+  - method: "sam2_point_oracle"
+    alias: "point"
+  - method: "sam2_box_point_oracle"
+    alias: "box_point"
+  - method: "sam2_no_prompt_auto_mask"
+    alias: "no_prompt"
+
+analysis:
+  primary_metric: "mIoU"
+  metrics: ["mIoU", "Dice", "LatencyMs"]
+  lower_is_better: ["LatencyMs"]
+  group_keys: ["dataset", "method", "eval_unit", "supervision_type", "target_scale", "annotation_protocol_flag"]
+  case_selection:
+    top_k: 8
+  statistics:
+    n_bootstrap: 10000
+    ci: 0.95
+    random_seed: 42
+    low_power_threshold: 20
+
+official_matrix:
+  artifact_subdir: "official_baseline_matrix"
+  datasets: ["multimodal", "rbgt_tiny_ir_box"]
+  models: ["tiny", "small", "base_plus", "large"]
+  methods: ["sam2_box_oracle", "sam2_point_oracle", "sam2_box_point_oracle", "sam2_no_prompt_auto_mask"]
+  seeds: [42]
+  visual_limit: 24
+  resume: true
+
+suites:
+  mask:
+    experiment_id: "T5090_mask_prompt_modes"
+    purpose: "SAM2 prompt-mode and checkpoint sweep on IR mask datasets."
+    modes: ["sam2_box_oracle", "sam2_point_oracle", "sam2_box_point_oracle"]
+    datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal"]
+    run_analysis: true
+    primary_metric: "mIoU"
+    metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "LatencyMs"]
+    lower_is_better: ["FalseAlarmPixelsPerMP", "FalseAlarmComponents", "LatencyMs"]
+    comparisons:
+      - name: "point_vs_box"
+        baseline: "sam2_box_oracle"
+        candidate: "sam2_point_oracle"
+      - name: "box_point_vs_box"
+        baseline: "sam2_box_oracle"
+        candidate: "sam2_box_point_oracle"
+  auto_mask:
+    experiment_id: "T5090_no_prompt_auto_mask"
+    purpose: "Track B image-level SAM2 automatic mask generation on IR mask datasets."
+    modes: ["sam2_no_prompt_auto_mask"]
+    datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal"]
+    run_analysis: true
+    primary_metric: "instance_f1"
+    metrics: ["instance_precision", "instance_recall", "instance_f1", "matched_instance_iou", "num_pred_instances", "LatencyMs"]
+    lower_is_better: ["num_pred_instances", "LatencyMs"]
+    comparisons: []
+  rbgt_box:
+    experiment_id: "T5090_rbgt_box_prompt_modes"
+    purpose: "RBGT-Tiny IR-only weak-label supplement; keep separate from mask metrics."
+    modes: ["sam2_box_oracle", "sam2_point_oracle", "sam2_box_point_oracle", "sam2_no_prompt_auto_mask"]
+    datasets: ["rbgt_tiny_ir_box"]
+    run_analysis: false
+  prompt_box_protocol:
+    experiment_id: "T5090_prompt_box_protocol_ablation"
+    purpose: "Check whether mask-derived loose-box expansion changes conclusions relative to tight boxes."
+    models: ["base_plus"]
+    modes: ["sam2_box_oracle", "sam2_tight_box_oracle"]
+    datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal"]
+    run_analysis: true
+    primary_metric: "mIoU"
+    metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "PromptBoxCoverage", "LatencyMs"]
+    lower_is_better: ["FalseAlarmPixelsPerMP", "FalseAlarmComponents", "LatencyMs"]
+    comparisons:
+      - name: "loose_box_vs_tight_box"
+        baseline: "sam2_tight_box_oracle"
+        candidate: "sam2_box_oracle"

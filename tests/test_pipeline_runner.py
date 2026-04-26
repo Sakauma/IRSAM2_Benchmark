@@ -136,6 +136,40 @@ class PipelineRunnerSeedTests(unittest.TestCase):
             self.assertEqual(called_tokens, expected_tokens)
             self.assertNotEqual(called_tokens[0], called_tokens[1])
 
+    def test_run_command_fails_when_all_eval_rows_are_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = _build_test_config(root, save_visuals=False, seeds=[42], update_reference_results=False)
+            dataset = _build_test_dataset(root)
+
+            class DummyMethod:
+                inference_mode = InferenceMode.BOX
+
+            def fake_build_dataset_adapter(_config):
+                class DummyAdapter:
+                    def load(self, __config):
+                        return dataset
+
+                return DummyAdapter()
+
+            def fake_build_baseline_registry(_config):
+                method = DummyMethod()
+                return {"bbox_rect": method, "sam2_zero_shot": method}
+
+            def fake_evaluate_method(**_kwargs):
+                return {}, []
+
+            with patch("irsam2_benchmark.pipeline.runner.build_dataset_adapter", side_effect=fake_build_dataset_adapter), patch(
+                "irsam2_benchmark.pipeline.runner.build_baseline_registry", side_effect=fake_build_baseline_registry
+            ), patch("irsam2_benchmark.pipeline.runner.evaluate_method", side_effect=fake_evaluate_method):
+                with self.assertRaisesRegex(RuntimeError, "zero evaluation rows"):
+                    run_command(config, "baseline", baseline_name="bbox_rect")
+
+            summary = json.loads((config.output_dir / "summary.json").read_text(encoding="utf-8"))
+            rows = json.loads((config.output_dir / "eval_reports" / "rows.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["mean"], {})
+            self.assertEqual(rows, [])
+
     def test_run_command_saves_visuals_when_enabled(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

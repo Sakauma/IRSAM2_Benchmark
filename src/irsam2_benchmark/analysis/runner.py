@@ -10,7 +10,7 @@ from .collector import collect_runs, flatten_rows
 from .io import output_pair, read_yaml, write_json
 from .reports import write_reports
 from .stats import run_paired_tests
-from .tables import bucket_table, main_baseline_table
+from .tables import bucket_table, main_baseline_table, multimodal_size_table
 
 
 def _analysis_root(analysis_path: Path) -> Path:
@@ -70,6 +70,7 @@ def run_analysis(analysis_path: str | Path, *, dry_run: bool = False) -> Dict[st
     tables_dir = output_dir / "tables"
     table_outputs: Dict[str, str] = {}
     table_outputs.update(output_pair(tables_dir, "main_baseline_table", main_baseline_table(rows, metrics)))
+    table_outputs.update(output_pair(tables_dir, "multimodal_size_table", multimodal_size_table(rows, metrics)))
     table_outputs.update(output_pair(tables_dir, "auto_prompt_table", _filter_methods(rows, {"sam2_no_prompt_auto_mask", "sam2_physics_auto_prompt"}, metrics)))
     table_outputs.update(output_pair(tables_dir, "ablation_table", _filter_prefix(rows, "physics_", metrics)))
     table_outputs.update(output_pair(tables_dir, "bucket_table", bucket_table(rows, metrics)))
