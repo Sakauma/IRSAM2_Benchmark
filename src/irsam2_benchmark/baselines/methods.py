@@ -22,6 +22,7 @@ from ..prompts import PromptFactory
 
 
 def box_to_mask(box: list[float], height: int, width: int) -> np.ndarray:
+    # BBox baseline 把 prompt box 直接当作预测 mask，用来衡量“框形状本身”的上限/偏差。
     x1, y1, x2, y2 = [int(round(v)) for v in clamp_box_xyxy(box, width, height)]
     mask = np.zeros((height, width), dtype=np.float32)
     mask[y1:y2, x1:x2] = 1.0
@@ -29,6 +30,8 @@ def box_to_mask(box: list[float], height: int, width: int) -> np.ndarray:
 
 
 class BaseMethod:
+    # 所有 baseline 都暴露统一接口：单样本、批量样本、视频序列。
+    # runner 会根据 inference_mode 选择对应评估协议。
     name = "base"
     family = "base"
     inference_mode = InferenceMode.ZERO_SHOT
@@ -63,11 +66,13 @@ class ZeroShotSAM2(BaseMethod):
         self.box_variant = box_variant
 
     def _sample_box(self, sample: Sample) -> list[float] | None:
+        # 默认使用 loose box；tight box 仅用于 protocol ablation。
         if self.box_variant == "tight":
             return sample.bbox_tight or sample.bbox_loose
         return sample.bbox_loose or sample.bbox_tight
 
     def _prompt_payload(self, sample: Sample, *, box: list[float] | None = None, point: list[float] | None = None) -> Dict[str, Any]:
+        # prompt 元数据会写入每行结果，保证论文表能追溯 box/point 是如何从 GT mask 派生的。
         prompt_generation = dict(sample.metadata.get("prompt_generation", {}))
         if box is not None and point is not None:
             protocol = (
@@ -95,6 +100,7 @@ class ZeroShotSAM2(BaseMethod):
         return payload
 
     def _predict_kwargs_and_prompt(self, sample: Sample) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        # sam2_zero_shot 不是 no-prompt；它按 inference_mode 传入 box、point 或 box+point。
         kwargs: Dict[str, Any] = {"multimask_output": self.inference_mode == InferenceMode.MULTI_MASK}
         box = self._sample_box(sample)
         point = sample.point_prompt
@@ -118,6 +124,7 @@ class ZeroShotSAM2(BaseMethod):
         return kwargs, prompt
 
     def _prediction_from_result(self, result: Dict[str, Any], prompt: Dict[str, Any]) -> Dict[str, Any]:
+        # SAM2 可能返回多个候选 mask；论文主表取分数最高的候选，保持确定性。
         masks = result["masks"]
         scores = result["scores"]
         best_idx = int(np.argmax(scores))
@@ -130,6 +137,7 @@ class ZeroShotSAM2(BaseMethod):
         return self._prediction_from_result(result, prompt)
 
     def predict_samples(self, samples: List[Sample]) -> Dict[str, Dict[str, Any]]:
+        # 批量路径只减少 set_image/predict 调用开销，不改变每个 sample 的 prompt 内容。
         if not samples:
             return {}
         images = [load_image_rgb(sample.image_path) for sample in samples]
@@ -160,6 +168,7 @@ class NoPromptAutoMaskSAM2(BaseMethod):
         self.adapter = adapter
 
     def predict_sample(self, sample: Sample) -> Dict[str, Any]:
+        # 自动掩码模式不接受外部 prompt；runner 会按 image-level 与 GT instances 做匹配。
         image_rgb = load_image_rgb(sample.image_path)
         raw_masks = self.adapter.predict_auto_masks(image_rgb)
         instances = []
@@ -181,6 +190,7 @@ class NoPromptAutoMaskSAM2(BaseMethod):
 
 
 def load_image_tensor(path) -> torch.Tensor:
+    # physics auto-prompt 只需要单通道亮度张量；SAM2 推理仍走归一化后的 RGB 伪三通道。
     raw = np.array(Image.open(path).convert("L"), dtype=np.uint8)
     min_v = float(raw.min())
     max_v = float(raw.max())
@@ -220,6 +230,7 @@ class PhysicsAutoPromptSAM2(BaseMethod):
         self.prompt_generator = PromptFactory.build(prompt_config)
 
     def predict_sample(self, sample: Sample) -> Dict[str, Any]:
+        # 先从红外先验图生成候选 prompt，再把 prompt 交给 SAM2 分割。
         image_tensor = load_image_tensor(sample.image_path)
         with torch.inference_mode():
             prior_maps = self.prior(image_tensor)
@@ -251,6 +262,7 @@ class ZeroShotSAM2VideoPropagation(BaseMethod):
         raise RuntimeError("Video propagation is sequence-only. Use predict_sequence().")
 
     def predict_sequence(self, samples: List[Sample]) -> Dict[str, np.ndarray]:
+        # 视频传播只在 sequence/track view 中调用，不能逐 instance 独立评估。
         return self.adapter.predict_video_sequence(samples, self.prompt_policy)
 
 

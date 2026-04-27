@@ -1,5 +1,14 @@
 # 配置索引
 
+## 清理结论
+
+- 当前没有删除 tracked YAML。它们仍被脚本、测试或文档引用。
+- `server_benchmark_full.example.yaml` 是新服务器运行的推荐模板。
+- `paper_experiments_v1.yaml`、`paper_analysis_v1.yaml` 和 `local_paths.example.yaml` 是旧版 paper runner 的兼容配置，暂时保留。
+- `benchmark_*.yaml` 是旧版单 run/quick/smoke 配置，仍被 smoke 脚本和 README 示例引用，暂时保留。
+- `server_5090_full_benchmark.yaml` 是旧版 5090 suite 配置，只给兼容模式使用。
+- `configs/local_paths.yaml` 和 `configs/*.local.yaml` 是机器私有文件，被 `.gitignore` 排除，不应提交。
+
 ## 论文实验矩阵
 
 - `server_benchmark_full.example.yaml`：服务器 benchmark 的完整配置模板，包含路径、模型、方法、数据集、seed、suite 和分析参数。复制为 `server_benchmark_full.local.yaml` 后运行 5090/full、micro 或 official matrix。

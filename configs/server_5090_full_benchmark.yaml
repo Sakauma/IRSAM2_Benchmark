@@ -1,3 +1,6 @@
+# 旧版 5090 full benchmark suite 配置。
+# 现在保留给 --paths/--suite-config 兼容模式；新运行优先使用 server_benchmark_full.example.yaml。
+# 该文件只描述 suite/checkpoint/mode，路径仍来自 local_paths.yaml。
 suite_name: "server_5090_full_benchmark"
 artifact_subdir: "paper_5090"
 matrix_source: "configs/paper_experiments_v1.yaml"

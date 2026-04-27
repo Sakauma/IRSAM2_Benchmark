@@ -8,6 +8,7 @@ from .io import read_json
 
 
 REQUIRED_RUN_FILES = (
+    # 一个 run 只有同时具备这些文件，才会进入论文分析表。
     "benchmark_spec.json",
     "summary.json",
     "results.json",
@@ -26,6 +27,7 @@ class RunRecord:
 
 
 def expected_runs(matrix: Dict[str, Any], experiment_ids: set[str]) -> List[Dict[str, Any]]:
+    # 从实验矩阵展开期望 run，用于区分“真的没有跑”和“跑了但结果文件缺失”。
     runs: List[Dict[str, Any]] = []
     for experiment in matrix.get("experiments", []):
         experiment_id = str(experiment["experiment_id"])
@@ -44,6 +46,7 @@ def expected_runs(matrix: Dict[str, Any], experiment_ids: set[str]) -> List[Dict
 
 
 def collect_runs(artifact_root: Path, matrix: Dict[str, Any], analysis_config: Dict[str, Any]) -> tuple[List[RunRecord], List[Dict[str, Any]]]:
+    # 读取每个 run 的 summary 和 sample rows，并把 experiment/dataset/method 补回每一行。
     experiment_ids = {str(item) for item in analysis_config.get("experiment_groups", [])}
     found: List[RunRecord] = []
     missing: List[Dict[str, Any]] = []

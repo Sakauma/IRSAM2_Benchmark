@@ -15,6 +15,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 def _read_structured_file(path: Path) -> Dict[str, Any]:
+    """读取 JSON/YAML 配置文件，统一返回普通 dict。"""
     if path.suffix.lower() == ".json":
         return json.loads(path.read_text(encoding="utf-8"))
     if path.suffix.lower() in {".yaml", ".yml"}:
@@ -40,6 +41,8 @@ class ModelConfig:
 
 @dataclass
 class DatasetConfig:
+    # image_extensions 同时被通用 mask adapter 和 MultiModal adapter 使用。
+    # MultiModal 原始数据中可能混有 bmp/png/jpg，不能在 adapter 里写死扩展名。
     dataset_id: str
     adapter: str
     root: str
@@ -57,6 +60,7 @@ class DatasetConfig:
 
 @dataclass
 class RuntimeConfig:
+    # max_samples/max_images 为 0 表示不截断；smoke/micro 配置会覆盖它们。
     artifact_root: str
     reference_results_root: str
     output_name: str
@@ -78,6 +82,7 @@ class RuntimeConfig:
 
 @dataclass
 class EvaluationConfig:
+    # inference_mode 最终会转换成 InferenceMode 枚举，值必须和 core.interfaces 保持一致。
     benchmark_version: str
     track: str
     protocol: str
@@ -121,9 +126,12 @@ class AppConfig:
 
     @property
     def dataset_root(self) -> Path:
+        # DATASET_ROOT 是单次运行的最高优先级覆盖，方便在服务器脚本里临时切换数据目录。
         explicit = os.environ.get("DATASET_ROOT")
         if explicit:
             return Path(explicit)
+        # 先按 config 所在项目根目录解析；如果 generated config 在 artifact 目录中，
+        # 再回退到 root.parent。这兼容手写 configs/ 和 runner 生成的 config。
         candidate = self.root / self.dataset.root
         if candidate.exists():
             return candidate
@@ -131,6 +139,7 @@ class AppConfig:
 
     @property
     def artifact_root(self) -> Path:
+        # ARTIFACT_ROOT 可把同一份生成配置重定向到新的输出目录，便于复跑。
         return _env_path("ARTIFACT_ROOT", self.root / self.runtime.artifact_root)
 
     @property
@@ -143,6 +152,7 @@ class AppConfig:
 
     @property
     def sam2_repo(self) -> Path:
+        # SAM2_REPO 环境变量优先级最高；否则使用 config.model.repo 或项目同级 sam2。
         fallback = Path(self.model.repo) if self.model.repo else self.root.parent / "sam2"
         return _env_path("SAM2_REPO", fallback)
 
@@ -170,6 +180,8 @@ def _build_prompt_policy(raw: Dict[str, Any]) -> PromptPolicy:
 def load_app_config(config_path: str | Path) -> AppConfig:
     path = Path(config_path).resolve()
     raw = _read_structured_file(path)
+    # 约定：仓库内 configs/*.yaml 的项目根是 configs 的上一级；
+    # generated config 的项目根则是该 config 所在目录，绝对路径会在生成阶段写入。
     root = path.parent.parent if path.parent.name == "configs" else path.parent
     evaluation = raw.get("evaluation", {})
     return AppConfig(

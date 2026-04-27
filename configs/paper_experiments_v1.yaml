@@ -1,3 +1,8 @@
+# 旧版论文实验矩阵。
+# 这个文件给 scripts/run_paper_experiments.py 使用；新服务器完整运行推荐使用 server_benchmark_full.example.yaml。
+# 保留它是为了兼容早期 p0 baseline、auto-prompt 和 ablation 实验。
+
+# 默认模型配置。单个 method 或 runner 可以覆盖这些字段。
 model_defaults:
   model_id: "sam2.1_hiera_base_plus"
   family: "sam2"
@@ -5,6 +10,7 @@ model_defaults:
   ckpt: "checkpoints/sam2.1_hiera_base_plus.pt"
   repo: ""
 
+# 默认 runtime。paths 文件会在运行时把 artifact 和 dataset 路径解析到本机真实目录。
 runtime_defaults:
   artifact_root: "artifacts"
   reference_results_root: "reference_results"
@@ -19,6 +25,7 @@ runtime_defaults:
   update_reference_results: false
   seeds: [42, 123, 456]
 
+# 默认评估协议。method.evaluation 会覆盖 inference_mode 和 prompt_policy。
 evaluation_defaults:
   benchmark_version: "irsam2-paper-v1-ir-only"
   track: "track_a_image_prompted"
@@ -38,14 +45,17 @@ evaluation_defaults:
     multi_mask: false
     notes: "IR-only paper benchmark prompt policy."
 
+# 预留训练/蒸馏/量化阶段配置。当前 baseline 实验通常为空。
 stage_defaults:
   transfer: {}
   adapt: {}
   distill: {}
   quantize: {}
 
+# 数据集注册表。key 被 experiments.*.datasets 引用。
 datasets:
   nuaa_sirst:
+    # root_env 是旧入口的环境变量名；local_paths.yaml 中的路径优先级更高。
     root_env: "NUAA_SIRST_ROOT"
     config:
       dataset_id: "NUAA-SIRST"
@@ -82,6 +92,7 @@ datasets:
     root_env: "MULTIMODAL_DATASET_ROOT"
     config:
       dataset_id: "MultiModal"
+      # 直接读取原始 MultiModal img/ 与 label/ JSON，而不是 COCO 转换格式。
       adapter: "multimodal_raw"
       root: "datasets/MultiModal"
       modality: "ir"
@@ -100,8 +111,10 @@ datasets:
       mask_mode: "auto"
       class_map: {}
 
+# 方法注册表。experiments.*.methods 引用这些 key。
 methods:
   bbox_rect:
+    # 纯几何 baseline：把 GT loose box 填成矩形 mask，用于衡量 box prompt 上限/下限。
     baseline: "bbox_rect"
     method:
       name: "bbox_rect"
@@ -120,6 +133,7 @@ methods:
         notes: "Oracle loose-box rectangle mask baseline."
     ablation_tags: ["oracle_box"]
   sam2_box_oracle:
+    # zero_shot 表示 SAM2 不训练/不微调；这里仍使用 GT mask 派生的 box prompt。
     baseline: "sam2_zero_shot"
     method:
       name: "sam2_box_oracle"
@@ -220,6 +234,7 @@ methods:
         notes: "SAM2 automatic mask generator without external prompts."
     ablation_tags: ["sam2", "no_prompt"]
   sam2_physics_auto_prompt:
+    # 从 IR 图像启发式合成 prompt；不是 oracle prompt。
     baseline: "sam2_physics_auto_prompt"
     method:
       name: "sam2_physics_auto_prompt"
@@ -263,6 +278,7 @@ methods:
         notes: "Physics-prior automatic prompt from IR image only."
     ablation_tags: ["sam2", "physics_prior", "auto_prompt"]
   physics_no_local_contrast:
+    # 以下 physics_* 方法继承 sam2_physics_auto_prompt，只改一个 prior/prompt 超参数。
     extends: "sam2_physics_auto_prompt"
     modules:
       prior:
@@ -311,6 +327,7 @@ methods:
         box_pad_ratio: 0.40
     ablation_tags: ["ablation", "box_pad_0_40"]
 
+# 运行分组。命令行 --group 会把这些 group 展开为具体 experiment_id。
 groups:
   p0_baselines: ["T1_oracle_prompt_baselines"]
   p0_auto_prompt: ["T2_ir_auto_prompt", "T7_no_prompt_auto_mask"]
@@ -318,6 +335,7 @@ groups:
   p0_prompt_protocol: ["T6_prompt_generation_protocol_ablation"]
   p0_all: ["T1_oracle_prompt_baselines", "T2_ir_auto_prompt", "T7_no_prompt_auto_mask", "T3_prior_prompt_ablation"]
 
+# 实验列表。每个 experiment 组合 datasets x methods，并使用同一组 metrics 和 purpose。
 experiments:
   - experiment_id: "T1_oracle_prompt_baselines"
     status: "planned"

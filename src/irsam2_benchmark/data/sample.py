@@ -9,6 +9,8 @@ import numpy as np
 
 @dataclass
 class Sample:
+    # Sample 是整个 benchmark 的最小评估单元。
+    # 对 mask 数据集通常表示一个 instance；对 bbox-only 数据集表示一个 box annotation。
     image_path: Path
     sample_id: str
     frame_id: str
@@ -28,6 +30,7 @@ class Sample:
     point_prompt: Optional[list[float]] = None
     mask_array: Optional[np.ndarray] = None
     mask_path: Optional[Path] = None
+    # metadata 保存 prompt 生成协议、lazy mask source 等非通用字段。
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_item_dict(self) -> Dict[str, Any]:
@@ -52,6 +55,7 @@ class Sample:
         }
 
     def has_mask(self) -> bool:
+        # MultiModal 等大数据集可能不保存 eager mask_array，而是保存可按需解码的 polygon source。
         source = self.metadata.get("mask_source")
         return (
             self.mask_array is not None

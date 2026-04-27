@@ -107,6 +107,8 @@ def _sorted_files(root: Path, extensions: Sequence[str]) -> List[Path]:
 
 
 def _image_index_by_stem(root: Path, extensions: Sequence[str]) -> Dict[str, Path]:
+    # MultiModal 原始数据的 label 文件没有记录图片扩展名。
+    # 这里先按允许的扩展名建立 stem -> image_path 索引，避免漏掉 .jpg/.jpeg 等图片。
     index: Dict[str, Path] = {}
     for path in _sorted_files(root, extensions):
         index.setdefault(path.stem, path)
@@ -164,6 +166,8 @@ def _build_sample_from_mask(
     store_mask_array: bool = True,
     mask_source: Optional[Dict[str, object]] = None,
 ) -> Sample:
+    # 所有 mask-supervised 数据集都走同一套 prompt 派生规则：
+    # 由 GT mask 生成 tight box、loose box、foreground centroid point 和 target_scale。
     tight = mask_to_tight_box(mask_array)
     loose = expand_box_xyxy(tight, width=width, height=height)
     point = mask_to_point_prompt(mask_array)
@@ -189,6 +193,7 @@ def _build_sample_from_mask(
         bbox_tight=tight,
         bbox_loose=loose,
         point_prompt=point,
+        # MultiModal 可以只保存 polygon source，在评估阶段按需解码，避免一次性常驻数 GB GT mask。
         mask_array=mask_array.astype(np.float32) if store_mask_array else None,
         metadata=metadata,
     )
@@ -217,6 +222,8 @@ class MultiModalAdapter(DatasetAdapter):
         return config.dataset.adapter == self.adapter_name or ((root / "img").exists() and (root / "label").exists())
 
     def load_samples(self, config: AppConfig) -> List[Sample]:
+        # 原始 MultiModal 目录结构是 img/ + label/*.json。
+        # 每个 label 文件可以包含多个 instance；benchmark 的 eval unit 是 instance。
         root = _dataset_root(config)
         img_dir = root / (config.dataset.images_dir or "img")
         label_dir = root / "label"
@@ -240,6 +247,8 @@ class MultiModalAdapter(DatasetAdapter):
             frame_id = stem
             for inst_idx, inst in enumerate(instances):
                 masks = inst.get("mask", [])
+                # 当前协议使用第一个 polygon 作为实例 GT。若后续需要多 polygon 合并，
+                # 应在这里显式 rasterize 所有 polygon，而不是静默改变评估口径。
                 polygon = masks[0] if masks and len(masks[0]) >= 6 else None
                 if polygon is None:
                     continue

@@ -1,26 +1,42 @@
+# 服务器完整 benchmark 模板。
+# 复制为 configs/server_benchmark_full.local.yaml 后填写真实路径。
+# 这个文件是当前推荐入口：路径、模型、数据集、方法、seed、batch、suite 和分析参数都在这里定义。
+# 注意：baseline 字段里的 sam2_zero_shot 表示“预训练 SAM2 不训练/不微调”，不表示 no-prompt。
 benchmark:
+  # suite_name 写入 manifest，用来区分不同机器或不同实验批次。
   suite_name: "server_benchmark_full"
+  # artifact_subdir 是 artifacts/ 下的一级输出目录。
   artifact_subdir: "paper_5090"
 
+# 所有机器相关路径集中放在这里。
+# 生成的单 run config 会把这些路径解析成绝对路径，避免输出落到 generated config 目录下面。
 paths:
   sam2:
+    # SAM2 官方仓库根目录。代码运行时会从这里 import/build SAM2。
     repo: "/path/to/sam2"
+    # checkpoint_root 与 models.*.ckpt 拼接后得到实际权重路径。
     checkpoint_root: "/path/to/sam2/checkpoints"
   artifacts:
+    # 可以是相对项目根目录的路径，也可以是绝对路径。
     root: "artifacts"
   reference_results:
     root: "reference_results"
   datasets:
+    # 每个 key 必须和 datasets: 下的同名条目对应。
     nuaa_sirst: "/path/to/NUAA-SIRST"
     nudt_sirst: "/path/to/NUDT-SIRST"
     irstd_1k: "/path/to/IRSTD-1K"
     multimodal: "/path/to/MultiModal"
     rbgt_tiny_ir_box: "/path/to/RBGT-Tiny"
 
+# 运行子进程前设置的环境变量。
 execution:
+  # 单卡运行一般固定为 "0"。多卡调度当前不在这个脚本中自动切分。
   cuda_visible_devices: "0"
+  # 减少 PyTorch CUDA 内存碎片；显存紧张时建议保留。
   pytorch_cuda_alloc_conf: "expandable_segments:True"
 
+# 单 run config 的模型默认值。models: 里的具体 checkpoint 会覆盖这些字段。
 model_defaults:
   model_id: "sam2.1_hiera_base_plus"
   family: "sam2"
@@ -28,6 +44,8 @@ model_defaults:
   ckpt: "checkpoints/sam2.1_hiera_base_plus.pt"
   repo: ""
 
+# 单 run config 的 runtime 默认值。
+# checkpoint.runtime、suite runtime 和命令行 smoke-test 会在此基础上覆盖。
 runtime_defaults:
   artifact_root: "artifacts"
   reference_results_root: "reference_results"
@@ -47,6 +65,8 @@ runtime_defaults:
   show_progress: true
   progress_update_interval_s: 1.0
 
+# full benchmark 正式运行时的通用 runtime 覆盖。
+# 这里的 seeds 默认只跑 [42]，因为 zero-shot SAM2 没有训练随机性。
 runtime:
   device: "cuda"
   num_workers: 0
@@ -58,6 +78,7 @@ runtime:
   update_reference_results: false
   seeds: [42]
 
+# --smoke-test 使用的轻量运行参数，主要用于验证路径、数据 adapter 和报告链路。
 smoke_test_runtime:
   smoke_test: true
   max_samples: 10
@@ -65,6 +86,7 @@ smoke_test_runtime:
   visual_limit: 8
   seeds: [42]
 
+# micro benchmark 用于每个数据集取少量图做端到端压力测试。
 micro_artifact_subdir: "paper_5090_micro"
 micro_runtime:
   smoke_test: false
@@ -73,6 +95,8 @@ micro_runtime:
   visual_limit: 24
   seeds: [42]
 
+# evaluation_defaults 会写进每个生成的单 run config。
+# suite/method 可以覆盖 inference_mode、prompt_policy 等字段。
 evaluation_defaults:
   benchmark_version: "irsam2-paper-v1-ir-only"
   track: "track_a_image_prompted"
@@ -92,14 +116,18 @@ evaluation_defaults:
     multi_mask: false
     notes: "IR-only paper benchmark prompt policy."
 
+# 预留给 transfer/adapt/distill/quantize 阶段。当前 SAM2 baseline 不使用这些阶段。
 stage_defaults:
   transfer: {}
   adapt: {}
   distill: {}
   quantize: {}
 
+# 数据集注册表。
+# key 是矩阵中引用的数据集 id；config 是最终写入 AppConfig.dataset 的内容。
 datasets:
   nuaa_sirst:
+    # root_env 是兼容旧入口的环境变量名；完整 YAML 路径优先使用 paths.datasets 中的值。
     root_env: "NUAA_SIRST_ROOT"
     config:
       dataset_id: "NUAA-SIRST"
@@ -136,10 +164,12 @@ datasets:
     root_env: "MULTIMODAL_DATASET_ROOT"
     config:
       dataset_id: "MultiModal"
+      # multimodal_raw 读取 img/ 和 label/*.json，并从 polygon 生成 oracle prompt 与 GT mask。
       adapter: "multimodal_raw"
       root: "datasets/MultiModal"
       modality: "ir"
       images_dir: "img"
+      # 默认 image_extensions 包含 .bmp/.png/.jpg/.jpeg/.tif/.tiff。
       mask_mode: "auto"
       class_map: {}
   rbgt_tiny_ir_box:
@@ -154,8 +184,11 @@ datasets:
       mask_mode: "auto"
       class_map: {}
 
+# 方法注册表。
+# method key 是实验矩阵使用的名字；baseline 是实际传给 main.py 的代码实现名。
 methods:
   sam2_box_oracle:
+    # zero_shot 指不训练/不微调；这里仍然使用 GT mask 派生的 box prompt。
     baseline: "sam2_zero_shot"
     method:
       name: "sam2_box_oracle"
@@ -237,6 +270,7 @@ methods:
         notes: "SAM2 with adaptive loose box and foreground-centroid point deterministically derived from the ground-truth mask."
     ablation_tags: ["sam2", "oracle_box_point", "mask_derived_prompt", "loose_box", "centroid_point"]
   sam2_no_prompt_auto_mask:
+    # 这是唯一真正无外部 prompt 的 SAM2 自动掩码模式。
     baseline: "sam2_no_prompt_auto_mask"
     method:
       name: "sam2_no_prompt_auto_mask"
@@ -256,6 +290,8 @@ methods:
         notes: "SAM2 automatic mask generator without external prompts."
     ablation_tags: ["sam2", "auto_mask", "no_prompt"]
 
+# checkpoint sweep。
+# alias 会进入输出路径；runtime 可以按 checkpoint 调整 batch 和 auto-mask 网格密度。
 models:
   - alias: "tiny"
     model_id: "sam2.1_hiera_tiny"
@@ -290,6 +326,7 @@ models:
       image_batch_size: 8
       auto_mask_points_per_batch: 128
 
+# modes 是旧版 suite/命令行过滤的别名表；完整 suite 直接引用 methods 中的 key。
 modes:
   - method: "sam2_box_oracle"
     alias: "box"
@@ -302,6 +339,7 @@ modes:
   - method: "sam2_no_prompt_auto_mask"
     alias: "no_prompt"
 
+# 通用分析默认值。每个 suite 可以覆盖 metrics、comparisons 等字段。
 analysis:
   primary_metric: "mIoU"
   metrics: ["mIoU", "Dice", "LatencyMs"]
@@ -315,6 +353,8 @@ analysis:
     random_seed: 42
     low_power_threshold: 20
 
+# scripts/run_official_baseline_matrix.sh 使用的官方矩阵入口。
+# 与 suites 不同，它直接从这里展开 dataset x model x method。
 official_matrix:
   artifact_subdir: "official_baseline_matrix"
   datasets: ["multimodal", "rbgt_tiny_ir_box"]
@@ -324,8 +364,11 @@ official_matrix:
   visual_limit: 24
   resume: true
 
+# suites 是 run_5090_full_benchmark.py 的主入口。
+# 运行时会展开 suite.models 或全局 models，与 suite.datasets、suite.modes 做笛卡尔积。
 suites:
   mask:
+    # 主论文表建议优先使用这个 suite：只评估有 mask GT 的 IR 数据集和 prompted SAM2。
     experiment_id: "T5090_mask_prompt_modes"
     purpose: "SAM2 prompt-mode and checkpoint sweep on IR mask datasets."
     modes: ["sam2_box_oracle", "sam2_point_oracle", "sam2_box_point_oracle"]
@@ -342,6 +385,7 @@ suites:
         baseline: "sam2_box_oracle"
         candidate: "sam2_box_point_oracle"
   auto_mask:
+    # no-prompt 自动掩码与 prompted instance segmentation 指标不同，建议单独报告。
     experiment_id: "T5090_no_prompt_auto_mask"
     purpose: "Track B image-level SAM2 automatic mask generation on IR mask datasets."
     modes: ["sam2_no_prompt_auto_mask"]
@@ -352,12 +396,14 @@ suites:
     lower_is_better: ["num_pred_instances", "LatencyMs"]
     comparisons: []
   rbgt_box:
+    # RBGT-Tiny 是弱标注/COCO 风格补充，不应和 mask 数据集混在同一主表里。
     experiment_id: "T5090_rbgt_box_prompt_modes"
     purpose: "RBGT-Tiny IR-only weak-label supplement; keep separate from mask metrics."
     modes: ["sam2_box_oracle", "sam2_point_oracle", "sam2_box_point_oracle", "sam2_no_prompt_auto_mask"]
     datasets: ["rbgt_tiny_ir_box"]
     run_analysis: false
   prompt_box_protocol:
+    # 用于检查 loose box 和 tight box 的 protocol 差异，不属于默认 48-run 主矩阵。
     experiment_id: "T5090_prompt_box_protocol_ablation"
     purpose: "Check whether mask-derived loose-box expansion changes conclusions relative to tight boxes."
     models: ["base_plus"]

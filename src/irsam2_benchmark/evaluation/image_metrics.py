@@ -4,6 +4,7 @@ import numpy as np
 
 
 def mask_iou(pred: np.ndarray, target: np.ndarray) -> float:
+    # mIoU/Dice 都在二值 mask 上计算，阈值固定为 0.5。
     pred_b = pred > 0.5
     target_b = target > 0.5
     union = float(np.logical_or(pred_b, target_b).sum())
@@ -22,6 +23,7 @@ def dice_score(pred: np.ndarray, target: np.ndarray) -> float:
 
 
 def _boundary(mask: np.ndarray) -> np.ndarray:
+    # 简单 4 邻域边界提取，用于无额外依赖的 boundary F1。
     mask_b = mask > 0.5
     up = np.pad(mask_b[1:, :], ((0, 1), (0, 0)))
     down = np.pad(mask_b[:-1, :], ((1, 0), (0, 0)))
@@ -74,6 +76,7 @@ def boundary_f1_from_masks(pred_b: np.ndarray, target_b: np.ndarray) -> float:
 
 
 def boundary_f1_tolerance(pred: np.ndarray, target: np.ndarray, radius: int = 1) -> float:
+    # 小目标边界常有 1 像素级偏移，tolerance 版本允许半径内匹配。
     pred_b = _boundary(pred) > 0.5
     target_b = _boundary(target) > 0.5
     pred_sum = float(pred_b.sum())
@@ -92,6 +95,7 @@ def boundary_f1_tolerance(pred: np.ndarray, target: np.ndarray, radius: int = 1)
 
 
 def bbox_iou(box_a: list[float] | None, box_b: list[float] | None) -> float:
+    # bbox IoU 使用预测 mask 的外接框与 GT prompt box 比较，bbox-only 数据集也可输出。
     if box_a is None or box_b is None:
         return 0.0
     ax1, ay1, ax2, ay2 = box_a

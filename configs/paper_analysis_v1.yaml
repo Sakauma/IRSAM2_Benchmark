@@ -1,13 +1,20 @@
+# 旧版 paper_v1 结果分析配置。
+# 新的 5090/full runner 会为每个 checkpoint 自动生成 analysis config；
+# 只有手动运行 scripts/analyze_paper_results.py 时才需要直接编辑本文件。
 artifact_root: "artifacts/paper_v1"
 output_dir: "artifacts/paper_v1/analysis"
+
+# matrix 定义实验空间；paths 提供机器本地路径。
 matrix: "configs/paper_experiments_v1.yaml"
 paths: "configs/local_paths.yaml"
 
+# 只分析这些 experiment group，必须对应 paper_experiments_v1.yaml 中的 experiments.*.group。
 experiment_groups:
   - "T1_oracle_prompt_baselines"
   - "T2_ir_auto_prompt"
   - "T3_prior_prompt_ablation"
 
+# primary_metric 用于 case selection、表格排序和主比较。
 primary_metric: "mIoU"
 metrics:
   - "mIoU"
@@ -17,11 +24,13 @@ metrics:
   - "FalseAlarmPixelsPerMP"
   - "LatencyMs"
 
+# 这些指标越小越好；其它 metric 默认越大越好。
 lower_is_better:
   - "FalseAlarmPixelsPerMP"
   - "FalseAlarmComponents"
   - "LatencyMs"
 
+# 汇总表的分组字段。字段越多，表越细；字段越少，表越聚合。
 group_keys:
   - "dataset"
   - "method"
@@ -30,14 +39,18 @@ group_keys:
   - "target_scale"
   - "annotation_protocol_flag"
 
+# 错误案例选择：每个 bucket 保留 top_k 个样本。
 case_selection:
   top_k: 8
   primary_metric: "mIoU"
 
+# 统计检验配置。
+# 当前实现以 sample_id 配对，适合比较同一批样本上的不同 prompt/method。
 statistics:
   n_bootstrap: 10000
   ci: 0.95
   random_seed: 42
+  # 配对样本少于该阈值时标记 low_power。
   low_power_threshold: 20
   comparisons:
     - name: "sam2_box_oracle_vs_bbox_rect"

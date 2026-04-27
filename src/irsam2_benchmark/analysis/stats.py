@@ -8,6 +8,7 @@ import numpy as np
 
 
 def _rank_abs(values: np.ndarray) -> np.ndarray:
+    # Wilcoxon 需要对绝对差值排序；并列值使用平均秩。
     order = np.argsort(values)
     ranks = np.zeros_like(values, dtype=np.float64)
     sorted_values = values[order]
@@ -23,6 +24,7 @@ def _rank_abs(values: np.ndarray) -> np.ndarray:
 
 
 def wilcoxon_signed_rank(diff: np.ndarray) -> Dict[str, float]:
+    # 这里实现轻量级 Wilcoxon signed-rank，避免分析脚本强依赖 scipy。
     nonzero = diff[diff != 0.0]
     n = len(nonzero)
     if n == 0:
@@ -47,6 +49,7 @@ def wilcoxon_signed_rank(diff: np.ndarray) -> Dict[str, float]:
 
 
 def bootstrap_ci(diff: np.ndarray, n_bootstrap: int, ci: float, seed: int) -> tuple[float, float]:
+    # 对 paired mean difference 做 bootstrap CI，seed 固定后报告可复现。
     if len(diff) == 0:
         return 0.0, 0.0
     rng = np.random.default_rng(seed)
@@ -65,6 +68,7 @@ def _row_key(row: Dict[str, Any]) -> tuple[str, str]:
 
 
 def _paired_values(rows: List[Dict[str, Any]], dataset: str, baseline: str, candidate: str, metric: str) -> tuple[np.ndarray, np.ndarray]:
+    # 只在同一 seed、同一 sample_id 上配对，避免不同方法缺样本时误算差异。
     baseline_rows = {}
     candidate_rows = {}
     for row in rows:
@@ -92,6 +96,7 @@ def _metric_eval_units(rows: List[Dict[str, Any]], dataset: str, method: str, me
 
 
 def run_paired_tests(rows: List[Dict[str, Any]], analysis_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    # 自动跳过 eval_unit 不一致的比较，例如 image-level no-prompt 与 instance-level prompted。
     stats_config = analysis_config.get("statistics", {})
     comparisons = stats_config.get("comparisons", [])
     metrics = analysis_config.get("metrics", [])
@@ -153,6 +158,7 @@ def run_paired_tests(rows: List[Dict[str, Any]], analysis_config: Dict[str, Any]
 
 
 def _holm_correct(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # 按 metric 分组做 Holm 校正，控制同一指标下多重比较的假阳性风险。
     grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for row in rows:
         if row.get("status") == "ok" and isinstance(row.get("wilcoxon_p"), (int, float)):

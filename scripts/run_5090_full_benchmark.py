@@ -113,6 +113,8 @@ def _default_config_from_env() -> Path | None:
 
 
 def _base_matrix_from_complete_config(raw: Dict[str, Any], source: Path) -> Dict[str, Any]:
+    # 完整 YAML 同时保存 path/suite/matrix。这里抽出“实验矩阵”部分，
+    # 形状保持和 paper_experiments_v1.yaml 一致，复用已有分析脚本。
     required = ("runtime_defaults", "evaluation_defaults", "datasets", "methods")
     missing = [key for key in required if key not in raw]
     if missing:
@@ -130,6 +132,8 @@ def _base_matrix_from_complete_config(raw: Dict[str, Any], source: Path) -> Dict
 
 
 def _suite_config_from_complete_config(raw: Dict[str, Any], source: Path) -> Dict[str, Any]:
+    # 把完整 YAML 中的运行维度抽成 suite_config：
+    # checkpoints/models 控制模型维度，modes 控制方法维度，suites 控制实验组合。
     benchmark = raw.get("benchmark", {})
     checkpoints = raw.get("checkpoints", raw.get("models", []))
     if not checkpoints:
@@ -153,6 +157,8 @@ def _suite_config_from_complete_config(raw: Dict[str, Any], source: Path) -> Dic
 
 
 def _load_complete_benchmark_config(config_path: Path, paths_override: Path | None = None) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, str | None]]:
+    # 推荐入口：一个 YAML 包含路径、模型、数据集、方法、suite 和分析配置。
+    # paths_override 仅用于临时替换机器路径，不改变实验矩阵本身。
     if not config_path.exists():
         raise FileNotFoundError(
             f"Complete benchmark config not found: {config_path}\n"
@@ -175,6 +181,8 @@ def _load_complete_benchmark_config(config_path: Path, paths_override: Path | No
 
 
 def _load_legacy_benchmark_config(paths_path: Path, suite_config_path: Path) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, str | None]]:
+    # 兼容入口：老配置把路径、suite 和 paper matrix 拆成三个 YAML。
+    # 新实验不建议继续扩展这条路径，但保留它避免破坏历史命令。
     if not paths_path.exists():
         raise FileNotFoundError(f"Path config not found: {paths_path}")
     if not suite_config_path.exists():
@@ -241,6 +249,7 @@ def _read_json_if_valid(path: Path) -> Any | None:
 
 
 def _run_is_complete(output_dir: Path) -> bool:
+    # resume 不能只看目录存在；必须确认关键结果文件可读且 rows 非空。
     if not all((output_dir / relative).exists() for relative in REQUIRED_RUN_FILES):
         return False
     summary = _read_json_if_valid(output_dir / "summary.json")
@@ -260,6 +269,8 @@ def _runtime_config(
     paths: Dict[str, Any],
     smoke_test: bool,
 ) -> Dict[str, Any]:
+    # runtime 覆盖顺序从低到高：
+    # base defaults -> suite runtime -> checkpoint runtime -> smoke runtime -> machine paths runtime。
     runtime = _deep_merge(base_runtime, suite_config.get("runtime", {}))
     runtime = _deep_merge(runtime, checkpoint.get("runtime", {}))
     if smoke_test:
@@ -294,6 +305,8 @@ def _build_app_config(
     artifact_root: Path,
     smoke_test: bool,
 ) -> Dict[str, Any]:
+    # 将矩阵中的一个组合展开成 main.py 可直接读取的 AppConfig YAML。
+    # 这里会写入绝对 dataset/checkpoint/artifact 路径，保证 generated config 可单独复跑。
     dataset_entry = base_matrix["datasets"][dataset_id]
     method_entry = _resolve_method(base_matrix["methods"], method_id)
     dataset_config = copy.deepcopy(dataset_entry["config"])
@@ -330,6 +343,8 @@ def _build_generated_matrix(
     checkpoint: Dict[str, Any],
     method_ids: List[str],
 ) -> Dict[str, Any]:
+    # 分析脚本仍按 paper matrix 读取输入。每个 checkpoint 生成一个裁剪后的 matrix，
+    # 只包含当前 suite 会产生的 datasets/methods，避免分析误报缺失 run。
     selected_datasets = {dataset_id: copy.deepcopy(base_matrix["datasets"][dataset_id]) for dataset_id in suite_entry["datasets"]}
     selected_methods = {method_id: copy.deepcopy(base_matrix["methods"][method_id]) for method_id in method_ids}
     experiment = {
@@ -367,6 +382,7 @@ def _analysis_config(
     analysis_root: Path,
     analysis_defaults: Dict[str, Any],
 ) -> Dict[str, Any]:
+    # 每个 checkpoint 单独分析，统计比较在同一 checkpoint 内做 sample-level paired test。
     primary_metric = suite_entry.get("primary_metric", analysis_defaults.get("primary_metric", "mIoU"))
     case_selection = _deep_merge(
         {"top_k": 8, "primary_metric": primary_metric},
@@ -420,6 +436,7 @@ def _analysis_command(analysis_path: Path, python_bin: str) -> List[str]:
 
 
 def _build_env(paths: Dict[str, Any]) -> Dict[str, str]:
+    # 子进程环境由 runner 统一设置，确保用户从任意 shell 启动都能 import 本项目 src。
     env = os.environ.copy()
     env["PYTHONPATH"] = f"{PROJECT_ROOT / 'src'}{os.pathsep}{env.get('PYTHONPATH', '')}".rstrip(os.pathsep)
     execution = paths.get("execution", {})
@@ -464,6 +481,8 @@ def _status_record(
 
 
 def _iter_requested_suites(suite_config: Dict[str, Any], selected_suites: set[str] | None) -> Iterable[tuple[str, Dict[str, Any]]]:
+    # 未显式选择 suite 时，enabled: false 的 suite 会被跳过；
+    # 显式 --suites 指定时允许强制运行某个默认关闭的 suite。
     explicit = selected_suites is not None
     for suite_key, suite_entry in suite_config.get("suites", {}).items():
         if selected_suites is not None and suite_key not in selected_suites:
@@ -501,6 +520,8 @@ def _read_json(path: Path) -> Dict[str, Any]:
 
 
 def _summary_rows(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # checkpoint_sweep_summary.csv 是跨 checkpoint 快速对比表；
+    # 它只汇总 completed/skipped 且完整的 run，失败 run 不混入均值。
     rows: List[Dict[str, Any]] = []
     seen_output_dirs: set[str] = set()
     for record in records:
@@ -605,11 +626,14 @@ def main(argv: List[str] | None = None) -> int:
 
     run_plan = []
     for suite_key, suite_entry in _iter_requested_suites(suite_config, selected_suites):
+        # 展开顺序固定为 suite -> checkpoint -> dataset -> method，
+        # 这样日志中的 [i/N] 与生成目录结构一致，便于中断后定位。
         suite_checkpoints = _suite_checkpoints(checkpoints, suite_entry)
         method_ids = _suite_method_ids(mode_entries, suite_entry)
         if not suite_checkpoints or not method_ids:
             continue
         for checkpoint in suite_checkpoints:
+            # 每个 checkpoint 独立 artifact_root，避免不同模型结果互相覆盖。
             artifact_root = _run_artifact_root(artifact_base, artifact_subdir, suite_key, checkpoint["alias"])
             generated_matrix = _build_generated_matrix(
                 base_matrix=base_matrix,
@@ -679,6 +703,7 @@ def main(argv: List[str] | None = None) -> int:
             f"model={checkpoint['model_id']} dataset={dataset_id} mode={method_id}"
         )
         if not args.rerun and _run_is_complete(output_dir):
+            # resume 模式默认跳过完整 run；--rerun 会强制覆盖重跑。
             print(f"{prefix} skipped_existing", flush=True)
             records.append(
                 _status_record(
@@ -752,6 +777,7 @@ def main(argv: List[str] | None = None) -> int:
             command = _analysis_command(Path(item["analysis_config"]), args.python_bin)
             print(f"[analysis dry_run] suite={item['suite']} ckpt={item['checkpoint']} {' '.join(command)}", flush=True)
     elif not args.no_analysis:
+        # 分析阶段在所有 run 结束后执行，保证统计表能看到完整 checkpoint 内的所有组合。
         for item in analysis_records:
             command = _analysis_command(Path(item["analysis_config"]), args.python_bin)
             print(f"[analysis] suite={item['suite']} ckpt={item['checkpoint']} running", flush=True)
@@ -775,6 +801,8 @@ def main(argv: List[str] | None = None) -> int:
 
     checkpoint_summary_outputs = _write_checkpoint_summary(manifest_dir, records) if not args.dry_run else {}
     manifest = {
+        # benchmark_manifest_latest.json 是本次运行的审计入口：
+        # 记录配置来源、展开后的 run 数、每个子进程命令和分析状态。
         "created_at": created_at,
         "project_root": str(PROJECT_ROOT),
         "config_mode": config_sources["mode"],

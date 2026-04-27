@@ -32,6 +32,7 @@ def _progress_bar(
     total: int,
     unit: str,
 ) -> Any | None:
+    # 进度条只依赖 runtime.show_progress；测试环境或无 tqdm 环境会静默退化为无进度条。
     runtime = getattr(config, "runtime", None)
     if not bool(getattr(runtime, "show_progress", False)) or total <= 0:
         return None
@@ -55,6 +56,8 @@ def _progress_bar(
 
 
 def _aggregate(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    # 每个 run 的 summary 是 sample-level 行的数值字段均值。
+    # 多 seed 的均值/方差在 pipeline/reporting 层再处理。
     numeric: Dict[str, List[float]] = defaultdict(list)
     for row in rows:
         for key, value in row.items():
@@ -118,6 +121,7 @@ def _write_sample_error(
     exc: Exception,
     context: Dict[str, Any] | None = None,
 ) -> None:
+    # 单样本失败不直接中断整个 benchmark；错误会进入 error_log.jsonl，方便后续定位坏样本。
     path = _error_log_path(config)
     if path is None:
         return
@@ -182,6 +186,7 @@ def _resize_mask_nearest(mask: np.ndarray, height: int, width: int) -> np.ndarra
 
 
 def align_mask_to_sample(mask: np.ndarray, item: Sample) -> tuple[np.ndarray, Dict[str, Any]]:
+    # SAM2 返回的 mask 有时和原图尺寸不完全一致。这里用最近邻对齐，并记录是否发生 resize。
     raw = _mask_to_2d(mask)
     target_h = max(1, int(item.height))
     target_w = max(1, int(item.width))
@@ -205,6 +210,7 @@ def _predict_batch_with_fallback(
     requested_batch_index: int,
     error_context: Dict[str, Any] | None = None,
 ) -> List[tuple[List[Sample], Dict[str, Dict[str, Any]], float]]:
+    # prompted 模式支持批量推理。若批量预测 OOM，会递归二分批次，直到单样本仍失败才记录错误。
     start = time.perf_counter()
     try:
         predict_samples = getattr(method, "predict_samples", None)
@@ -272,6 +278,8 @@ def _image_level_row(
     modality: str,
     extra_metadata: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
+    # no-prompt auto-mask 的 eval unit 是 image，不是 instance。
+    # 一张图内多个 GT instance 会先做 greedy matching，再汇总成一行 image-level 指标。
     representative = items[0]
     row = {
         "sample_id": representative.frame_id,
@@ -303,11 +311,16 @@ def evaluate_method(
     inference_mode: InferenceMode,
     error_context: Dict[str, Any] | None = None,
 ) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    # evaluate_method 是三类推理协议的统一入口：
+    # 1. video_propagation：按 track/sequence 评估时序传播；
+    # 2. no_prompt_auto_mask：按 image 评估自动 mask generator；
+    # 3. 其它 prompted 模式：按 instance/sample 评估 box、point、box+point。
     modality = getattr(getattr(config, "dataset", None), "modality", "ir")
     run_error_context = dict(error_context or {})
 
     rows: List[Dict[str, Any]] = []
     if inference_mode == InferenceMode.VIDEO_PROPAGATION:
+        # video 模式要求同一 track 内每帧只有一个 sample，否则无法明确传播目标。
         try:
             track_view = build_track_view(samples)
         except Exception as exc:
@@ -419,6 +432,7 @@ def evaluate_method(
         return summary, rows
 
     if inference_mode == InferenceMode.NO_PROMPT_AUTO_MASK:
+        # 自动掩码模式不使用外部 prompt，因此必须按图片聚合 GT instance，而不是逐 instance 调用。
         image_groups = list(build_image_view(samples).items())
         progress = _progress_bar(
             method=method,
@@ -499,6 +513,7 @@ def evaluate_method(
                 progress.close()
         return _aggregate(rows), rows
 
+    # prompted 模式是当前论文主表使用的路径。batch_size 写入每行，便于复现实验吞吐差异。
     configured_batch_size = max(1, int(getattr(getattr(config, "runtime", None), "image_batch_size", 1)))
     batch_index = 0
     progress = _progress_bar(
@@ -570,6 +585,7 @@ def build_segmentation_row(
     prompt: Dict[str, object] | None = None,
     mask_alignment: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
+    # 构造单个 instance 的评估行。这里既记录预测 mask 指标，也记录 prompt 派生协议元数据。
     pred_area = float((pred_mask > 0.5).sum())
     gt_area = float((gt_mask > 0.5).sum())
     pred_box = _mask_box(pred_mask)
@@ -624,6 +640,7 @@ def build_segmentation_row(
         **prompt_metadata,
     }
     if has_mask_gt:
+        # mask-supervised 数据集输出完整分割指标；bbox-only 数据集只输出 bbox/prompt 可比指标。
         exact_boundary_f1 = boundary_f1(pred_mask, gt_mask)
         row.update(
             {

@@ -8,6 +8,7 @@ from .image_metrics import mask_iou
 
 
 def greedy_match_instances(pred_instances: List[Dict[str, object]], gt_instances: List[Dict[str, object]], iou_threshold: float = 0.5) -> Dict[str, float]:
+    # no-prompt 模式一张图可能产生多个候选 mask；这里按 IoU 从高到低做一对一贪心匹配。
     candidates: List[Tuple[float, int, int]] = []
     for pred_idx, pred in enumerate(pred_instances):
         pred_mask = np.asarray(pred["mask"], dtype=np.float32)

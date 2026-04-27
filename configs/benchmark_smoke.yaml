@@ -1,3 +1,5 @@
+# 旧版单配置 smoke run：MultiModalCOCOClean 取 24 个样本。
+# 用途是小规模端到端检查；正式论文矩阵请用 paper_experiments_v1.yaml 或 server_benchmark_full.example.yaml。
 model:
   model_id: "sam2.1_hiera_base_plus"
   family: "sam2"

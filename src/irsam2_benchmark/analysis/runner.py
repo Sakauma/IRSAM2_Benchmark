@@ -14,6 +14,7 @@ from .tables import bucket_table, main_baseline_table, multimodal_size_table
 
 
 def _analysis_root(analysis_path: Path) -> Path:
+    # 仓库内 configs/*.yaml 以项目根作为相对路径基准；generated analysis config 以自身目录为基准。
     return analysis_path.parent.parent if analysis_path.parent.name == "configs" else analysis_path.parent
 
 
@@ -31,6 +32,7 @@ def _git_commit(root: Path) -> str | None:
 
 
 def run_analysis(analysis_path: str | Path, *, dry_run: bool = False) -> Dict[str, Any]:
+    # 分析阶段只消费 artifacts，不重新加载模型；适合在服务器跑完后单独反复生成表格。
     analysis_path = Path(analysis_path).resolve()
     root = _analysis_root(analysis_path)
     analysis_config = read_yaml(analysis_path)
@@ -55,6 +57,7 @@ def run_analysis(analysis_path: str | Path, *, dry_run: bool = False) -> Dict[st
     }
 
     if dry_run:
+        # dry-run 用于检查路径和矩阵展开，不创建分析表。
         print(f"[dry-run] analysis_config={analysis_path}")
         print(f"[dry-run] matrix_config={matrix_path}")
         print(f"[dry-run] artifact_root={artifact_root}")
@@ -69,6 +72,7 @@ def run_analysis(analysis_path: str | Path, *, dry_run: bool = False) -> Dict[st
 
     tables_dir = output_dir / "tables"
     table_outputs: Dict[str, str] = {}
+    # 这些表分别对应主表、MultiModal 大小目标分表、自动 prompt/no-prompt 表、消融表和面积桶表。
     table_outputs.update(output_pair(tables_dir, "main_baseline_table", main_baseline_table(rows, metrics)))
     table_outputs.update(output_pair(tables_dir, "multimodal_size_table", multimodal_size_table(rows, metrics)))
     table_outputs.update(output_pair(tables_dir, "auto_prompt_table", _filter_methods(rows, {"sam2_no_prompt_auto_mask", "sam2_physics_auto_prompt"}, metrics)))
@@ -79,6 +83,7 @@ def run_analysis(analysis_path: str | Path, *, dry_run: bool = False) -> Dict[st
     table_outputs.update(output_pair(tables_dir, "significance_tests", significance_rows))
 
     selected_cases = select_cases(rows, primary_metric=primary_metric, top_k=top_k)
+    # case selection 输出最好/最差样本索引，供后续手动回看可视化。
     case_outputs = write_case_outputs(output_dir, selected_cases)
 
     manifest["outputs"] = {**table_outputs, **case_outputs}

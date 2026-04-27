@@ -1,3 +1,5 @@
+# 旧版单配置 quick run：MultiModalCOCOClean 只取 10 张图。
+# 用途是快速验证环境、SAM2 路径、数据 adapter 和报告写入；正式服务器矩阵请用 server_benchmark_full.example.yaml。
 model:
   model_id: "sam2.1_hiera_base_plus"
   family: "sam2"

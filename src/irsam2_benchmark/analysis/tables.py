@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Sequence
 
 
+# MultiModal 大/小目标分表阈值：优先用 GT mask 面积判断，缺失时才回退到 target_scale。
 SMALL_TARGET_AREA_PX = 32 * 32
 
 
@@ -33,6 +34,7 @@ def _std(values: Sequence[float]) -> float | None:
 
 
 def summarize_by(rows: List[Dict[str, Any]], group_keys: Iterable[str], metrics: Iterable[str]) -> List[Dict[str, Any]]:
+    # 表格统一输出 mean/std/count，避免不同分析表对缺失 metric 的处理不一致。
     grouped: Dict[tuple, List[Dict[str, Any]]] = defaultdict(list)
     keys = list(group_keys)
     for row in rows:
@@ -58,6 +60,7 @@ def main_baseline_table(rows: List[Dict[str, Any]], metrics: Iterable[str]) -> L
 
 
 def multimodal_size_table(rows: List[Dict[str, Any]], metrics: Iterable[str]) -> List[Dict[str, Any]]:
+    # MultiModal 同时输出 overall、小目标、大目标三行，便于解释规则建筑与不规则小目标的差异。
     multimodal_rows = [row for row in rows if str(row.get("dataset", "")).lower() == "multimodal"]
     expanded_rows: List[Dict[str, Any]] = []
     for row in multimodal_rows:
@@ -89,6 +92,7 @@ def _area_bucket(area: float) -> str:
 
 
 def _small_large_group(row: Dict[str, Any]) -> str:
+    # GTAreaPixels 来自真实 mask 面积；比标注类型或 bbox 形状更适合作为大小分组依据。
     area = row.get("GTAreaPixels")
     if isinstance(area, bool):
         area = None

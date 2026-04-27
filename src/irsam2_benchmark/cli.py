@@ -9,6 +9,8 @@ from .pipeline.runner import run_command
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # CLI 只负责把命令和配置路径分发到 pipeline/analysis。
+    # 具体实验矩阵、模型、数据集和 seed 应尽量放在 YAML 中维护。
     parser = argparse.ArgumentParser(prog="irsam2-benchmark")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -19,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--analysis", required=True, type=Path)
     analyze.add_argument("--dry-run", action="store_true")
 
+    # 这些子命令共用同一个 AppConfig；当前论文主路径实际使用 baseline。
     for name in ["transfer", "adapt", "distill", "quantize", "evaluate", "pipeline", "ablation-grid", "baseline"]:
         child = run_sub.add_parser(name)
         child.add_argument("--config", required=True, type=Path)
@@ -48,6 +51,7 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     if args.command == "analyze":
+        # 分析命令读取已完成 run 的 artifacts，不会重新触发模型推理。
         run_analysis(args.analysis, dry_run=args.dry_run)
         return
     config = load_app_config(args.config)

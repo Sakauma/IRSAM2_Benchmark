@@ -1,3 +1,5 @@
+# 旧版单数据集完整 run：MultiModalCOCOClean + base_plus + box prompt。
+# 仍可配合 main.py run baseline 使用；多数据集/多模型服务器实验请用 server_benchmark_full.example.yaml。
 model:
   model_id: "sam2.1_hiera_base_plus"
   family: "sam2"

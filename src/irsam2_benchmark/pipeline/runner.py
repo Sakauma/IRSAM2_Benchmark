@@ -39,6 +39,8 @@ def _effective_prompt_policy(config: AppConfig, inference_mode: InferenceMode) -
 
 
 def _build_benchmark_spec(config: AppConfig, inference_mode: InferenceMode) -> Dict[str, Any]:
+    # benchmark_spec 是每个 run 的协议快照。
+    # 它随结果一起落盘，后续可以在不读取原始 YAML 的情况下判断结果口径。
     return {
         "benchmark_version": config.evaluation.benchmark_version,
         "split_version": config.evaluation.split_version,
@@ -135,6 +137,7 @@ def _write_run_metadata(
     dataset_manifest: Dict[str, Any] | None = None,
     output_paths: Dict[str, Any] | None = None,
 ) -> None:
+    # run_metadata 记录可复现性信息：项目/SAM2 commit、Python/Torch、checkpoint hash 和输出路径。
     metadata = {
         "command": command,
         "baseline_name": baseline_name,
@@ -174,6 +177,8 @@ def _validate_evaluation_outputs(
     eval_rows: List[Dict[str, Any]],
     error_log_path: Path,
 ) -> None:
+    # baseline/evaluate 至少应产生一行评估结果。
+    # 如果全失败但进程正常返回，这里会把 silent failure 提升成显式错误。
     if command not in {"baseline", "evaluate"}:
         return
     if sample_count <= 0:
@@ -242,6 +247,8 @@ def _build_visual_records(
     track_name: str = "",
     error_context: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
+    # 可视化只抽取前 visual_limit 个案例，避免完整 benchmark 生成过多图片。
+    # no-prompt 模式按 image 展示，prompted/video 模式按 instance 展示。
     if visual_limit <= 0:
         return []
 
@@ -398,6 +405,8 @@ def _resolve_method(config: AppConfig, command: str, baseline_name: Optional[str
 
 
 def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = None) -> None:
+    # run_command 是 main.py 的执行核心：
+    # 先解析配置和数据集，再按 seed 重建 method，最后写 results/summary/rows/metadata。
     output_dir = config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     benchmark_spec = _build_benchmark_spec(config, config.inference_mode)
@@ -467,6 +476,7 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
     eval_rows: List[Dict[str, Any]] = []
     _reset_error_log(config)
     for seed in config.runtime.seeds:
+        # 每个 seed 都重新构造 method，避免 SAM2 predictor 或随机状态在 seed 间泄漏。
         set_global_seed(seed)
         _, method = _resolve_method(config, command, baseline_name)
         error_context = {
@@ -486,6 +496,7 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
         results.append(_seed_result(seed, aggregate))
         eval_rows.extend([{**row, "seed": seed} for row in rows])
         if config.runtime.save_visuals:
+            # 可视化失败不会影响评估行生成；错误会进入 error_log.jsonl。
             visual_records = _build_visual_records(
                 method=method,
                 samples=dataset.samples,

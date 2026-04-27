@@ -13,6 +13,7 @@ def _components(mask: np.ndarray) -> list[np.ndarray]:
 
 
 def _target_recall(pred_components: list[np.ndarray], gt_components: list[np.ndarray], threshold: float) -> float:
+    # 小目标指标关注“目标是否被召回”，所以按 GT 连通域找最佳预测连通域 IoU。
     if not gt_components:
         return 1.0 if not pred_components else 0.0
     recalled = 0
@@ -26,6 +27,7 @@ def _target_recall(pred_components: list[np.ndarray], gt_components: list[np.nda
 
 
 def small_target_metrics(pred_mask: np.ndarray, gt_mask: np.ndarray) -> Dict[str, float]:
+    # 像素级 mIoU 对极小目标很敏感，因此额外报告目标召回和每百万像素 false alarm。
     pred_b = (pred_mask > 0.5).astype(np.float32)
     gt_b = (gt_mask > 0.5).astype(np.float32)
     pred_components = _components(pred_b)
@@ -45,4 +47,3 @@ def small_target_metrics(pred_mask: np.ndarray, gt_mask: np.ndarray) -> Dict[str
         "GTAreaPixels": float(gt_b.sum()),
         "PredAreaPixels": float(pred_b.sum()),
     }
-

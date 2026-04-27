@@ -1,3 +1,5 @@
+# 旧版 RBGT-Tiny smoke run：取 24 个样本验证 adapter 和报告链路。
+# 正式 RBGT 补充实验建议通过 server_benchmark_full.example.yaml 的 rbgt_box suite 管理。
 model:
   model_id: "sam2.1_hiera_base_plus"
   family: "sam2"

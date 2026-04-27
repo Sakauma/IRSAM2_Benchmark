@@ -15,6 +15,7 @@ from ..data.sample import Sample
 
 
 def _require_module(module_name: str, package_name: str):
+    # 依赖缺失时给出面向 benchmark 环境的错误，而不是暴露底层 import 栈。
     try:
         return importlib.import_module(module_name)
     except Exception as exc:
@@ -25,6 +26,7 @@ def _require_module(module_name: str, package_name: str):
 
 
 def check_sam2_runtime(repo: Path) -> None:
+    # 这里只检查运行 SAM2 必需的 Python 依赖和本地 repo 路径；CUDA 可用性由 PyTorch 推理时判断。
     _require_module("torch", "torch>=2.5.1")
     _require_module("torchvision", "torchvision>=0.20.1")
     _require_module("hydra", "hydra-core>=1.3.2")
@@ -34,6 +36,7 @@ def check_sam2_runtime(repo: Path) -> None:
 
 
 def load_image_rgb(path: Path) -> np.ndarray:
+    # 遥感红外图常是单通道。SAM2 image predictor 需要 RGB，因此这里做 min-max 归一化后复制三通道。
     raw = np.array(Image.open(path).convert("L"), dtype=np.uint8)
     min_v = float(raw.min())
     max_v = float(raw.max())
@@ -62,6 +65,7 @@ class SAM2ModelAdapter:
         )
 
     def ensure_loaded(self) -> None:
+        # SAM2 权重和 predictor 延迟加载，避免 dry-run、配置检查和分析阶段占用显存。
         if self.model is not None:
             return
         check_sam2_runtime(self.repo)
@@ -90,6 +94,7 @@ class SAM2ModelAdapter:
         return getattr(module, symbol_name)
 
     def _build_video_predictor(self):
+        # 不同 SAM2 checkout 暴露的视频 API 名称略有差异，这里按常见入口做兼容探测。
         ckpt_path = self._resolve_checkpoint_path()
         candidates = [
             ("sam2.build_sam", "build_sam2_video_predictor"),
@@ -106,6 +111,7 @@ class SAM2ModelAdapter:
         return None
 
     def _resolve_checkpoint_path(self) -> Path:
+        # 允许 YAML 写绝对路径、相对 SAM2 repo 的路径，或相对 benchmark 项目的路径。
         ckpt = Path(self.config.model.ckpt)
         if ckpt.is_absolute():
             return ckpt
@@ -118,6 +124,7 @@ class SAM2ModelAdapter:
         return ckpt
 
     def _build_auto_mask_generator(self):
+        # 自动掩码类在不同版本 SAM2 中模块名不同；找不到时 no-prompt 模式会显式报错。
         candidates = [
             ("sam2.automatic_mask_generator", "SAM2AutomaticMaskGenerator"),
             ("sam2.sam2_automatic_mask_generator", "SAM2AutomaticMaskGenerator"),
@@ -139,6 +146,7 @@ class SAM2ModelAdapter:
         point_labels: Optional[np.ndarray] = None,
         multimask_output: bool = False,
     ) -> dict[str, Any]:
+        # 单图 prompted SAM2 推理。所有 box/point 坐标都已由上层按原图像素坐标生成。
         self.ensure_loaded()
         self.image_predictor.set_image(image_rgb)
         masks, scores, logits = self.image_predictor.predict(
@@ -163,6 +171,7 @@ class SAM2ModelAdapter:
         point_labels: list[Optional[np.ndarray]] | None = None,
         multimask_output: bool = False,
     ) -> list[dict[str, Any]]:
+        # 优先使用 SAM2 的 batch API；本地 checkout 不支持时回退为逐图预测。
         if not image_rgbs:
             return []
         self.ensure_loaded()
@@ -198,12 +207,14 @@ class SAM2ModelAdapter:
         ]
 
     def predict_auto_masks(self, image_rgb: np.ndarray) -> list[dict[str, Any]]:
+        # no-prompt 模式返回的是多个候选 instance，后续由 image-level evaluator 统一匹配 GT。
         self.ensure_loaded()
         if self.auto_mask_generator is None:
             raise RuntimeError("Automatic mask generation is not available in the local SAM2 checkout.")
         return list(self.auto_mask_generator.generate(image_rgb))
 
     def predict_video_sequence(self, samples: list[Sample], prompt_policy: PromptPolicy) -> dict[str, np.ndarray]:
+        # SAM2 video predictor 读取目录中的帧，因此这里临时把同一 track 的帧写成连续 png。
         self.ensure_loaded()
         if self.video_predictor is None:
             raise RuntimeError("Video propagation is not available in the local SAM2 checkout.")
@@ -239,6 +250,7 @@ class SAM2ModelAdapter:
 
             state = init_state(video_path=str(temp_root))
             first_sample = samples[0]
+            # 初始 prompt 只加在第一帧；refresh_interval 可按策略在后续帧重新注入 prompt。
             point_coords = None
             point_labels = None
             box = None

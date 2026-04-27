@@ -1,3 +1,5 @@
+# 旧版 RBGT-Tiny 完整 run：base_plus + box prompt。
+# 保留用于单独复现旧入口；新的服务器矩阵请通过完整 YAML 的 suite 展开。
 model:
   model_id: "sam2.1_hiera_base_plus"
   family: "sam2"

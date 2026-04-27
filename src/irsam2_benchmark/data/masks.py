@@ -12,6 +12,7 @@ MASK_SOURCE_KEY = "mask_source"
 
 
 def polygon_to_mask(points: Sequence[float], height: int, width: int) -> np.ndarray:
+    """把 MultiModal/COCO polygon rasterize 成二值 float32 mask。"""
     canvas = Image.new("L", (width, height), 0)
     xy = [(float(points[i]), float(points[i + 1])) for i in range(0, len(points), 2)]
     ImageDraw.Draw(canvas).polygon(xy, outline=1, fill=1)
@@ -26,6 +27,11 @@ def _mask_path_to_array(mask_path: Path) -> np.ndarray:
 
 
 def sample_mask_array(sample: Sample) -> np.ndarray | None:
+    """按统一优先级读取样本 GT mask。
+
+    优先级为 eager mask -> mask_path -> lazy metadata source。
+    这样评估代码不需要关心某个数据集是直接保存 mask、从文件读 mask，还是按需从 polygon 解码。
+    """
     if sample.mask_array is not None:
         return np.asarray(sample.mask_array, dtype=np.float32)
     if sample.mask_path is not None:
@@ -46,6 +52,7 @@ def sample_mask_array(sample: Sample) -> np.ndarray | None:
 
 
 def sample_mask_or_zeros(sample: Sample) -> np.ndarray:
+    """返回可直接参与指标计算的 GT mask；无 GT mask 时返回同尺寸全零 mask。"""
     mask = sample_mask_array(sample)
     if mask is not None:
         return mask
