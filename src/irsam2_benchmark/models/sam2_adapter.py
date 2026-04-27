@@ -49,9 +49,9 @@ class SAM2ModelAdapter:
     def __init__(self, config: AppConfig):
         self.config = config
         self.repo = config.sam2_repo
-        self.model = None
-        self.image_predictor = None
-        self.auto_mask_generator = None
+        self.model: Any | None = None
+        self.image_predictor: Any | None = None
+        self.auto_mask_generator: Any | None = None
         self.capabilities = ModelCapabilities(
             supports_auto_mask=True,
         )
@@ -73,14 +73,15 @@ class SAM2ModelAdapter:
         ckpt_path = self._resolve_checkpoint_path()
         model_kwargs = {"device": self.config.runtime.device}
         try:
-            self.model = build_sam2(self.config.model.cfg, str(ckpt_path), **model_kwargs)
+            model = build_sam2(self.config.model.cfg, str(ckpt_path), **model_kwargs)
         except TypeError:
-            self.model = build_sam2(self.config.model.cfg, str(ckpt_path), mode="eval", **model_kwargs)
-        self.model.eval()
-        self.image_predictor = image_predictor_cls(self.model)
-        self.auto_mask_generator = self._build_auto_mask_generator()
+            model = build_sam2(self.config.model.cfg, str(ckpt_path), mode="eval", **model_kwargs)
+        model.eval()
+        self.model = model
+        self.image_predictor = image_predictor_cls(model)
+        self.auto_mask_generator = self._build_auto_mask_generator(model)
 
-    def _resolve_symbol(self, module_name: str, symbol_name: str):
+    def _resolve_symbol(self, module_name: str, symbol_name: str) -> Any:
         module = importlib.import_module(module_name)
         return getattr(module, symbol_name)
 
@@ -97,8 +98,12 @@ class SAM2ModelAdapter:
             return root_candidate
         return ckpt
 
-    def _build_auto_mask_generator(self):
+    def _build_auto_mask_generator(self, model: Any | None = None) -> Any | None:
         # 自动掩码类在不同版本 SAM2 中模块名不同；找不到时 no-prompt 模式会显式报错。
+        if model is None:
+            model = self.model
+        if model is None:
+            raise RuntimeError("SAM2 model did not initialize.")
         candidates = [
             ("sam2.automatic_mask_generator", "SAM2AutomaticMaskGenerator"),
             ("sam2.sam2_automatic_mask_generator", "SAM2AutomaticMaskGenerator"),
@@ -106,10 +111,16 @@ class SAM2ModelAdapter:
         for module_name, symbol_name in candidates:
             try:
                 cls = self._resolve_symbol(module_name, symbol_name)
-                return cls(self.model, points_per_batch=int(self.config.runtime.auto_mask_points_per_batch))
+                return cls(model, points_per_batch=int(self.config.runtime.auto_mask_points_per_batch))
             except Exception:
                 continue
         return None
+
+    def _require_image_predictor(self) -> Any:
+        self.ensure_loaded()
+        if self.image_predictor is None:
+            raise RuntimeError("SAM2 image predictor did not initialize.")
+        return self.image_predictor
 
     def predict_image(
         self,
@@ -121,9 +132,9 @@ class SAM2ModelAdapter:
         multimask_output: bool = False,
     ) -> dict[str, Any]:
         # 单图 prompted SAM2 推理。所有 box/point 坐标都已由上层按原图像素坐标生成。
-        self.ensure_loaded()
-        self.image_predictor.set_image(image_rgb)
-        masks, scores, logits = self.image_predictor.predict(
+        image_predictor = self._require_image_predictor()
+        image_predictor.set_image(image_rgb)
+        masks, scores, logits = image_predictor.predict(
             box=None if box is None else np.array(box, dtype=np.float32),
             point_coords=points,
             point_labels=point_labels,
@@ -148,8 +159,8 @@ class SAM2ModelAdapter:
         # 优先使用 SAM2 的 batch API；本地 checkout 不支持时回退为逐图预测。
         if not image_rgbs:
             return []
-        self.ensure_loaded()
-        if len(image_rgbs) == 1 or not hasattr(self.image_predictor, "set_image_batch") or not hasattr(self.image_predictor, "predict_batch"):
+        image_predictor = self._require_image_predictor()
+        if len(image_rgbs) == 1 or not hasattr(image_predictor, "set_image_batch") or not hasattr(image_predictor, "predict_batch"):
             return [
                 self.predict_image(
                     image_rgbs[idx],
@@ -163,8 +174,8 @@ class SAM2ModelAdapter:
         box_batch = None if boxes is None else [None if box is None else np.array(box, dtype=np.float32) for box in boxes]
         point_batch = None if points is None else points
         label_batch = None if point_labels is None else point_labels
-        self.image_predictor.set_image_batch(image_rgbs)
-        masks, scores, logits = self.image_predictor.predict_batch(
+        image_predictor.set_image_batch(image_rgbs)
+        masks, scores, logits = image_predictor.predict_batch(
             point_coords_batch=point_batch,
             point_labels_batch=label_batch,
             box_batch=box_batch,

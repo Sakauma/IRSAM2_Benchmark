@@ -65,7 +65,7 @@ def _stack_panels(panels: Iterable[Image.Image]) -> Image.Image:
 
 
 def _union_instances(instances: List[Dict[str, Any]], height: int, width: int) -> np.ndarray:
-    union = np.zeros((height, width), dtype=np.float32)
+    union: np.ndarray = np.zeros((height, width), dtype=np.float32)
     for item in instances:
         union = np.maximum(union, np.asarray(item["mask"], dtype=np.float32))
     return union

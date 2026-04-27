@@ -5,7 +5,7 @@ import re
 import warnings
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 from PIL import Image
@@ -89,7 +89,7 @@ def _mask_height_width(mask: np.ndarray) -> tuple[int, int]:
     return int(arr.shape[0]), int(arr.shape[1])
 
 
-def _read_json(path: Path) -> Dict[str, object]:
+def _read_json(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
