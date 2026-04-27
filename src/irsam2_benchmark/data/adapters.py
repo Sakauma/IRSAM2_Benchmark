@@ -106,6 +106,14 @@ def _sorted_files(root: Path, extensions: Sequence[str]) -> List[Path]:
     return sorted([path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in lower])
 
 
+def _image_index_by_stem(root: Path, extensions: Sequence[str]) -> Dict[str, Path]:
+    index: Dict[str, Path] = {}
+    for path in _sorted_files(root, extensions):
+        index.setdefault(path.stem, path)
+        index.setdefault(path.stem.lower(), path)
+    return index
+
+
 def _generic_mask_index_keys(path: Path, root: Path) -> List[str]:
     rel_stem = path.relative_to(root).with_suffix("").as_posix()
     keys = [rel_stem]
@@ -214,14 +222,13 @@ class MultiModalAdapter(DatasetAdapter):
         label_dir = root / "label"
         samples: List[Sample] = []
         seen_images: set[str] = set()
+        image_index = _image_index_by_stem(img_dir, config.dataset.image_extensions)
         for label_path in sorted(label_dir.glob("*.json")):
             stem = label_path.stem
             if _limit_reached(config.runtime.max_images, len(seen_images)) and stem not in seen_images:
                 break
-            image_path = img_dir / f"{stem}.bmp"
-            if not image_path.exists():
-                image_path = img_dir / f"{stem}.png"
-            if not image_path.exists():
+            image_path = image_index.get(stem) or image_index.get(stem.lower())
+            if image_path is None:
                 continue
             seen_images.add(stem)
             width, height = _image_size(image_path)

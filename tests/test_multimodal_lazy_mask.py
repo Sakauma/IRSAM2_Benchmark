@@ -13,6 +13,46 @@ from irsam2_benchmark.evaluation.runner import build_segmentation_row
 
 
 class MultiModalLazyMaskTests(unittest.TestCase):
+    def _write_config(self, root: Path) -> Path:
+        config_path = root / "config.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "model": {"model_id": "dummy", "family": "sam2", "cfg": "cfg", "ckpt": "ckpt", "repo": ""},
+                    "dataset": {
+                        "dataset_id": "MultiModalTiny",
+                        "adapter": "multimodal_raw",
+                        "root": ".",
+                        "modality": "ir",
+                        "images_dir": "img",
+                        "annotations_dir": "",
+                        "mask_mode": "auto",
+                        "class_map": {},
+                    },
+                    "runtime": {
+                        "artifact_root": "artifacts",
+                        "reference_results_root": "reference_results",
+                        "output_name": "out",
+                        "device": "cpu",
+                    },
+                    "evaluation": {
+                        "benchmark_version": "v1",
+                        "track": "track_a_image_prompted",
+                        "protocol": "mask",
+                        "inference_mode": "box",
+                        "prompt_policy": {
+                            "name": "p",
+                            "prompt_type": "box",
+                            "prompt_source": "gt",
+                            "prompt_budget": 1,
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return config_path
+
     def test_multimodal_keeps_polygon_lazy_but_evaluates_mask_metrics(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -36,43 +76,7 @@ class MultiModalLazyMaskTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            config_path = root / "config.json"
-            config_path.write_text(
-                json.dumps(
-                    {
-                        "model": {"model_id": "dummy", "family": "sam2", "cfg": "cfg", "ckpt": "ckpt", "repo": ""},
-                        "dataset": {
-                            "dataset_id": "MultiModalTiny",
-                            "adapter": "multimodal_raw",
-                            "root": ".",
-                            "modality": "ir",
-                            "images_dir": "img",
-                            "annotations_dir": "",
-                            "mask_mode": "auto",
-                            "class_map": {},
-                        },
-                        "runtime": {
-                            "artifact_root": "artifacts",
-                            "reference_results_root": "reference_results",
-                            "output_name": "out",
-                            "device": "cpu",
-                        },
-                        "evaluation": {
-                            "benchmark_version": "v1",
-                            "track": "track_a_image_prompted",
-                            "protocol": "mask",
-                            "inference_mode": "box",
-                            "prompt_policy": {
-                                "name": "p",
-                                "prompt_type": "box",
-                                "prompt_source": "gt",
-                                "prompt_budget": 1,
-                            },
-                        },
-                    }
-                ),
-                encoding="utf-8",
-            )
+            config_path = self._write_config(root)
 
             config = load_app_config(config_path)
             dataset = build_dataset_adapter(config).load(config)
@@ -94,6 +98,37 @@ class MultiModalLazyMaskTests(unittest.TestCase):
             self.assertEqual(row["mIoU"], 1.0)
             self.assertEqual(row["Dice"], 1.0)
             self.assertGreater(row["GTAreaPixels"], 0.0)
+
+    def test_multimodal_matches_jpg_images_from_configured_extensions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            img_dir = root / "img"
+            label_dir = root / "label"
+            img_dir.mkdir()
+            label_dir.mkdir()
+            Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(img_dir / "frame_001.jpg")
+            (label_dir / "frame_001.json").write_text(
+                json.dumps(
+                    {
+                        "detection": {
+                            "instances": [
+                                {
+                                    "category": "drone",
+                                    "mask": [[1, 1, 4, 1, 4, 4, 1, 4]],
+                                }
+                            ]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_app_config(self._write_config(root))
+            dataset = build_dataset_adapter(config).load(config)
+
+            self.assertEqual(dataset.manifest.sample_count, 1)
+            self.assertEqual(dataset.manifest.image_count, 1)
+            self.assertEqual(dataset.samples[0].image_path.suffix, ".jpg")
 
 
 if __name__ == "__main__":
