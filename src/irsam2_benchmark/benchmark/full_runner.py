@@ -443,12 +443,26 @@ def _tail_text(path: Path, max_lines: int = FAILURE_LOG_TAIL_LINES) -> str:
     return "\n".join(lines[-max_lines:])
 
 
-def _run_subprocess(command: List[str], env: Dict[str, str], log_path: Path) -> subprocess.CompletedProcess[str]:
+def _run_subprocess(command: List[str], env: Dict[str, str], log_path: Path, *, stream_logs: bool = False) -> subprocess.CompletedProcess[str]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as handle:
         handle.write(f"$ {' '.join(command)}\n\n")
         handle.flush()
-        return subprocess.run(command, cwd=PROJECT_ROOT, env=env, check=False, text=True, stdout=handle, stderr=subprocess.STDOUT)
+        if not stream_logs:
+            return subprocess.run(command, cwd=PROJECT_ROOT, env=env, check=False, text=True, stdout=handle, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(command, cwd=PROJECT_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if process.stdout is None:
+            return subprocess.CompletedProcess(command, process.wait())
+        while True:
+            chunk = os.read(process.stdout.fileno(), 4096)
+            if not chunk:
+                break
+            text = chunk.decode("utf-8", errors="replace")
+            handle.write(text)
+            handle.flush()
+            sys.stderr.write(text)
+            sys.stderr.flush()
+        return subprocess.CompletedProcess(command, process.wait())
 
 
 def _status_record(
@@ -672,6 +686,7 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument("--rerun", action="store_true", help="Force rerun even when required result files already exist.")
     parser.add_argument("--no-analysis", action="store_true")
     parser.add_argument("--stop-on-error", action="store_true")
+    parser.add_argument("--stream-logs", action="store_true", help="Mirror child process logs to stderr while still writing per-run log files.")
     args = parser.parse_args(argv)
 
     config_path = _resolve_optional_project_path(args.config) or _default_config_from_env()
@@ -842,7 +857,8 @@ def main(argv: List[str] | None = None) -> int:
             )
             continue
         print(f"{prefix} running", flush=True)
-        result = _run_subprocess(command, env, log_path)
+        run_kwargs = {"stream_logs": True} if args.stream_logs else {}
+        result = _run_subprocess(command, env, log_path, **run_kwargs)
         if result.returncode == 0:
             validation = validate_run_artifacts(output_dir)
             if validation["valid"]:
@@ -918,7 +934,8 @@ def main(argv: List[str] | None = None) -> int:
             command = _analysis_command(Path(item["analysis_config"]), args.python_bin)
             print(f"[analysis] suite={item['suite']} ckpt={item['checkpoint']} running", flush=True)
             analysis_log_path = Path(item["log_path"])
-            result = _run_subprocess(command, env, analysis_log_path)
+            run_kwargs = {"stream_logs": True} if args.stream_logs else {}
+            result = _run_subprocess(command, env, analysis_log_path, **run_kwargs)
             item["returncode"] = result.returncode
             item["status"] = "completed" if result.returncode == 0 else "failed"
             if result.returncode != 0:

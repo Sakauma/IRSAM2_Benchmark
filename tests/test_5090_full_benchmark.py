@@ -1,9 +1,11 @@
 import importlib.util
 import io
 import json
+import os
+import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
@@ -53,6 +55,23 @@ def _write_full_config(path: Path, artifact_root: Path) -> None:
 
 
 class Full5090BenchmarkTests(unittest.TestCase):
+    def test_run_subprocess_streams_output_and_writes_log(self):
+        runner = _load_runner()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "run.log"
+            stderr = io.StringIO()
+            command = [sys.executable, "-c", "import sys; print('stdout line'); sys.stderr.write('stderr line\\n')"]
+
+            with redirect_stderr(stderr):
+                result = runner._full_runner._run_subprocess(command, os.environ.copy(), log_path, stream_logs=True)
+
+            self.assertEqual(result.returncode, 0)
+            log_text = log_path.read_text(encoding="utf-8")
+            self.assertIn("stdout line", log_text)
+            self.assertIn("stderr line", log_text)
+            self.assertIn("stdout line", stderr.getvalue())
+            self.assertIn("stderr line", stderr.getvalue())
+
     def test_dry_run_generates_single_checkpoint_mask_subset(self):
         runner = _load_runner()
         with tempfile.TemporaryDirectory() as temp_dir:
