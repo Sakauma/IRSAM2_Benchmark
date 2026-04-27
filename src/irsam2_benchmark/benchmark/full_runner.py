@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterable, List
 import yaml
 
 from ..core.fingerprints import sha256_file
+from ..validation import validate_run_artifacts
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -465,6 +466,7 @@ def _status_record(
     returncode: int | None = None,
     message: str = "",
     log_tail: str = "",
+    validation_errors: List[str] | None = None,
 ) -> Dict[str, Any]:
     return {
         "status": status,
@@ -481,6 +483,7 @@ def _status_record(
         "returncode": returncode,
         "message": message,
         "log_tail": log_tail,
+        "validation_errors": [] if validation_errors is None else validation_errors,
     }
 
 
@@ -841,9 +844,26 @@ def main(argv: List[str] | None = None) -> int:
         print(f"{prefix} running", flush=True)
         result = _run_subprocess(command, env, log_path)
         if result.returncode == 0:
-            records.append(
-                _status_record(
-                    status="completed",
+            validation = validate_run_artifacts(output_dir)
+            if validation["valid"]:
+                records.append(
+                    _status_record(
+                        status="completed",
+                        suite_key=suite_key,
+                        checkpoint=checkpoint,
+                        dataset_id=dataset_id,
+                        method_id=method_id,
+                        output_dir=output_dir,
+                        config_path=config_path,
+                        config_sha256=config_sha256,
+                        command=command,
+                        log_path=log_path,
+                        returncode=result.returncode,
+                    )
+                )
+            else:
+                failure = _status_record(
+                    status="failed_invalid_artifacts",
                     suite_key=suite_key,
                     checkpoint=checkpoint,
                     dataset_id=dataset_id,
@@ -854,8 +874,16 @@ def main(argv: List[str] | None = None) -> int:
                     command=command,
                     log_path=log_path,
                     returncode=result.returncode,
+                    message="Command returned 0 but produced invalid artifacts.",
+                    log_tail=_tail_text(log_path),
+                    validation_errors=list(validation["errors"]),
                 )
-            )
+                records.append(failure)
+                failures.append(failure)
+                print(f"{prefix} failed invalid_artifacts", flush=True)
+                _write_run_outputs(manifest_dir, records, failures)
+                if args.stop_on_error:
+                    break
         else:
             failure = _status_record(
                 status="failed",

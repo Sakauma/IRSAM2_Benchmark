@@ -4,16 +4,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List
 
+from ..validation import REQUIRED_ARTIFACT_FILES, validate_run_artifacts
 from .io import read_json
 
 
-REQUIRED_RUN_FILES = (
-    # 一个 run 只有同时具备这些文件，才会进入论文分析表。
-    "benchmark_spec.json",
-    "summary.json",
-    "results.json",
-    "eval_reports/rows.json",
-)
+# 一个 run 只有通过统一 artifact validator，才会进入论文分析表。
+REQUIRED_RUN_FILES = REQUIRED_ARTIFACT_FILES
 
 
 @dataclass(frozen=True)
@@ -56,6 +52,17 @@ def collect_runs(artifact_root: Path, matrix: Dict[str, Any], analysis_config: D
         missing_files = [relative for relative in REQUIRED_RUN_FILES if not (run_dir / relative).exists()]
         if missing_files:
             missing.append({**run, "run_dir": str(run_dir), "missing_files": missing_files})
+            continue
+        validation = validate_run_artifacts(run_dir)
+        if not validation["valid"]:
+            missing.append(
+                {
+                    **run,
+                    "run_dir": str(run_dir),
+                    "invalid_artifacts": True,
+                    "validation_errors": validation["errors"],
+                }
+            )
             continue
         summary = read_json(run_dir / "summary.json")
         rows = read_json(run_dir / "eval_reports" / "rows.json")

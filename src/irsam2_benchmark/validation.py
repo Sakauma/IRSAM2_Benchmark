@@ -237,6 +237,14 @@ def validate_run_artifacts(run_dir: str | Path) -> Dict[str, Any]:
     for field in REQUIRED_HEALTH_FIELDS:
         if field not in summary:
             errors.append(f"summary.json is missing health field: {field}")
+    failure_rate = summary.get("failure_rate")
+    failure_rate_threshold = summary.get("failure_rate_threshold")
+    if isinstance(failure_rate, (int, float)) and isinstance(failure_rate_threshold, (int, float)):
+        if float(failure_rate) > float(failure_rate_threshold):
+            errors.append(
+                f"summary.json failure_rate={float(failure_rate):.4f} exceeds "
+                f"failure_rate_threshold={float(failure_rate_threshold):.4f}."
+            )
 
     if not isinstance(results, list):
         errors.append("results.json must contain a JSON array.")

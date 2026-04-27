@@ -244,6 +244,43 @@ class Full5090BenchmarkTests(unittest.TestCase):
             self.assertTrue(failures[0]["log_path"].endswith("logs/mask/tiny/nuaa_sirst_sam2_box_oracle.log"))
             self.assertIn("last failure line", failures[0]["log_tail"])
 
+    def test_successful_process_with_invalid_artifacts_is_failure(self):
+        runner = _load_runner()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "server_benchmark_full.local.yaml"
+            _write_full_config(config_path, root / "artifacts")
+
+            def fake_run_subprocess(command, env, log_path):
+                del command, env
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text("process returned zero\n", encoding="utf-8")
+                return CompletedProcess(args=[], returncode=0)
+
+            with patch.object(runner._full_runner, "_run_subprocess", side_effect=fake_run_subprocess):
+                self.assertEqual(
+                    runner.main(
+                        [
+                            "--config",
+                            str(config_path),
+                            "--suites",
+                            "mask",
+                            "--checkpoints",
+                            "tiny",
+                            "--modes",
+                            "box",
+                            "--no-analysis",
+                            "--stop-on-error",
+                        ]
+                    ),
+                    1,
+                )
+
+            failures = json.loads((root / "artifacts" / "paper_5090" / "run_failures_latest.json").read_text(encoding="utf-8"))
+            self.assertEqual(failures[0]["status"], "failed_invalid_artifacts")
+            self.assertEqual(failures[0]["returncode"], 0)
+            self.assertTrue(any("Missing required artifact file" in error for error in failures[0]["validation_errors"]))
+
 
 if __name__ == "__main__":
     unittest.main()

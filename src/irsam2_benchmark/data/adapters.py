@@ -693,6 +693,16 @@ def build_dataset_adapter(config: AppConfig) -> DatasetAdapterProtocol:
         CocoLikeAdapter(),
         GenericImageMaskAdapter(),
     ]
+    requested_adapter = str(config.dataset.adapter or "").strip()
+    if requested_adapter and requested_adapter != "auto":
+        for adapter in adapters:
+            if adapter.adapter_name == requested_adapter:
+                return adapter
+        available = ", ".join(adapter.adapter_name for adapter in adapters)
+        raise RuntimeError(
+            f"Unknown dataset adapter {requested_adapter!r} for dataset_id={config.dataset.dataset_id!r}. "
+            f"Available adapters: {available}"
+        )
     for adapter in adapters:
         if adapter.can_handle(config):
             return adapter

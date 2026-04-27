@@ -22,6 +22,8 @@ def _write_run(root: Path, experiment: str, dataset: str, method: str, metric_sh
     rows = [
         {
             "sample_id": "sample_a",
+            "frame_id": "frame_a",
+            "sequence_id": "seq",
             "seed": 42,
             "mIoU": 0.2 + metric_shift,
             "Dice": 0.3 + metric_shift,
@@ -37,6 +39,8 @@ def _write_run(root: Path, experiment: str, dataset: str, method: str, metric_sh
         },
         {
             "sample_id": "sample_b",
+            "frame_id": "frame_b",
+            "sequence_id": "seq",
             "seed": 42,
             "mIoU": 0.4 + metric_shift,
             "Dice": 0.5 + metric_shift,
@@ -51,8 +55,22 @@ def _write_run(root: Path, experiment: str, dataset: str, method: str, metric_sh
             "annotation_protocol_flag": "mask",
         },
     ]
-    _write_json(run_dir / "benchmark_spec.json", {"benchmark_version": "test"})
-    _write_json(run_dir / "summary.json", {"mean": {"mIoU": 0.3 + metric_shift}})
+    _write_json(run_dir / "benchmark_spec.json", {"benchmark_version": "test", "inference_mode": "box"})
+    _write_json(run_dir / "run_metadata.json", {})
+    _write_json(
+        run_dir / "summary.json",
+        {
+            "expected_sample_count": 2,
+            "expected_eval_units": 2,
+            "expected_row_count": 2,
+            "row_count": 2,
+            "error_count": 0,
+            "missing_row_count": 0,
+            "failure_rate": 0.0,
+            "failure_rate_threshold": 0.05,
+            "mean": {"mIoU": 0.3 + metric_shift},
+        },
+    )
     _write_json(run_dir / "results.json", [{"seed": 42, "mIoU": 0.3 + metric_shift}])
     _write_json(run_dir / "eval_reports" / "rows.json", rows)
 
@@ -133,6 +151,27 @@ class AnalysisV2Tests(unittest.TestCase):
             runs, missing = collect_runs(root / "missing_artifacts", matrix, {"experiment_groups": ["T1_oracle_prompt_baselines"]})
             self.assertEqual(runs, [])
             self.assertEqual(len(missing), 2)
+
+    def test_collector_skips_invalid_artifacts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            artifact_root = root / "artifacts"
+            matrix_path = root / "matrix.yaml"
+            _write_matrix(matrix_path)
+            matrix = yaml.safe_load(matrix_path.read_text(encoding="utf-8"))
+            run_dir = artifact_root / "T1_oracle_prompt_baselines" / "dummy_dataset" / "bbox_rect"
+            _write_json(run_dir / "benchmark_spec.json", {"benchmark_version": "test", "inference_mode": "box"})
+            _write_json(run_dir / "run_metadata.json", {})
+            _write_json(run_dir / "summary.json", {"mean": {"mIoU": 0.5}})
+            _write_json(run_dir / "results.json", [{"seed": 42, "mIoU": 0.5}])
+            _write_json(run_dir / "eval_reports" / "rows.json", [{"sample_id": "sample_a", "mIoU": 0.5}])
+
+            runs, missing = collect_runs(artifact_root, matrix, {"experiment_groups": ["T1_oracle_prompt_baselines"]})
+
+            self.assertEqual(runs, [])
+            invalid = [item for item in missing if item.get("invalid_artifacts")]
+            self.assertEqual(len(invalid), 1)
+            self.assertTrue(any("missing health field" in error for error in invalid[0]["validation_errors"]))
 
     def test_table_builder_summarizes_dataset_method(self):
         rows = [

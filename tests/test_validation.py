@@ -158,6 +158,20 @@ class ValidationTests(unittest.TestCase):
             self.assertTrue(any("Missing required artifact file: results.json" in item for item in report["errors"]))
             self.assertTrue(any("non-finite numeric value" in item for item in report["errors"]))
 
+    def test_validate_run_artifacts_rejects_failure_rate_over_threshold(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "run"
+            _write_valid_run_artifacts(run_dir)
+            summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+            summary["failure_rate"] = 0.5
+            summary["failure_rate_threshold"] = 0.05
+            (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+
+            report = validate_run_artifacts(run_dir)
+
+            self.assertFalse(report["valid"])
+            self.assertTrue(any("failure_rate=0.5000 exceeds" in item for item in report["errors"]))
+
     def test_run_command_writes_config_fingerprints_and_runtime_resources(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
