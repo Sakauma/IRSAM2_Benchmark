@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, List
 
 import yaml
 
@@ -42,4 +42,3 @@ def output_pair(base: Path, name: str, rows: List[Dict[str, Any]]) -> Dict[str, 
     csv_path = write_csv(base / f"{name}.csv", rows)
     json_path = write_json(base / f"{name}.json", rows)
     return {f"{name}_csv": str(csv_path), f"{name}_json": str(json_path)}
-

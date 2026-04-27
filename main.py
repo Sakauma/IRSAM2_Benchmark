@@ -8,7 +8,11 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from irsam2_benchmark.cli import main
+
+def main() -> None:
+    from irsam2_benchmark.cli import main as cli_main
+
+    cli_main()
 
 
 if __name__ == "__main__":

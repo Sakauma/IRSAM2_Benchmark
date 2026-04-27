@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from irsam2_benchmark.data.prompt_synthesis import connected_components, expand_box_xyxy, mask_to_point_prompt, mask_to_tight_box
+from irsam2_benchmark.data.prompt_synthesis import connected_components, expand_box_xyxy, mask_to_tight_box
 
 
 class PromptSynthesisTests(unittest.TestCase):

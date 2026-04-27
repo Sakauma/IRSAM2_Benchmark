@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Iterable, List, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 from .sample import Sample
 
