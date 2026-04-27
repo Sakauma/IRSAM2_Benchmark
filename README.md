@@ -2,7 +2,7 @@
 
 `IRSAM2_Benchmark` 是面向红外目标分割实验的 SAM2 benchmark 工程。
 
-当前工程只保留一条主流程：用完整 YAML 展开 SAM2 baseline 矩阵，运行 prompted 与 no-prompt 自动掩码评估，随后基于 artifacts 生成分析表格。旧版 paper runner、quick/smoke 包装脚本、迁移/蒸馏/量化占位接口已经移除。
+用完整 YAML 展开 SAM2 baseline 矩阵，运行 prompted 与 no-prompt 自动掩码评估，随后基于 artifacts 生成分析表格。
 
 ## 当前能力
 
