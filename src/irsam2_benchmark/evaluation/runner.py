@@ -11,7 +11,7 @@ from typing import Any, Dict, Iterable, List
 import numpy as np
 
 from ..config import AppConfig
-from ..core.interfaces import InferenceMode
+from ..core.interfaces import BenchmarkMethodProtocol, InferenceMode
 from ..data.masks import sample_mask_array, sample_mask_or_zeros
 from ..data.prompt_synthesis import mask_to_tight_box
 from ..data.sample import Sample
@@ -24,7 +24,7 @@ from .small_target_metrics import small_target_metrics
 
 def _progress_bar(
     *,
-    method,
+    method: BenchmarkMethodProtocol,
     config: AppConfig | None,
     inference_mode: InferenceMode,
     error_context: Dict[str, Any],
@@ -303,7 +303,7 @@ def _image_level_row(
 
 def evaluate_method(
     *,
-    method,
+    method: BenchmarkMethodProtocol,
     samples: List[Sample],
     config: AppConfig,
     track_name: str,

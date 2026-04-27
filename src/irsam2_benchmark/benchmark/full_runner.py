@@ -15,6 +15,8 @@ from typing import Any, Dict, Iterable, List
 
 import yaml
 
+from ..core.fingerprints import sha256_file
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 MAIN_PY = PROJECT_ROOT / "main.py"
@@ -169,6 +171,7 @@ def _load_complete_benchmark_config(config_path: Path) -> tuple[Dict[str, Any], 
     return paths, suite_config, base_matrix, {
         "mode": "complete",
         "config": str(config_path.resolve()),
+        "config_sha256": sha256_file(config_path),
         "paths_config": None,
         "suite_config": None,
     }
@@ -286,6 +289,8 @@ def _build_app_config(
     method_id: str,
     artifact_root: Path,
     smoke_test: bool,
+    source_config_path: Path,
+    source_config_sha256: str,
 ) -> Dict[str, Any]:
     # 将矩阵中的一个组合展开成 main.py 可直接读取的 AppConfig YAML。
     # 这里会写入绝对 dataset/checkpoint/artifact 路径，保证 generated config 可单独复跑。
@@ -303,6 +308,14 @@ def _build_app_config(
         "runtime": runtime,
         "evaluation": evaluation,
         "method": copy.deepcopy(method_entry.get("method", {"name": method_id, "modality": "ir"})),
+        "fingerprints": {
+            "source_config": str(source_config_path.resolve()),
+            "source_config_sha256": source_config_sha256,
+            "suite": suite_key,
+            "checkpoint": checkpoint["alias"],
+            "dataset_id": dataset_id,
+            "method_id": method_id,
+        },
     }
 
 
@@ -447,6 +460,7 @@ def _status_record(
     output_dir: Path,
     config_path: Path,
     command: List[str],
+    config_sha256: str,
     log_path: Path | None = None,
     returncode: int | None = None,
     message: str = "",
@@ -461,6 +475,7 @@ def _status_record(
         "method": method_id,
         "output_dir": str(output_dir),
         "config_path": str(config_path),
+        "config_sha256": config_sha256,
         "command": " ".join(command),
         "log_path": "" if log_path is None else str(log_path),
         "returncode": returncode,
@@ -662,6 +677,7 @@ def main(argv: List[str] | None = None) -> int:
             "Complete benchmark config not found. Pass --config or create configs/server_benchmark_full.local.yaml "
             "from configs/server_benchmark_full.example.yaml."
         )
+    source_config_path = config_path
     paths, suite_config, base_matrix, config_sources = _load_complete_benchmark_config(config_path)
     artifact_subdir = str(suite_config.get("artifact_subdir", "paper_5090"))
     if args.smoke_test:
@@ -719,6 +735,7 @@ def main(argv: List[str] | None = None) -> int:
             )
             matrix_path = matrix_dir / suite_key / f"{checkpoint['alias']}.yaml"
             _write_yaml(matrix_path, generated_matrix)
+            matrix_config_sha256 = sha256_file(matrix_path)
             if suite_entry.get("run_analysis", False):
                 analysis_path = analysis_config_dir / suite_key / f"{checkpoint['alias']}.yaml"
                 _write_yaml(
@@ -738,6 +755,8 @@ def main(argv: List[str] | None = None) -> int:
                         "suite": suite_key,
                         "checkpoint": checkpoint["alias"],
                         "analysis_config": str(analysis_path),
+                        "analysis_config_sha256": sha256_file(analysis_path),
+                        "matrix_config_sha256": matrix_config_sha256,
                         "analysis_output_dir": str(analysis_root / suite_key / checkpoint["alias"]),
                         "log_path": str(_log_path(manifest_dir, suite_key, checkpoint["alias"], "analysis")),
                         "status": "planned",
@@ -763,18 +782,21 @@ def main(argv: List[str] | None = None) -> int:
                         method_id=method_id,
                         artifact_root=artifact_root,
                         smoke_test=args.smoke_test,
+                        source_config_path=source_config_path,
+                        source_config_sha256=str(config_sources["config_sha256"]),
                     )
                     _write_yaml(config_path, app_config)
+                    config_sha256 = sha256_file(config_path)
                     command = _command_for(config_path, method_entry["baseline"], args.python_bin)
                     log_path = _log_path(manifest_dir, suite_key, checkpoint["alias"], f"{dataset_id}_{method_id}")
-                    run_plan.append((suite_key, suite_entry, checkpoint, dataset_id, method_id, output_dir, config_path, command, log_path))
+                    run_plan.append((suite_key, suite_entry, checkpoint, dataset_id, method_id, output_dir, config_path, config_sha256, command, log_path))
 
     if not run_plan:
         raise RuntimeError("No runnable benchmark combinations were generated.")
 
     print(f"[plan] runs={len(run_plan)} artifact_root={manifest_dir}", flush=True)
 
-    for index, (suite_key, _, checkpoint, dataset_id, method_id, output_dir, config_path, command, log_path) in enumerate(run_plan, start=1):
+    for index, (suite_key, _, checkpoint, dataset_id, method_id, output_dir, config_path, config_sha256, command, log_path) in enumerate(run_plan, start=1):
         prefix = (
             f"[{index}/{len(run_plan)}] suite={suite_key} ckpt={checkpoint['alias']} "
             f"model={checkpoint['model_id']} dataset={dataset_id} mode={method_id}"
@@ -791,6 +813,7 @@ def main(argv: List[str] | None = None) -> int:
                     method_id=method_id,
                     output_dir=output_dir,
                     config_path=config_path,
+                    config_sha256=config_sha256,
                     command=command,
                     log_path=log_path,
                 )
@@ -809,6 +832,7 @@ def main(argv: List[str] | None = None) -> int:
                     method_id=method_id,
                     output_dir=output_dir,
                     config_path=config_path,
+                    config_sha256=config_sha256,
                     command=command,
                     log_path=log_path,
                 )
@@ -826,6 +850,7 @@ def main(argv: List[str] | None = None) -> int:
                     method_id=method_id,
                     output_dir=output_dir,
                     config_path=config_path,
+                    config_sha256=config_sha256,
                     command=command,
                     log_path=log_path,
                     returncode=result.returncode,
@@ -840,6 +865,7 @@ def main(argv: List[str] | None = None) -> int:
                 method_id=method_id,
                 output_dir=output_dir,
                 config_path=config_path,
+                config_sha256=config_sha256,
                 command=command,
                 log_path=log_path,
                 returncode=result.returncode,
@@ -893,6 +919,7 @@ def main(argv: List[str] | None = None) -> int:
         "project_root": str(PROJECT_ROOT),
         "config_mode": config_sources["mode"],
         "config": config_sources["config"],
+        "config_sha256": config_sources["config_sha256"],
         "paths_config": config_sources["paths_config"],
         "suite_config": config_sources["suite_config"],
         "artifact_root": str(manifest_dir),

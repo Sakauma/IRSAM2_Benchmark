@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import platform
 import random
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -14,6 +14,7 @@ import numpy as np
 
 from ..baselines import build_baseline_registry
 from ..config import AppConfig
+from ..core.fingerprints import sha256_file
 from ..core.interfaces import ArtifactRecord, InferenceMode, PromptPolicy, PromptSource, PromptType
 from ..data import build_dataset_adapter
 from ..data.masks import sample_mask_array, sample_mask_or_zeros
@@ -52,6 +53,7 @@ def _build_benchmark_spec(config: AppConfig, inference_mode: InferenceMode) -> D
         "prompt_policy": _effective_prompt_policy(config, inference_mode),
         "method": config.method,
         "config_path": str(config.config_path),
+        "fingerprints": config.fingerprints,
     }
 
 
@@ -89,14 +91,6 @@ def _torch_info() -> Dict[str, Any]:
         return {"error": str(exc)}
 
 
-def _sha256(path: Any) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _file_info(path: Any) -> Dict[str, Any]:
     path = path if hasattr(path, "exists") else Path(path)
     if not path.exists():
@@ -107,7 +101,7 @@ def _file_info(path: Any) -> Dict[str, Any]:
         "exists": True,
         "size_bytes": stat.st_size,
         "mtime": stat.st_mtime,
-        "sha256": _sha256(path),
+        "sha256": sha256_file(path),
     }
 
 
@@ -134,12 +128,14 @@ def _write_run_metadata(
     benchmark_spec: Dict[str, Any],
     dataset_manifest: Dict[str, Any] | None = None,
     output_paths: Dict[str, Any] | None = None,
+    runtime_resources: Dict[str, Any] | None = None,
 ) -> None:
     # run_metadata 记录可复现性信息：项目/SAM2 commit、Python/Torch、checkpoint hash 和输出路径。
     metadata = {
         "command": command,
         "baseline_name": baseline_name,
         "config_path": str(config.config_path),
+        "fingerprints": config.fingerprints,
         "benchmark_spec": benchmark_spec,
         "git": _git_info(config),
         "python": {
@@ -156,8 +152,58 @@ def _write_run_metadata(
             "manifest": dataset_manifest or {},
         },
         "outputs": {name: str(path) for name, path in (output_paths or {}).items()},
+        "runtime_resources": runtime_resources or {},
     }
     (output_dir / "run_metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _start_resource_monitor() -> Dict[str, Any]:
+    state: Dict[str, Any] = {"wall_start": time.perf_counter(), "cuda_available": False, "cuda_peak_memory_bytes": None}
+    try:
+        import torch
+
+        cuda_available = bool(torch.cuda.is_available())
+        state["cuda_available"] = cuda_available
+        if cuda_available:
+            torch.cuda.reset_peak_memory_stats()
+    except Exception as exc:
+        state["torch_error"] = str(exc)
+    return state
+
+
+def _safe_rate(count: int, wall_time_s: float) -> float:
+    if wall_time_s <= 0.0 or count <= 0:
+        return 0.0
+    return float(count) / wall_time_s
+
+
+def _finish_resource_monitor(
+    *,
+    state: Dict[str, Any],
+    expected_sample_count: int,
+    expected_eval_units: int,
+    row_count: int,
+) -> Dict[str, Any]:
+    wall_time_s = max(0.0, time.perf_counter() - float(state.get("wall_start", time.perf_counter())))
+    cuda_peak_memory_bytes = state.get("cuda_peak_memory_bytes")
+    if state.get("cuda_available"):
+        try:
+            import torch
+
+            cuda_peak_memory_bytes = int(torch.cuda.max_memory_allocated())
+        except Exception as exc:
+            state["torch_error"] = str(exc)
+    report = {
+        "wall_time_s": wall_time_s,
+        "samples_per_s": _safe_rate(int(expected_sample_count), wall_time_s),
+        "eval_units_per_s": _safe_rate(int(expected_eval_units), wall_time_s),
+        "rows_per_s": _safe_rate(int(row_count), wall_time_s),
+        "cuda_available": bool(state.get("cuda_available", False)),
+        "cuda_peak_memory_bytes": cuda_peak_memory_bytes,
+    }
+    if state.get("torch_error"):
+        report["torch_error"] = state["torch_error"]
+    return report
 
 
 def _count_error_records(path: Path) -> int:
@@ -389,6 +435,7 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
 
     output_dir = config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    resource_state = _start_resource_monitor()
 
     dataset = build_dataset_adapter(config).load(config)
     resolved_baseline_name, template_method = _resolve_method(config, command, baseline_name)
@@ -469,12 +516,19 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
         error_count=_count_error_records(error_log_path),
         failure_rate_threshold=float(getattr(config.runtime, "max_failure_rate", 0.05)),
     )
+    runtime_resources = _finish_resource_monitor(
+        state=resource_state,
+        expected_sample_count=len(dataset.samples),
+        expected_eval_units=expected_eval_units,
+        row_count=len(eval_rows),
+    )
     summary = {
         "command": command,
         "baseline_name": resolved_baseline_name,
         "dataset_manifest": dataset.manifest.to_dict(),
         "expected_sample_count": len(dataset.samples),
         **health,
+        "runtime_resources": runtime_resources,
         "mean": _mean_numeric(results),
         "std": _std_numeric(results),
         "per_seed": results,
@@ -517,6 +571,7 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
         benchmark_spec=benchmark_spec,
         dataset_manifest=dataset.manifest.to_dict(),
         output_paths=output_paths,
+        runtime_resources=runtime_resources,
     )
     _validate_evaluation_outputs(
         command=command,

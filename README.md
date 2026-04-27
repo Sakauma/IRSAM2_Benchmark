@@ -91,6 +91,26 @@ python scripts/run_5090_full_benchmark.py \
 
 `--rerun` 会强制重跑已完成组合；默认会跳过完整 artifacts。
 
+## 验证命令
+
+运行模型前，可以先检查单个 run 配置能否正确加载数据集：
+
+```bash
+python -m irsam2_benchmark.cli validate dataset \
+  --config artifacts/paper_5090/generated/run_configs/mask/tiny/nuaa_sirst_sam2_box_oracle.yaml
+```
+
+该命令只加载数据集，输出样本数、图片数、类别分布、标注协议分布、mask 面积统计和 MultiModal polygon 异常计数，不执行 SAM2 推理。
+
+完成某个 run 后，可以检查 artifact schema：
+
+```bash
+python -m irsam2_benchmark.cli validate artifacts \
+  --run-dir artifacts/paper_5090/runs/mask/tiny/mask_supervised/nuaa_sirst/sam2_box_oracle
+```
+
+该命令会检查关键 JSON 是否存在、结果行是否非空、health 字段是否完整、指标中是否出现 `NaN`/`Inf`，以及 `eval_unit` 是否和推理协议一致。
+
 ## 单条 baseline
 
 矩阵脚本会自动生成单 run YAML。需要手动复跑某个生成配置时，可以直接调用 CLI：
@@ -156,6 +176,8 @@ artifacts/
 - `eval_reports/rows.json`
 
 如果单样本失败，会写入 `eval_reports/error_log.jsonl`。
+
+`benchmark_spec.json` 和 `run_metadata.json` 会记录配置指纹。`summary.json` 和 `run_metadata.json` 会记录本次 run 的 wall time、吞吐和 CUDA peak memory。
 
 ## 分析
 

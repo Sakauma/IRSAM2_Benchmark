@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image
 
 from ..config import AppConfig
+from ..core.interfaces import DatasetAdapterProtocol
 from .masks import MASK_SOURCE_KEY, polygon_to_mask
 from .prompt_synthesis import connected_components, expand_box_xyxy, mask_derived_prompt_metadata, mask_to_point_prompt, mask_to_tight_box
 from .sample import Sample
@@ -685,7 +686,7 @@ def _target_scale_from_area(area: float) -> str:
     return "large"
 
 
-def build_dataset_adapter(config: AppConfig) -> DatasetAdapter:
+def build_dataset_adapter(config: AppConfig) -> DatasetAdapterProtocol:
     adapters: List[DatasetAdapter] = [
         MultiModalAdapter(),
         RBGTTinyIRAdapter(),

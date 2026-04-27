@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from .core.fingerprints import sha256_file
 from .core.interfaces import InferenceMode, PromptPolicy, PromptSource, PromptType, Track
 
 try:  # pragma: no cover - optional dependency
@@ -112,6 +113,7 @@ class AppConfig:
     runtime: RuntimeConfig
     evaluation: EvaluationConfig
     method: Dict[str, Any] = field(default_factory=dict)
+    fingerprints: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def dataset_root(self) -> Path:
@@ -173,6 +175,8 @@ def load_app_config(config_path: str | Path) -> AppConfig:
     # generated config 的项目根则是该 config 所在目录，绝对路径会在生成阶段写入。
     root = path.parent.parent if path.parent.name == "configs" else path.parent
     evaluation = raw.get("evaluation", {})
+    fingerprints = dict(raw.get("fingerprints", {}))
+    fingerprints["config_file_sha256"] = sha256_file(path)
     return AppConfig(
         root=root,
         config_path=path,
@@ -191,4 +195,5 @@ def load_app_config(config_path: str | Path) -> AppConfig:
             prompt_policy=_build_prompt_policy(evaluation["prompt_policy"]),
         ),
         method=raw.get("method", {}),
+        fingerprints=fingerprints,
     )

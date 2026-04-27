@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 import numpy as np
 
 from ..config import AppConfig
-from ..core.interfaces import InferenceMode
+from ..core.interfaces import BenchmarkMethodProtocol, InferenceMode
 from ..data.prompt_synthesis import (
     MASK_DERIVED_CENTROID_POINT_PROTOCOL,
     MASK_DERIVED_LOOSE_BOX_CENTROID_POINT_PROTOCOL,
@@ -191,7 +191,7 @@ CANONICAL_BASELINE_NAMES = (
 )
 
 
-def build_baseline_registry(config: AppConfig) -> Dict[str, BaseMethod]:
+def build_baseline_registry(config: AppConfig) -> Dict[str, BenchmarkMethodProtocol]:
     adapter = SAM2ModelAdapter(config)
     return {
         "bbox_rect": BBoxRectMaskBaseline(),

@@ -98,6 +98,9 @@ class Full5090BenchmarkTests(unittest.TestCase):
             self.assertEqual(config["runtime"]["reference_results_root"], str(root / "reference_results"))
             self.assertIn("/paper_5090/runs/mask/tiny", config["runtime"]["artifact_root"])
             self.assertIn("/paper_5090/logs/mask/tiny", manifest["records"][0]["log_path"])
+            self.assertIn("config_sha256", manifest["records"][0])
+            self.assertEqual(config["fingerprints"]["source_config"], str(config_path.resolve()))
+            self.assertEqual(config["fingerprints"]["source_config_sha256"], manifest["config_sha256"])
             self.assertEqual(manifest["config_mode"], "complete")
             self.assertEqual(manifest["config"], str(config_path.resolve()))
 

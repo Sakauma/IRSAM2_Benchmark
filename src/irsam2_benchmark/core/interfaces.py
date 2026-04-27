@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol
+
+if TYPE_CHECKING:
+    from ..config import AppConfig
+    from ..data.sample import Sample
 
 
 class InferenceMode(str, Enum):
@@ -74,3 +78,24 @@ class ArtifactRecord:
             "artifact_name": self.artifact_name,
             "metadata": self.metadata,
         }
+
+
+class BenchmarkMethodProtocol(Protocol):
+    inference_mode: InferenceMode
+
+    def predict_sample(self, sample: "Sample") -> Dict[str, Any]:
+        ...
+
+    def predict_samples(self, samples: List["Sample"]) -> Dict[str, Dict[str, Any]]:
+        ...
+
+
+class DatasetAdapterProtocol(Protocol):
+    adapter_name: str
+    notes: str
+
+    def can_handle(self, config: "AppConfig") -> bool:
+        ...
+
+    def load(self, config: "AppConfig") -> Any:
+        ...
