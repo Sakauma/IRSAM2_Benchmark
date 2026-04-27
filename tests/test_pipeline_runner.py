@@ -118,7 +118,7 @@ class PipelineRunnerSeedTests(unittest.TestCase):
             def fake_build_baseline_registry(_config):
                 token = (round(random.random(), 6), round(float(np.random.random()), 6))
                 method = DummyMethod(token)
-                return {"bbox_rect": method, "sam2_zero_shot": method}
+                return {"bbox_rect": method, "sam2_pretrained_box_prompt": method}
 
             def fake_evaluate_method(**kwargs):
                 called_tokens.append(kwargs["method"].token)
@@ -154,7 +154,7 @@ class PipelineRunnerSeedTests(unittest.TestCase):
 
             def fake_build_baseline_registry(_config):
                 method = DummyMethod()
-                return {"bbox_rect": method, "sam2_zero_shot": method}
+                return {"bbox_rect": method, "sam2_pretrained_box_prompt": method}
 
             def fake_evaluate_method(**_kwargs):
                 return {}, []
@@ -193,7 +193,7 @@ class PipelineRunnerSeedTests(unittest.TestCase):
 
             def fake_build_baseline_registry(_config):
                 method = DummyMethod()
-                return {"bbox_rect": method, "sam2_zero_shot": method}
+                return {"bbox_rect": method, "sam2_pretrained_box_prompt": method}
 
             def fake_evaluate_method(**kwargs):
                 return {"LatencyMs": 1.0}, [{"sample_id": "frame_0", "frame_id": "frame_0", "sequence_id": "seq", "LatencyMs": 1.0}]
@@ -232,7 +232,7 @@ class PipelineRunnerSeedTests(unittest.TestCase):
 
             def fake_build_baseline_registry(_config):
                 method = DummyMethod()
-                return {"bbox_rect": method, "sam2_zero_shot": method}
+                return {"bbox_rect": method, "sam2_pretrained_box_prompt": method}
 
             def fake_evaluate_method(**kwargs):
                 return {"LatencyMs": 1.0}, [{"sample_id": "frame_0", "frame_id": "frame_0", "sequence_id": "seq", "LatencyMs": 1.0}]
@@ -264,7 +264,7 @@ class PipelineRunnerSeedTests(unittest.TestCase):
 
             def fake_build_baseline_registry(_config):
                 method = DummyMethod()
-                return {"bbox_rect": method, "sam2_zero_shot": method}
+                return {"bbox_rect": method, "sam2_pretrained_box_prompt": method}
 
             def fake_evaluate_method(**kwargs):
                 return {"LatencyMs": 1.0}, [{"sample_id": "frame_0", "frame_id": "frame_0", "sequence_id": "seq", "LatencyMs": 1.0}]
@@ -282,6 +282,37 @@ class PipelineRunnerSeedTests(unittest.TestCase):
             self.assertEqual(metadata["config_path"], str(config.config_path))
             self.assertIn("git", metadata)
             self.assertIn("torch", metadata)
+
+    def test_run_command_canonicalizes_legacy_prompted_sam2_name(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = _build_test_config(root, save_visuals=False, seeds=[42], update_reference_results=False)
+            dataset = _build_test_dataset(root)
+
+            class DummyMethod:
+                inference_mode = InferenceMode.BOX
+
+            def fake_build_dataset_adapter(_config):
+                class DummyAdapter:
+                    def load(self, __config):
+                        return dataset
+
+                return DummyAdapter()
+
+            def fake_build_baseline_registry(_config):
+                method = DummyMethod()
+                return {"sam2_pretrained_box_prompt": method}
+
+            def fake_evaluate_method(**kwargs):
+                return {"LatencyMs": 1.0}, [{"sample_id": "frame_0", "frame_id": "frame_0", "sequence_id": "seq", "LatencyMs": 1.0}]
+
+            with patch("irsam2_benchmark.pipeline.runner.build_dataset_adapter", side_effect=fake_build_dataset_adapter), patch(
+                "irsam2_benchmark.pipeline.runner.build_baseline_registry", side_effect=fake_build_baseline_registry
+            ), patch("irsam2_benchmark.pipeline.runner.evaluate_method", side_effect=fake_evaluate_method):
+                run_command(config, "baseline", baseline_name="sam2_zero_shot")
+
+            metadata = json.loads((config.output_dir / "run_metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["baseline_name"], "sam2_pretrained_box_prompt")
 
 
 if __name__ == "__main__":

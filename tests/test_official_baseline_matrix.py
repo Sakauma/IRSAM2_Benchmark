@@ -72,7 +72,7 @@ def _complete_config(root: Path, artifact_root: Path, ckpt_path: Path) -> dict:
         },
         "methods": {
             "sam2_box_oracle": {
-                "baseline": "sam2_zero_shot",
+                "baseline": "sam2_pretrained_box_prompt",
                 "method": {"name": "sam2_box_oracle", "family": "sam2_oracle_prompt", "modality": "ir"},
                 "modules": {},
                 "evaluation": {

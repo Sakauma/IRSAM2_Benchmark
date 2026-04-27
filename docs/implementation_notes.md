@@ -17,9 +17,9 @@
   - point prompt
 - 增加了一等公民化的 SAM2 baseline：
   - `BBoxRectMaskBaseline`
-  - `ZeroShotSAM2`
+  - `PretrainedPromptedSAM2`
   - `NoPromptAutoMaskSAM2`
-  - `ZeroShotSAM2VideoPropagation`
+  - `PretrainedSAM2VideoPropagation`
 - 增加了 benchmark 治理字段：
   - `benchmark_version`
   - `split_version`
@@ -34,8 +34,8 @@
 - `sam_hq2` 环境下单元测试已通过
 - 在 `MultiModalCOCOClean` 上完成了 `bbox_rect` 的端到端 baseline 运行
 - 已完成真实 `SAM2` smoke 验证：
-  - `sam2_zero_shot`
-  - `sam2_zero_shot_point`
+  - `sam2_pretrained_box_prompt`
+  - `sam2_pretrained_point_prompt`
   - `sam2_no_prompt_auto_mask`
 
 ## 当前边界

@@ -1,7 +1,7 @@
 # 服务器完整 benchmark 模板。
 # 复制为 configs/server_benchmark_full.local.yaml 后填写真实路径。
 # 这个文件是当前推荐入口：路径、模型、数据集、方法、seed、batch、suite 和分析参数都在这里定义。
-# 注意：baseline 字段里的 sam2_zero_shot 表示“预训练 SAM2 不训练/不微调”，不表示 no-prompt。
+# 注意：sam2_pretrained_*_prompt 表示“预训练 SAM2 + 显式 prompt”，不表示 no-prompt。
 benchmark:
   # suite_name 写入 manifest，用来区分不同机器或不同实验批次。
   suite_name: "server_benchmark_full"
@@ -66,7 +66,7 @@ runtime_defaults:
   progress_update_interval_s: 1.0
 
 # full benchmark 正式运行时的通用 runtime 覆盖。
-# 这里的 seeds 默认只跑 [42]，因为 zero-shot SAM2 没有训练随机性。
+# 这里的 seeds 默认只跑 [42]，因为“预训练 SAM2 + 显式 prompt”没有训练随机性。
 runtime:
   device: "cuda"
   num_workers: 0
@@ -188,8 +188,8 @@ datasets:
 # method key 是实验矩阵使用的名字；baseline 是实际传给 main.py 的代码实现名。
 methods:
   sam2_box_oracle:
-    # zero_shot 指不训练/不微调；这里仍然使用 GT mask 派生的 box prompt。
-    baseline: "sam2_zero_shot"
+    # baseline 使用预训练权重，不训练/不微调；这里仍然使用 GT mask 派生的 box prompt。
+    baseline: "sam2_pretrained_box_prompt"
     method:
       name: "sam2_box_oracle"
       family: "sam2_oracle_prompt"
@@ -209,7 +209,7 @@ methods:
         notes: "SAM2 with adaptive loose box deterministically derived from the ground-truth mask."
     ablation_tags: ["sam2", "oracle_box", "mask_derived_prompt", "loose_box"]
   sam2_tight_box_oracle:
-    baseline: "sam2_zero_shot_tight_box"
+    baseline: "sam2_pretrained_tight_box_prompt"
     method:
       name: "sam2_tight_box_oracle"
       family: "sam2_oracle_prompt"
@@ -229,7 +229,7 @@ methods:
         notes: "SAM2 with tight box deterministically derived from the ground-truth mask."
     ablation_tags: ["sam2", "oracle_box", "mask_derived_prompt", "tight_box"]
   sam2_point_oracle:
-    baseline: "sam2_zero_shot_point"
+    baseline: "sam2_pretrained_point_prompt"
     method:
       name: "sam2_point_oracle"
       family: "sam2_oracle_prompt"
@@ -249,7 +249,7 @@ methods:
         notes: "SAM2 with foreground-centroid point deterministically derived from the ground-truth mask."
     ablation_tags: ["sam2", "oracle_point", "mask_derived_prompt", "centroid_point"]
   sam2_box_point_oracle:
-    baseline: "sam2_zero_shot_box_point"
+    baseline: "sam2_pretrained_box_point_prompt"
     method:
       name: "sam2_box_point_oracle"
       family: "sam2_oracle_prompt"

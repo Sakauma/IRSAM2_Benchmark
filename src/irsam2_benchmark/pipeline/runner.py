@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from ..baselines import build_baseline_registry
+from ..baselines import build_baseline_registry, canonical_baseline_name
 from ..config import AppConfig
 from ..core.interfaces import ArtifactRecord, InferenceMode, PipelineStage, PromptPolicy, PromptSource, PromptType
 from ..data import build_dataset_adapter
@@ -398,9 +398,13 @@ def _resolve_method(config: AppConfig, command: str, baseline_name: Optional[str
     if command == "baseline":
         if baseline_name is None:
             raise RuntimeError("baseline_name is required for the baseline command.")
-        return baseline_name, baselines[baseline_name]
+        resolved_name = canonical_baseline_name(baseline_name)
+        if resolved_name not in baselines:
+            valid = ", ".join(sorted({canonical_baseline_name(name) for name in baselines}))
+            raise RuntimeError(f"Unknown baseline {baseline_name!r}. Valid baselines: {valid}")
+        return resolved_name, baselines[resolved_name]
     if command == "evaluate":
-        return "sam2_zero_shot", baselines["sam2_zero_shot"]
+        return "sam2_pretrained_box_prompt", baselines["sam2_pretrained_box_prompt"]
     raise ValueError(f"Unknown command: {command}")
 
 

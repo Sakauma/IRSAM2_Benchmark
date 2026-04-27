@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from .analysis import run_analysis
+from .baselines import CANONICAL_BASELINE_NAMES
 from .config import load_app_config
 from .pipeline.runner import run_command
 
@@ -29,20 +30,8 @@ def build_parser() -> argparse.ArgumentParser:
             child.add_argument(
                 "--baseline",
                 required=True,
-                choices=[
-                    "bbox_rect",
-                    "sam2_zero_shot",
-                    "sam2_zero_shot_tight_box",
-                    "sam2_zero_shot_point",
-                    "sam2_zero_shot_box_point",
-                    "sam2_no_prompt_auto_mask",
-                    "sam2_physics_auto_prompt",
-                    "sam2_video_propagation",
-                    "reference_adaptation",
-                    "reference_pseudo",
-                    "reference_student",
-                    "reference_quantized_student",
-                ],
+                metavar="NAME",
+                help="Baseline name. Canonical names: " + ", ".join(CANONICAL_BASELINE_NAMES),
             )
     return parser
 

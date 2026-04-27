@@ -34,7 +34,7 @@ class BaseMethod:
     # runner 会根据 inference_mode 选择对应评估协议。
     name = "base"
     family = "base"
-    inference_mode = InferenceMode.ZERO_SHOT
+    inference_mode = InferenceMode.PROMPTED
 
     def predict_sample(self, sample: Sample) -> Dict[str, Any]:
         raise NotImplementedError
@@ -56,8 +56,8 @@ class BBoxRectMaskBaseline(BaseMethod):
         return {"mask": box_to_mask(box, sample.height, sample.width), "score": 1.0}
 
 
-class ZeroShotSAM2(BaseMethod):
-    name = "ZeroShotSAM2"
+class PretrainedPromptedSAM2(BaseMethod):
+    name = "PretrainedPromptedSAM2"
     family = "sam2"
 
     def __init__(self, adapter: SAM2ModelAdapter, prompt_mode: InferenceMode, box_variant: str = "loose"):
@@ -100,7 +100,7 @@ class ZeroShotSAM2(BaseMethod):
         return payload
 
     def _predict_kwargs_and_prompt(self, sample: Sample) -> tuple[Dict[str, Any], Dict[str, Any]]:
-        # sam2_zero_shot 不是 no-prompt；它按 inference_mode 传入 box、point 或 box+point。
+        # pretrained prompted SAM2 按 inference_mode 传入 box、point 或 box+point；它不是 no-prompt。
         kwargs: Dict[str, Any] = {"multimask_output": self.inference_mode == InferenceMode.MULTI_MASK}
         box = self._sample_box(sample)
         point = sample.point_prompt
@@ -120,7 +120,7 @@ class ZeroShotSAM2(BaseMethod):
             kwargs["box"] = box
             prompt = self._prompt_payload(sample, box=box)
         else:
-            raise ValueError(f"Unsupported zero-shot prompt mode: {self.inference_mode.value}")
+            raise ValueError(f"Unsupported pretrained prompted SAM2 mode: {self.inference_mode.value}")
         return kwargs, prompt
 
     def _prediction_from_result(self, result: Dict[str, Any], prompt: Dict[str, Any]) -> Dict[str, Any]:
@@ -249,8 +249,8 @@ class PhysicsAutoPromptSAM2(BaseMethod):
         return {"mask": masks[best_idx].astype(np.float32), "score": float(scores[best_idx]), "prompt": prompt}
 
 
-class ZeroShotSAM2VideoPropagation(BaseMethod):
-    name = "ZeroShotSAM2VideoPropagation"
+class PretrainedSAM2VideoPropagation(BaseMethod):
+    name = "PretrainedSAM2VideoPropagation"
     family = "sam2"
     inference_mode = InferenceMode.VIDEO_PROPAGATION
 
@@ -278,19 +278,51 @@ class ArtifactBackedReferenceMethod(BaseMethod):
         raise RuntimeError(f"{self.name} is a reference-stage placeholder. Plug in a trained artifact before using it.")
 
 
+CANONICAL_BASELINE_NAMES = (
+    "bbox_rect",
+    "sam2_pretrained_box_prompt",
+    "sam2_pretrained_tight_box_prompt",
+    "sam2_pretrained_point_prompt",
+    "sam2_pretrained_box_point_prompt",
+    "sam2_no_prompt_auto_mask",
+    "sam2_physics_auto_prompt",
+    "sam2_video_propagation",
+    "reference_adaptation",
+    "reference_pseudo",
+    "reference_student",
+    "reference_quantized_student",
+)
+
+LEGACY_BASELINE_ALIASES = {
+    # 兼容旧 YAML 和历史命令。新配置不要再使用这些名字，因为 zero-shot 容易被误解为 no-prompt。
+    "sam2_zero_shot": "sam2_pretrained_box_prompt",
+    "sam2_zero_shot_tight_box": "sam2_pretrained_tight_box_prompt",
+    "sam2_zero_shot_point": "sam2_pretrained_point_prompt",
+    "sam2_zero_shot_box_point": "sam2_pretrained_box_point_prompt",
+}
+
+
+def canonical_baseline_name(name: str) -> str:
+    return LEGACY_BASELINE_ALIASES.get(name, name)
+
+
 def build_baseline_registry(config: AppConfig) -> Dict[str, BaseMethod]:
     adapter = SAM2ModelAdapter(config)
-    return {
+    canonical: Dict[str, BaseMethod] = {
         "bbox_rect": BBoxRectMaskBaseline(),
-        "sam2_zero_shot": ZeroShotSAM2(adapter, prompt_mode=InferenceMode.BOX),
-        "sam2_zero_shot_tight_box": ZeroShotSAM2(adapter, prompt_mode=InferenceMode.BOX, box_variant="tight"),
-        "sam2_zero_shot_point": ZeroShotSAM2(adapter, prompt_mode=InferenceMode.POINT),
-        "sam2_zero_shot_box_point": ZeroShotSAM2(adapter, prompt_mode=InferenceMode.BOX_POINT),
+        "sam2_pretrained_box_prompt": PretrainedPromptedSAM2(adapter, prompt_mode=InferenceMode.BOX),
+        "sam2_pretrained_tight_box_prompt": PretrainedPromptedSAM2(adapter, prompt_mode=InferenceMode.BOX, box_variant="tight"),
+        "sam2_pretrained_point_prompt": PretrainedPromptedSAM2(adapter, prompt_mode=InferenceMode.POINT),
+        "sam2_pretrained_box_point_prompt": PretrainedPromptedSAM2(adapter, prompt_mode=InferenceMode.BOX_POINT),
         "sam2_no_prompt_auto_mask": NoPromptAutoMaskSAM2(adapter),
         "sam2_physics_auto_prompt": PhysicsAutoPromptSAM2(config, adapter),
-        "sam2_video_propagation": ZeroShotSAM2VideoPropagation(adapter, prompt_policy=config.evaluation.prompt_policy),
+        "sam2_video_propagation": PretrainedSAM2VideoPropagation(adapter, prompt_policy=config.evaluation.prompt_policy),
         "reference_adaptation": ArtifactBackedReferenceMethod("ReferenceAdaptation", "reference", InferenceMode.ADAPTED_TEACHER),
         "reference_pseudo": ArtifactBackedReferenceMethod("ReferencePseudo", "reference", InferenceMode.ADAPTED_TEACHER),
         "reference_student": ArtifactBackedReferenceMethod("ReferenceStudent", "reference", InferenceMode.DISTILLED_STUDENT),
         "reference_quantized_student": ArtifactBackedReferenceMethod("ReferenceQuantizedStudent", "reference", InferenceMode.QUANTIZED_STUDENT),
+    }
+    return {
+        **canonical,
+        **{legacy: canonical[canonical_name] for legacy, canonical_name in LEGACY_BASELINE_ALIASES.items()},
     }

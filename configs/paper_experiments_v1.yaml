@@ -133,8 +133,8 @@ methods:
         notes: "Oracle loose-box rectangle mask baseline."
     ablation_tags: ["oracle_box"]
   sam2_box_oracle:
-    # zero_shot 表示 SAM2 不训练/不微调；这里仍使用 GT mask 派生的 box prompt。
-    baseline: "sam2_zero_shot"
+    # baseline 使用预训练权重，不训练/不微调；这里仍使用 GT mask 派生的 box prompt。
+    baseline: "sam2_pretrained_box_prompt"
     method:
       name: "sam2_box_oracle"
       family: "sam2_oracle_prompt"
@@ -154,7 +154,7 @@ methods:
         notes: "SAM2 with adaptive loose box deterministically derived from the ground-truth mask."
     ablation_tags: ["sam2", "oracle_box", "mask_derived_prompt", "loose_box"]
   sam2_tight_box_oracle:
-    baseline: "sam2_zero_shot_tight_box"
+    baseline: "sam2_pretrained_tight_box_prompt"
     method:
       name: "sam2_tight_box_oracle"
       family: "sam2_oracle_prompt"
@@ -174,7 +174,7 @@ methods:
         notes: "SAM2 with tight box deterministically derived from the ground-truth mask."
     ablation_tags: ["sam2", "oracle_box", "mask_derived_prompt", "tight_box"]
   sam2_point_oracle:
-    baseline: "sam2_zero_shot_point"
+    baseline: "sam2_pretrained_point_prompt"
     method:
       name: "sam2_point_oracle"
       family: "sam2_oracle_prompt"
@@ -194,7 +194,7 @@ methods:
         notes: "SAM2 with foreground-centroid point deterministically derived from the ground-truth mask."
     ablation_tags: ["sam2", "oracle_point", "mask_derived_prompt", "centroid_point"]
   sam2_box_point_oracle:
-    baseline: "sam2_zero_shot_box_point"
+    baseline: "sam2_pretrained_box_point_prompt"
     method:
       name: "sam2_box_point_oracle"
       family: "sam2_oracle_prompt"

@@ -144,10 +144,10 @@ python scripts/run_5090_full_benchmark.py --config configs/server_benchmark_full
 如果只想手动跑某个配置，可以直接使用 CLI：
 
 ```bash
-python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_zero_shot
-python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_zero_shot_tight_box
-python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_zero_shot_point
-python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_zero_shot_box_point
+python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_pretrained_box_prompt
+python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_pretrained_tight_box_prompt
+python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_pretrained_point_prompt
+python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_pretrained_box_point_prompt
 python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_no_prompt_auto_mask
 python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_physics_auto_prompt
 ```

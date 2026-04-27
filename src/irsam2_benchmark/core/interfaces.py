@@ -6,12 +6,12 @@ from typing import Any, Dict, Optional
 
 
 class InferenceMode(str, Enum):
+    PROMPTED = "prompted"
     BOX = "box"
     POINT = "point"
     BOX_POINT = "box+point"
     SINGLE_MASK = "single_mask"
     MULTI_MASK = "multi_mask"
-    ZERO_SHOT = "zero_shot"
     NO_PROMPT_AUTO_MASK = "no_prompt_auto_mask"
     VIDEO_PROPAGATION = "video_propagation"
     ADAPTED_TEACHER = "adapted_teacher"

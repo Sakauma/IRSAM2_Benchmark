@@ -61,7 +61,7 @@ def _write_matrix(path: Path) -> None:
     payload = {
         "methods": {
             "bbox_rect": {"baseline": "bbox_rect"},
-            "sam2_box_oracle": {"baseline": "sam2_zero_shot"},
+            "sam2_box_oracle": {"baseline": "sam2_pretrained_box_prompt"},
         },
         "datasets": {
             "dummy_dataset": {"config": {"dataset_id": "dummy"}},

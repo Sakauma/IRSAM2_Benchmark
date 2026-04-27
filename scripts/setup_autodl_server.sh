@@ -65,5 +65,5 @@ echo "[setup] MultiModal dataset root: ${MULTIMODAL_DIR}"
 echo "[setup] RBGT-Tiny dataset root: ${RBGT_DIR}"
 echo
 echo "[next] source ${ENV_FILE}"
-echo "[next] bash scripts/run_autodl_smoke.sh multimodal sam2_zero_shot"
-echo "[next] bash scripts/run_autodl_smoke.sh rbgt sam2_zero_shot"
+echo "[next] bash scripts/run_autodl_smoke.sh multimodal sam2_pretrained_box_prompt"
+echo "[next] bash scripts/run_autodl_smoke.sh rbgt sam2_pretrained_box_prompt"

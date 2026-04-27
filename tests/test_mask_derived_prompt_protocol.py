@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from irsam2_benchmark.baselines.methods import ZeroShotSAM2
+from irsam2_benchmark.baselines.methods import PretrainedPromptedSAM2
 from irsam2_benchmark.core.interfaces import InferenceMode
 from irsam2_benchmark.data.adapters import _samples_from_generic_mask
 from irsam2_benchmark.data.prompt_synthesis import (
@@ -71,11 +71,11 @@ class MaskDerivedPromptProtocolTests(unittest.TestCase):
             )[0]
 
             tight_adapter = DummySAM2Adapter()
-            tight_method = ZeroShotSAM2(tight_adapter, prompt_mode=InferenceMode.BOX, box_variant="tight")
+            tight_method = PretrainedPromptedSAM2(tight_adapter, prompt_mode=InferenceMode.BOX, box_variant="tight")
             tight_pred = tight_method.predict_sample(sample)
 
             loose_adapter = DummySAM2Adapter()
-            loose_method = ZeroShotSAM2(loose_adapter, prompt_mode=InferenceMode.BOX, box_variant="loose")
+            loose_method = PretrainedPromptedSAM2(loose_adapter, prompt_mode=InferenceMode.BOX, box_variant="loose")
             loose_pred = loose_method.predict_sample(sample)
 
             self.assertEqual(tight_adapter.kwargs["box"], sample.bbox_tight)

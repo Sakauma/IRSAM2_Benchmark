@@ -26,7 +26,7 @@ execution:
   pytorch_cuda_alloc_conf: "expandable_segments:True"
 
 # 可选的机器级 runtime 覆盖。
-# zero-shot SAM2 不训练模型，所以默认只需要一个确定性 seed。
+# “预训练 SAM2 + 显式 prompt”不训练模型，所以默认只需要一个确定性 seed。
 runtime:
   seeds: [42]
   # 如果显存不足，可以在这里临时覆盖批大小。

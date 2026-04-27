@@ -27,9 +27,9 @@ benchmark 平台本身已经可用。
 - 面向 mask-only 数据集的 prompt synthesis
 - baseline registry
 - `bbox_rect`
-- `sam2_zero_shot`
-- `sam2_zero_shot_point`
-- `sam2_zero_shot_box_point`
+- `sam2_pretrained_box_prompt`
+- `sam2_pretrained_point_prompt`
+- `sam2_pretrained_box_point_prompt`
 - `sam2_no_prompt_auto_mask`
 - `sam2_video_propagation` 接口
 - 冻结的 artifact / report schema
@@ -119,8 +119,8 @@ source .autodl_env.sh
 
 ```bash
 bash scripts/run_autodl_smoke.sh multimodal bbox_rect
-bash scripts/run_autodl_smoke.sh multimodal sam2_zero_shot
-bash scripts/run_autodl_smoke.sh rbgt sam2_zero_shot
+bash scripts/run_autodl_smoke.sh multimodal sam2_pretrained_box_prompt
+bash scripts/run_autodl_smoke.sh rbgt sam2_pretrained_box_prompt
 ```
 
 如果需要指定 Python 解释器：
