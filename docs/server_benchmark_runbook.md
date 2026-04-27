@@ -34,6 +34,12 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install -e .
 ```
 
+初始化 SAM2 submodule：
+
+```bash
+git submodule update --init --recursive
+```
+
 确认 GPU 可用：
 
 ```bash

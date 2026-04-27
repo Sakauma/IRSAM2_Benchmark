@@ -24,7 +24,13 @@ pip install -e .
 
 如果 CUDA 版本不是 `cu124`，请用 PyTorch 官网生成的安装命令替换第一行。
 
-SAM2 官方源码不放在本仓库内。你需要保留一个 `facebookresearch/sam2` 仓库，并在 YAML 中配置它的位置。
+SAM2 官方源码以 Git submodule 形式固定在 `sam2/`。首次 clone 后执行：
+
+```bash
+git submodule update --init --recursive
+```
+
+如果需要使用外部 SAM2 checkout，也可以在 YAML 的 `paths.sam2.repo` 中覆盖路径。
 
 ## 配置
 
@@ -113,7 +119,7 @@ python -m irsam2_benchmark.cli run baseline \
 - `IRSTD-1K`
 - `MultiModal`
 
-`MultiModal` 使用 `img/ + label/` 结构，平台会把 JSON polygon 解码为 mask。
+`MultiModal` 使用 `img/ + label/` 结构，平台会把 JSON polygon 解码为 mask。当前协议对每个 instance 只使用第一个有效 polygon；多 polygon 合并需要单独声明为新协议。
 
 `RBGT-Tiny` 只使用红外分支和 COCO 风格标注。它是补充 suite，不和四个 mask 主数据集混在同一主表中解释。
 

@@ -62,6 +62,7 @@ runtime_defaults:
   image_batch_size: 1
   auto_mask_points_per_batch: 64
   batch_oom_fallback: true
+  max_failure_rate: 0.05
   show_progress: true
   progress_update_interval_s: 1.0
 

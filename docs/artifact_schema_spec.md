@@ -11,6 +11,19 @@
 
 一个 baseline run 只有在 `eval_reports/rows.json` 非空且 `summary.json` 中的 `mean` 非空时，才应被矩阵 runner 视为完成。所有样本都失败时必须保留 `eval_reports/error_log.jsonl`，并让上层 runner 记录失败。
 
+`summary.json` 还应记录 run health 字段：
+
+- `expected_sample_count`
+- `expected_eval_units`
+- `expected_row_count`
+- `row_count`
+- `error_count`
+- `missing_row_count`
+- `failure_rate`
+- `failure_rate_threshold`
+
+当 `failure_rate` 大于 `failure_rate_threshold` 时，矩阵 runner 应把该 run 视为失败或不完整。
+
 `artifact_manifest.json` 至少需要记录：
 
 - stage 名称
@@ -39,3 +52,4 @@
 - `analysis/checkpoint_sweep_summary.csv`
 
 `run_manifest_latest.*` 汇总成功、失败、dry-run 和断点续跑跳过的组合。`run_failures_latest.*` 记录失败组合，包含 suite、checkpoint、数据集、方法、输出目录、命令、返回码和错误消息。
+每个子进程还应写入 `logs/{suite}/{checkpoint}/{dataset}_{method}.log`；失败记录应包含 `log_path` 和日志尾部摘要。

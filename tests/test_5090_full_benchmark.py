@@ -5,6 +5,8 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from subprocess import CompletedProcess
+from unittest.mock import patch
 
 import yaml
 
@@ -21,17 +23,31 @@ def _load_runner():
 def _write_full_config(path: Path, artifact_root: Path) -> None:
     example_path = Path(__file__).resolve().parents[1] / "configs" / "server_benchmark_full.example.yaml"
     payload = yaml.safe_load(example_path.read_text(encoding="utf-8"))
+    sam2_repo = path.parent / "sam2"
+    checkpoint_root = path.parent / "checkpoints"
+    sam2_repo.mkdir()
+    checkpoint_root.mkdir()
+    for ckpt_name in (
+        "sam2.1_hiera_tiny.pt",
+        "sam2.1_hiera_small.pt",
+        "sam2.1_hiera_base_plus.pt",
+        "sam2.1_hiera_large.pt",
+    ):
+        (checkpoint_root / ckpt_name).write_text("checkpoint", encoding="utf-8")
+    dataset_roots = {
+        "nuaa_sirst": path.parent / "datasets" / "NUAA-SIRST",
+        "nudt_sirst": path.parent / "datasets" / "NUDT-SIRST",
+        "irstd_1k": path.parent / "datasets" / "IRSTD-1K",
+        "multimodal": path.parent / "datasets" / "MultiModal",
+        "rbgt_tiny_ir_box": path.parent / "datasets" / "RBGT-Tiny",
+    }
+    for dataset_root in dataset_roots.values():
+        dataset_root.mkdir(parents=True)
     payload["paths"] = {
-        "sam2": {"repo": "/server/sam2", "checkpoint_root": "/server/checkpoints"},
+        "sam2": {"repo": str(sam2_repo), "checkpoint_root": str(checkpoint_root)},
         "artifacts": {"root": str(artifact_root)},
         "reference_results": {"root": str(path.parent / "reference_results")},
-        "datasets": {
-            "nuaa_sirst": "/data/NUAA-SIRST",
-            "nudt_sirst": "/data/NUDT-SIRST",
-            "irstd_1k": "/data/IRSTD-1K",
-            "multimodal": "/data/MultiModal",
-            "rbgt_tiny_ir_box": "/data/RBGT-Tiny",
-        },
+        "datasets": {key: str(value) for key, value in dataset_roots.items()},
     }
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
@@ -74,13 +90,14 @@ class Full5090BenchmarkTests(unittest.TestCase):
             self.assertEqual(manifest["failed_count"], 0)
             first_config = Path(manifest["records"][0]["config_path"])
             config = yaml.safe_load(first_config.read_text(encoding="utf-8"))
-            self.assertEqual(config["model"]["repo"], "/server/sam2")
-            self.assertEqual(config["model"]["ckpt"], "/server/checkpoints/sam2.1_hiera_tiny.pt")
+            self.assertEqual(config["model"]["repo"], str(root / "sam2"))
+            self.assertEqual(config["model"]["ckpt"], str(root / "checkpoints" / "sam2.1_hiera_tiny.pt"))
             self.assertEqual(config["runtime"]["seeds"], [42])
             self.assertEqual(config["runtime"]["image_batch_size"], 32)
             self.assertEqual(config["runtime"]["auto_mask_points_per_batch"], 256)
             self.assertEqual(config["runtime"]["reference_results_root"], str(root / "reference_results"))
             self.assertIn("/paper_5090/runs/mask/tiny", config["runtime"]["artifact_root"])
+            self.assertIn("/paper_5090/logs/mask/tiny", manifest["records"][0]["log_path"])
             self.assertEqual(manifest["config_mode"], "complete")
             self.assertEqual(manifest["config"], str(config_path.resolve()))
 
@@ -167,6 +184,62 @@ class Full5090BenchmarkTests(unittest.TestCase):
 
             (run_dir / "eval_reports" / "rows.json").write_text(json.dumps([{"sample_id": "s0", "mIoU": 0.5}]), encoding="utf-8")
             self.assertTrue(runner._run_is_complete(run_dir))
+
+            (run_dir / "summary.json").write_text(
+                json.dumps({"mean": {"mIoU": 0.5}, "std": {"mIoU": 0.0}, "failure_rate": 0.5, "failure_rate_threshold": 0.05}),
+                encoding="utf-8",
+            )
+            self.assertFalse(runner._run_is_complete(run_dir))
+
+    def test_config_validation_reports_missing_dataset_root(self):
+        runner = _load_runner()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "server_benchmark_full.local.yaml"
+            _write_full_config(config_path, root / "artifacts")
+            payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            payload["paths"]["datasets"]["nuaa_sirst"] = str(root / "missing" / "NUAA-SIRST")
+            config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "Dataset root does not exist for nuaa_sirst"):
+                runner.main(["--config", str(config_path), "--suites", "mask", "--checkpoints", "tiny", "--modes", "box", "--dry-run"])
+
+    def test_failed_run_records_log_path_and_tail(self):
+        runner = _load_runner()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "server_benchmark_full.local.yaml"
+            _write_full_config(config_path, root / "artifacts")
+
+            def fake_run_subprocess(command, env, log_path):
+                del command, env
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_path.write_text("first line\nlast failure line\n", encoding="utf-8")
+                return CompletedProcess(args=[], returncode=7)
+
+            with patch.object(runner._full_runner, "_run_subprocess", side_effect=fake_run_subprocess):
+                self.assertEqual(
+                    runner.main(
+                        [
+                            "--config",
+                            str(config_path),
+                            "--suites",
+                            "mask",
+                            "--checkpoints",
+                            "tiny",
+                            "--modes",
+                            "box",
+                            "--no-analysis",
+                            "--stop-on-error",
+                        ]
+                    ),
+                    1,
+                )
+
+            failures = json.loads((root / "artifacts" / "paper_5090" / "run_failures_latest.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(failures), 1)
+            self.assertTrue(failures[0]["log_path"].endswith("logs/mask/tiny/nuaa_sirst_sam2_box_oracle.log"))
+            self.assertIn("last failure line", failures[0]["log_tail"])
 
 
 if __name__ == "__main__":

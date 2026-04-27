@@ -14,7 +14,15 @@ from irsam2_benchmark.data.sample import Sample
 from irsam2_benchmark.pipeline.runner import run_command, set_global_seed
 
 
-def _build_test_config(root: Path, *, save_visuals: bool, seeds: list[int], update_reference_results: bool = True, visual_limit: int = 24):
+def _build_test_config(
+    root: Path,
+    *,
+    save_visuals: bool,
+    seeds: list[int],
+    update_reference_results: bool = True,
+    visual_limit: int = 24,
+    max_failure_rate: float = 0.05,
+):
     config_path = root / "config.json"
     config_path.write_text(
         json.dumps(
@@ -34,6 +42,7 @@ def _build_test_config(root: Path, *, save_visuals: bool, seeds: list[int], upda
                     "visual_limit": visual_limit,
                     "update_reference_results": update_reference_results,
                     "seeds": seeds,
+                    "max_failure_rate": max_failure_rate,
                 },
                 "evaluation": {
                     "benchmark_version": "v1",
@@ -167,6 +176,64 @@ class PipelineRunnerSeedTests(unittest.TestCase):
             rows = json.loads((config.output_dir / "eval_reports" / "rows.json").read_text(encoding="utf-8"))
             self.assertEqual(summary["mean"], {})
             self.assertEqual(rows, [])
+            self.assertEqual(summary["expected_row_count"], 1)
+            self.assertEqual(summary["row_count"], 0)
+            self.assertEqual(summary["failure_rate"], 1.0)
+
+    def test_run_command_fails_when_missing_rows_exceed_failure_rate_threshold(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config = _build_test_config(root, save_visuals=False, seeds=[42], update_reference_results=False, max_failure_rate=0.05)
+            dataset = _build_test_dataset(root)
+            dataset.samples.append(
+                Sample(
+                    image_path=root / "dummy_2.png",
+                    sample_id="frame_1::foreground::generic_binary_mask",
+                    frame_id="frame_1",
+                    sequence_id="seq",
+                    frame_index=1,
+                    temporal_key="frame_1",
+                    width=4,
+                    height=4,
+                    category="foreground",
+                    target_scale="small",
+                    device_source="cam",
+                    annotation_protocol_flag="mask",
+                    supervision_type="mask",
+                    bbox_tight=[0, 0, 2, 2],
+                    bbox_loose=[0, 0, 2, 2],
+                    point_prompt=[0.5, 0.5],
+                    mask_array=np.ones((4, 4), dtype=np.float32),
+                )
+            )
+
+            class DummyMethod:
+                inference_mode = InferenceMode.BOX
+
+            def fake_build_dataset_adapter(_config):
+                class DummyAdapter:
+                    def load(self, __config):
+                        return dataset
+
+                return DummyAdapter()
+
+            def fake_build_baseline_registry(_config):
+                method = DummyMethod()
+                return {"bbox_rect": method, "sam2_pretrained_box_prompt": method}
+
+            def fake_evaluate_method(**_kwargs):
+                return {"LatencyMs": 1.0}, [{"sample_id": "frame_0", "frame_id": "frame_0", "sequence_id": "seq", "LatencyMs": 1.0}]
+
+            with patch("irsam2_benchmark.pipeline.runner.build_dataset_adapter", side_effect=fake_build_dataset_adapter), patch(
+                "irsam2_benchmark.pipeline.runner.build_baseline_registry", side_effect=fake_build_baseline_registry
+            ), patch("irsam2_benchmark.pipeline.runner.evaluate_method", side_effect=fake_evaluate_method):
+                with self.assertRaisesRegex(RuntimeError, "failure_rate=0.5000 exceeds threshold=0.0500"):
+                    run_command(config, "baseline", baseline_name="bbox_rect")
+
+            summary = json.loads((config.output_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["expected_row_count"], 2)
+            self.assertEqual(summary["row_count"], 1)
+            self.assertEqual(summary["missing_row_count"], 1)
 
     def test_run_command_saves_visuals_when_enabled(self):
         with tempfile.TemporaryDirectory() as temp_dir:

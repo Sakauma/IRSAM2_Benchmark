@@ -76,6 +76,7 @@ class RuntimeConfig:
     image_batch_size: int = 1
     auto_mask_points_per_batch: int = 64
     batch_oom_fallback: bool = True
+    max_failure_rate: float = 0.05
     show_progress: bool = True
     progress_update_interval_s: float = 1.0
 

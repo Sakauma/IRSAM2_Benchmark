@@ -130,6 +130,41 @@ class MultiModalLazyMaskTests(unittest.TestCase):
             self.assertEqual(dataset.manifest.image_count, 1)
             self.assertEqual(dataset.samples[0].image_path.suffix, ".jpg")
 
+    def test_multimodal_uses_first_valid_polygon_when_instance_has_multiple_polygons(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            img_dir = root / "img"
+            label_dir = root / "label"
+            img_dir.mkdir()
+            label_dir.mkdir()
+            Image.fromarray(np.zeros((10, 10), dtype=np.uint8)).save(img_dir / "frame_001.png")
+            first_polygon = [1, 1, 4, 1, 4, 4, 1, 4]
+            second_polygon = [6, 6, 8, 6, 8, 8, 6, 8]
+            (label_dir / "frame_001.json").write_text(
+                json.dumps(
+                    {
+                        "detection": {
+                            "instances": [
+                                {
+                                    "category": "drone",
+                                    "mask": [first_polygon, second_polygon],
+                                }
+                            ]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = load_app_config(self._write_config(root))
+            dataset = build_dataset_adapter(config).load(config)
+            sample = dataset.samples[0]
+
+            self.assertEqual(sample.metadata["mask_source"]["points"], [float(value) for value in first_polygon])
+            gt_mask = sample_mask_array(sample)
+            self.assertGreater(float(gt_mask[2, 2]), 0.0)
+            self.assertEqual(float(gt_mask[7, 7]), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

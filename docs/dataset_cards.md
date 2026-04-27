@@ -37,7 +37,7 @@
 - `SAM2` 所需的三通道输入只能由单通道红外图像复制得到
 - 不允许读取真实 RGB 图像作为输入或对比
 - `RBGT-Tiny` 只使用红外分支和 box 标注
-- `MultiModal` 使用 `img/ + label/` 结构，通过 `MultiModalAdapter` 解码 JSON polygon 为 mask
+- `MultiModal` 使用 `img/ + label/` 结构，通过 `MultiModalAdapter` 解码 JSON polygon 为 mask。当前协议对单个 instance 只使用第一个有效 polygon，不合并同一 instance 下的多个 polygon。
 
 ## 通用 Image+Mask 策略
 

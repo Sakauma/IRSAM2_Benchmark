@@ -167,27 +167,68 @@ def _count_error_records(path: Path) -> int:
         return sum(1 for line in handle if line.strip())
 
 
+def _expected_eval_units(samples: List[Any], inference_mode: InferenceMode) -> int:
+    if inference_mode == InferenceMode.NO_PROMPT_AUTO_MASK:
+        return len(build_image_view(samples))
+    return len(samples)
+
+
+def _build_run_health(
+    *,
+    expected_eval_units: int,
+    seed_count: int,
+    row_count: int,
+    error_count: int,
+    failure_rate_threshold: float,
+) -> Dict[str, Any]:
+    expected_row_count = max(0, int(expected_eval_units) * max(1, int(seed_count)))
+    missing_row_count = max(0, expected_row_count - int(row_count))
+    failure_rate = 0.0 if expected_row_count <= 0 else missing_row_count / float(expected_row_count)
+    return {
+        "expected_eval_units": int(expected_eval_units),
+        "expected_row_count": expected_row_count,
+        "row_count": int(row_count),
+        "error_count": int(error_count),
+        "missing_row_count": missing_row_count,
+        "failure_rate": failure_rate,
+        "failure_rate_threshold": float(failure_rate_threshold),
+    }
+
+
 def _validate_evaluation_outputs(
     *,
     command: str,
     config: AppConfig,
-    sample_count: int,
-    eval_rows: List[Dict[str, Any]],
-    error_log_path: Path,
+    health: Dict[str, Any],
 ) -> None:
     # baseline 至少应产生一行评估结果。
     # 如果全失败但进程正常返回，这里会把 silent failure 提升成显式错误。
     if command != "baseline":
         return
-    if sample_count <= 0:
+    expected_row_count = int(health["expected_row_count"])
+    row_count = int(health["row_count"])
+    error_count = int(health["error_count"])
+    failure_rate = float(health["failure_rate"])
+    threshold = float(health["failure_rate_threshold"])
+    if expected_row_count <= 0:
         raise RuntimeError(f"{command} loaded zero samples for dataset_id={config.dataset.dataset_id!r}.")
-    if eval_rows:
+    if row_count <= 0:
+        message = (
+            f"{command} produced zero evaluation rows for dataset_id={config.dataset.dataset_id!r} "
+            f"with expected_row_count={expected_row_count} and error_count={error_count}."
+        )
+        error_log_path = config.output_dir / "eval_reports" / "error_log.jsonl"
+        if error_log_path.exists():
+            message += f" See error log: {error_log_path}"
+        raise RuntimeError(message)
+    if failure_rate <= threshold:
         return
-    error_count = _count_error_records(error_log_path)
     message = (
-        f"{command} produced zero evaluation rows for dataset_id={config.dataset.dataset_id!r} "
-        f"with sample_count={sample_count} and error_count={error_count}."
+        f"{command} failure_rate={failure_rate:.4f} exceeds threshold={threshold:.4f} "
+        f"for dataset_id={config.dataset.dataset_id!r}; row_count={row_count}, "
+        f"expected_row_count={expected_row_count}, error_count={error_count}."
     )
+    error_log_path = config.output_dir / "eval_reports" / "error_log.jsonl"
     if error_log_path.exists():
         message += f" See error log: {error_log_path}"
     raise RuntimeError(message)
@@ -419,10 +460,21 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
                         metadata={"count": len(visual_paths), "paths": [str(path) for path in visual_paths]},
                     ).to_dict()
                 )
+    error_log_path = output_dir / "eval_reports" / "error_log.jsonl"
+    expected_eval_units = _expected_eval_units(dataset.samples, template_method.inference_mode)
+    health = _build_run_health(
+        expected_eval_units=expected_eval_units,
+        seed_count=len(config.runtime.seeds),
+        row_count=len(eval_rows),
+        error_count=_count_error_records(error_log_path),
+        failure_rate_threshold=float(getattr(config.runtime, "max_failure_rate", 0.05)),
+    )
     summary = {
         "command": command,
         "baseline_name": resolved_baseline_name,
         "dataset_manifest": dataset.manifest.to_dict(),
+        "expected_sample_count": len(dataset.samples),
+        **health,
         "mean": _mean_numeric(results),
         "std": _std_numeric(results),
         "per_seed": results,
@@ -434,7 +486,6 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
         "results": output_dir / "results.json",
         "eval_rows": output_dir / "eval_reports" / "rows.json",
     }
-    error_log_path = output_dir / "eval_reports" / "error_log.jsonl"
     if error_log_path.exists():
         output_artifacts["error_log"] = error_log_path
     output_paths = write_results(
@@ -470,9 +521,7 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
     _validate_evaluation_outputs(
         command=command,
         config=config,
-        sample_count=len(dataset.samples),
-        eval_rows=eval_rows,
-        error_log_path=error_log_path,
+        health=health,
     )
     if command == "baseline" and config.runtime.update_reference_results:
         _snapshot_reference_outputs(config, resolved_baseline_name, output_dir)
