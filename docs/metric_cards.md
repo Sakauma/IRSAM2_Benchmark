@@ -42,13 +42,9 @@
 - `instance_f1`
 - `matched_instance_iou`
 
-## 时序指标
+## 大小目标分组
 
-- Track C 按 `(sequence_id, track_id)` 流进行评估
-- `temporal_iou_mean`
-- `temporal_boundary_f1`
-- `mask_jitter_score`
-- `propagation_decay`
-- `track_recall`
-- `track_precision`
-- `identity_switch_count`
+- `target_scale`：由数据 adapter 根据 GT mask 面积和标注类型写入，至少包含 `small`、`large` 或数据集原始值。
+- 总体指标：所有样本共同汇总。
+- 小目标指标：只汇总 `target_scale == "small"` 的样本。
+- 大目标指标：只汇总非 small 的样本，主要用于解释 MultiModal 中建筑物等大目标。

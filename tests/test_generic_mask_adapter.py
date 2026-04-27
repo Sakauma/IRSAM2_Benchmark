@@ -31,9 +31,7 @@ class GenericMaskAdapterTests(unittest.TestCase):
                   "model": {"model_id": "dummy", "family": "sam2", "cfg": "cfg", "ckpt": "ckpt", "repo": ""},
                   "dataset": {"dataset_id": "generic", "adapter": "generic_image_mask", "root": ".", "images_dir": "images", "masks_dir": "masks", "mask_mode": "binary", "class_map": {}},
                   "runtime": {"artifact_root": "artifacts", "reference_results_root": "reference_results", "output_name": "out", "device": "cpu", "num_workers": 0, "smoke_test": true, "max_samples": 0, "max_images": 0, "save_visuals": false, "seeds": [42]},
-                  "evaluation": {"benchmark_version": "v1", "track": "track_a_image_prompted", "protocol": "mask_supervised", "inference_mode": "box", "prompt_policy": {"name": "p", "prompt_type": "box", "prompt_source": "gt", "prompt_budget": 1, "multi_mask": false}},
-                  "stages": {},
-                  "ablations": {}
+                  "evaluation": {"benchmark_version": "v1", "track": "track_a_image_prompted", "protocol": "mask_supervised", "inference_mode": "box", "prompt_policy": {"name": "p", "prompt_type": "box", "prompt_source": "gt", "prompt_budget": 1, "multi_mask": false}}
                 }
                 """,
                 encoding="utf-8",
@@ -69,9 +67,7 @@ class GenericMaskAdapterTests(unittest.TestCase):
                   "model": {"model_id": "dummy", "family": "sam2", "cfg": "cfg", "ckpt": "ckpt", "repo": ""},
                   "dataset": {"dataset_id": "generic", "adapter": "generic_image_mask", "root": ".", "images_dir": "images", "masks_dir": "masks", "mask_mode": "binary", "class_map": {}},
                   "runtime": {"artifact_root": "artifacts", "reference_results_root": "reference_results", "output_name": "out", "device": "cpu", "num_workers": 0, "smoke_test": true, "max_samples": 0, "max_images": 0, "save_visuals": false, "seeds": [42]},
-                  "evaluation": {"benchmark_version": "v1", "track": "track_a_image_prompted", "protocol": "mask_supervised", "inference_mode": "box", "prompt_policy": {"name": "p", "prompt_type": "box", "prompt_source": "gt", "prompt_budget": 1, "multi_mask": false}},
-                  "stages": {},
-                  "ablations": {}
+                  "evaluation": {"benchmark_version": "v1", "track": "track_a_image_prompted", "protocol": "mask_supervised", "inference_mode": "box", "prompt_policy": {"name": "p", "prompt_type": "box", "prompt_source": "gt", "prompt_budget": 1, "multi_mask": false}}
                 }
                 """,
                 encoding="utf-8",
@@ -107,9 +103,7 @@ class GenericMaskAdapterTests(unittest.TestCase):
                   "model": {"model_id": "dummy", "family": "sam2", "cfg": "cfg", "ckpt": "ckpt", "repo": ""},
                   "dataset": {"dataset_id": "generic", "adapter": "generic_image_mask", "root": ".", "images_dir": "images", "masks_dir": "masks", "mask_mode": "instance_id", "class_map": {"1": "car", "2": "plane"}},
                   "runtime": {"artifact_root": "artifacts", "reference_results_root": "reference_results", "output_name": "out", "device": "cpu", "num_workers": 0, "smoke_test": true, "max_samples": 0, "max_images": 0, "save_visuals": false, "seeds": [42]},
-                  "evaluation": {"benchmark_version": "v1", "track": "track_a_image_prompted", "protocol": "mask_supervised", "inference_mode": "box", "prompt_policy": {"name": "p", "prompt_type": "box", "prompt_source": "gt", "prompt_budget": 1, "multi_mask": false}},
-                  "stages": {},
-                  "ablations": {}
+                  "evaluation": {"benchmark_version": "v1", "track": "track_a_image_prompted", "protocol": "mask_supervised", "inference_mode": "box", "prompt_policy": {"name": "p", "prompt_type": "box", "prompt_source": "gt", "prompt_budget": 1, "multi_mask": false}}
                 }
                 """,
                 encoding="utf-8",
@@ -143,9 +137,7 @@ class GenericMaskAdapterTests(unittest.TestCase):
                   "model": {"model_id": "dummy", "family": "sam2", "cfg": "cfg", "ckpt": "ckpt", "repo": ""},
                   "dataset": {"dataset_id": "generic", "adapter": "generic_image_mask", "root": ".", "images_dir": "images", "masks_dir": "masks", "mask_mode": "binary", "class_map": {}},
                   "runtime": {"artifact_root": "artifacts", "reference_results_root": "reference_results", "output_name": "out", "device": "cpu", "num_workers": 0, "smoke_test": true, "max_samples": 0, "max_images": 0, "save_visuals": false, "seeds": [42]},
-                  "evaluation": {"benchmark_version": "v1", "track": "track_a_image_prompted", "protocol": "mask_supervised", "inference_mode": "box", "prompt_policy": {"name": "p", "prompt_type": "box", "prompt_source": "gt", "prompt_budget": 1, "multi_mask": false}},
-                  "stages": {},
-                  "ablations": {}
+                  "evaluation": {"benchmark_version": "v1", "track": "track_a_image_prompted", "protocol": "mask_supervised", "inference_mode": "box", "prompt_policy": {"name": "p", "prompt_type": "box", "prompt_source": "gt", "prompt_budget": 1, "multi_mask": false}}
                 }
                 """,
                 encoding="utf-8",
@@ -178,9 +170,7 @@ class GenericMaskAdapterTests(unittest.TestCase):
                   "model": {"model_id": "dummy", "family": "sam2", "cfg": "cfg", "ckpt": "ckpt", "repo": ""},
                   "dataset": {"dataset_id": "generic", "adapter": "generic_image_mask", "root": ".", "images_dir": "images", "masks_dir": "masks", "mask_mode": "binary", "class_map": {}},
                   "runtime": {"artifact_root": "artifacts", "reference_results_root": "reference_results", "output_name": "out", "device": "cpu", "num_workers": 0, "smoke_test": true, "max_samples": 0, "max_images": 0, "save_visuals": false, "seeds": [42]},
-                  "evaluation": {"benchmark_version": "v1", "track": "track_a_image_prompted", "protocol": "mask_supervised", "inference_mode": "box", "prompt_policy": {"name": "p", "prompt_type": "box", "prompt_source": "gt", "prompt_budget": 1, "multi_mask": false}},
-                  "stages": {},
-                  "ablations": {}
+                  "evaluation": {"benchmark_version": "v1", "track": "track_a_image_prompted", "protocol": "mask_supervised", "inference_mode": "box", "prompt_policy": {"name": "p", "prompt_type": "box", "prompt_source": "gt", "prompt_budget": 1, "multi_mask": false}}
                 }
                 """,
                 encoding="utf-8",

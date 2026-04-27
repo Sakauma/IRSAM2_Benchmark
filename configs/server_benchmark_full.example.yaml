@@ -86,15 +86,6 @@ smoke_test_runtime:
   visual_limit: 8
   seeds: [42]
 
-# micro benchmark 用于每个数据集取少量图做端到端压力测试。
-micro_artifact_subdir: "paper_5090_micro"
-micro_runtime:
-  smoke_test: false
-  max_samples: 0
-  max_images: 24
-  visual_limit: 24
-  seeds: [42]
-
 # evaluation_defaults 会写进每个生成的单 run config。
 # suite/method 可以覆盖 inference_mode、prompt_policy 等字段。
 evaluation_defaults:
@@ -106,7 +97,6 @@ evaluation_defaults:
   prompt_policy_version: "paper_prompt_policy_v1"
   metric_schema_version: "paper_metric_schema_v1"
   reference_result_version: "paper_reference_results_v1"
-  temporal_eval_policy: "image_only"
   prompt_policy:
     name: "paper_default_ir_prompt"
     prompt_type: "box"
@@ -116,18 +106,11 @@ evaluation_defaults:
     multi_mask: false
     notes: "IR-only paper benchmark prompt policy."
 
-# 预留给 transfer/adapt/distill/quantize 阶段。当前 SAM2 baseline 不使用这些阶段。
-stage_defaults:
-  transfer: {}
-  adapt: {}
-  distill: {}
-  quantize: {}
-
 # 数据集注册表。
 # key 是矩阵中引用的数据集 id；config 是最终写入 AppConfig.dataset 的内容。
 datasets:
   nuaa_sirst:
-    # root_env 是兼容旧入口的环境变量名；完整 YAML 路径优先使用 paths.datasets 中的值。
+    # root_env 是可选环境变量 fallback；paths.datasets 中的显式路径优先。
     root_env: "NUAA_SIRST_ROOT"
     config:
       dataset_id: "NUAA-SIRST"
@@ -196,7 +179,6 @@ methods:
       modality: "ir"
       prompt_generation_protocol: "mask_derived_adaptive_loose_box_centroid_point_v2"
       box_variant: "loose"
-    modules: {}
     evaluation:
       inference_mode: "box"
       prompt_policy:
@@ -207,7 +189,6 @@ methods:
         refresh_interval: null
         multi_mask: false
         notes: "SAM2 with adaptive loose box deterministically derived from the ground-truth mask."
-    ablation_tags: ["sam2", "oracle_box", "mask_derived_prompt", "loose_box"]
   sam2_tight_box_oracle:
     baseline: "sam2_pretrained_tight_box_prompt"
     method:
@@ -216,7 +197,6 @@ methods:
       modality: "ir"
       prompt_generation_protocol: "mask_derived_tight_box_centroid_point_v1"
       box_variant: "tight"
-    modules: {}
     evaluation:
       inference_mode: "box"
       prompt_policy:
@@ -227,7 +207,6 @@ methods:
         refresh_interval: null
         multi_mask: false
         notes: "SAM2 with tight box deterministically derived from the ground-truth mask."
-    ablation_tags: ["sam2", "oracle_box", "mask_derived_prompt", "tight_box"]
   sam2_point_oracle:
     baseline: "sam2_pretrained_point_prompt"
     method:
@@ -236,7 +215,6 @@ methods:
       modality: "ir"
       prompt_generation_protocol: "mask_derived_centroid_point_v1"
       point_variant: "foreground_centroid"
-    modules: {}
     evaluation:
       inference_mode: "point"
       prompt_policy:
@@ -247,7 +225,6 @@ methods:
         refresh_interval: null
         multi_mask: false
         notes: "SAM2 with foreground-centroid point deterministically derived from the ground-truth mask."
-    ablation_tags: ["sam2", "oracle_point", "mask_derived_prompt", "centroid_point"]
   sam2_box_point_oracle:
     baseline: "sam2_pretrained_box_point_prompt"
     method:
@@ -257,7 +234,6 @@ methods:
       prompt_generation_protocol: "mask_derived_adaptive_loose_box_centroid_point_v2"
       box_variant: "loose"
       point_variant: "foreground_centroid"
-    modules: {}
     evaluation:
       inference_mode: "box+point"
       prompt_policy:
@@ -268,7 +244,6 @@ methods:
         refresh_interval: null
         multi_mask: false
         notes: "SAM2 with adaptive loose box and foreground-centroid point deterministically derived from the ground-truth mask."
-    ablation_tags: ["sam2", "oracle_box_point", "mask_derived_prompt", "loose_box", "centroid_point"]
   sam2_no_prompt_auto_mask:
     # 这是唯一真正无外部 prompt 的 SAM2 自动掩码模式。
     baseline: "sam2_no_prompt_auto_mask"
@@ -276,7 +251,6 @@ methods:
       name: "sam2_no_prompt_auto_mask"
       family: "sam2_auto_mask"
       modality: "ir"
-    modules: {}
     evaluation:
       track: "track_b_auto_mask"
       inference_mode: "no_prompt_auto_mask"
@@ -288,7 +262,6 @@ methods:
         refresh_interval: null
         multi_mask: true
         notes: "SAM2 automatic mask generator without external prompts."
-    ablation_tags: ["sam2", "auto_mask", "no_prompt"]
 
 # checkpoint sweep。
 # alias 会进入输出路径；runtime 可以按 checkpoint 调整 batch 和 auto-mask 网格密度。
@@ -326,7 +299,7 @@ models:
       image_batch_size: 8
       auto_mask_points_per_batch: 128
 
-# modes 是旧版 suite/命令行过滤的别名表；完整 suite 直接引用 methods 中的 key。
+# modes 给命令行 --modes 提供短别名。
 modes:
   - method: "sam2_box_oracle"
     alias: "box"
@@ -352,17 +325,6 @@ analysis:
     ci: 0.95
     random_seed: 42
     low_power_threshold: 20
-
-# scripts/run_official_baseline_matrix.sh 使用的官方矩阵入口。
-# 与 suites 不同，它直接从这里展开 dataset x model x method。
-official_matrix:
-  artifact_subdir: "official_baseline_matrix"
-  datasets: ["multimodal", "rbgt_tiny_ir_box"]
-  models: ["tiny", "small", "base_plus", "large"]
-  methods: ["sam2_box_oracle", "sam2_point_oracle", "sam2_box_point_oracle", "sam2_no_prompt_auto_mask"]
-  seeds: [42]
-  visual_limit: 24
-  resume: true
 
 # suites 是 run_5090_full_benchmark.py 的主入口。
 # 运行时会展开 suite.models 或全局 models，与 suite.datasets、suite.modes 做笛卡尔积。

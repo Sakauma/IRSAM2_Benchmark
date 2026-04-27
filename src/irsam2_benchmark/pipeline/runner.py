@@ -12,16 +12,15 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from ..baselines import build_baseline_registry, canonical_baseline_name
+from ..baselines import build_baseline_registry
 from ..config import AppConfig
-from ..core.interfaces import ArtifactRecord, InferenceMode, PipelineStage, PromptPolicy, PromptSource, PromptType
+from ..core.interfaces import ArtifactRecord, InferenceMode, PromptPolicy, PromptSource, PromptType
 from ..data import build_dataset_adapter
 from ..data.masks import sample_mask_array, sample_mask_or_zeros
-from ..data.views import build_image_view, build_track_view
+from ..data.views import build_image_view
 from ..evaluation.reporting import write_results
 from ..evaluation.runner import _merge_error_context, _reset_error_log, _write_sample_error, align_mask_to_sample, evaluate_method
 from ..evaluation.visualization import save_visualizations
-from .stages import run_adapt_stage, run_distill_stage, run_quantize_stage, run_transfer_stage
 
 
 def _effective_prompt_policy(config: AppConfig, inference_mode: InferenceMode) -> Dict[str, Any]:
@@ -52,7 +51,6 @@ def _build_benchmark_spec(config: AppConfig, inference_mode: InferenceMode) -> D
         "inference_mode": inference_mode.value,
         "prompt_policy": _effective_prompt_policy(config, inference_mode),
         "method": config.method,
-        "modules": config.modules,
         "config_path": str(config.config_path),
     }
 
@@ -177,9 +175,9 @@ def _validate_evaluation_outputs(
     eval_rows: List[Dict[str, Any]],
     error_log_path: Path,
 ) -> None:
-    # baseline/evaluate 至少应产生一行评估结果。
+    # baseline 至少应产生一行评估结果。
     # 如果全失败但进程正常返回，这里会把 silent failure 提升成显式错误。
-    if command not in {"baseline", "evaluate"}:
+    if command != "baseline":
         return
     if sample_count <= 0:
         raise RuntimeError(f"{command} loaded zero samples for dataset_id={config.dataset.dataset_id!r}.")
@@ -248,7 +246,7 @@ def _build_visual_records(
     error_context: Dict[str, Any] | None = None,
 ) -> List[Dict[str, Any]]:
     # 可视化只抽取前 visual_limit 个案例，避免完整 benchmark 生成过多图片。
-    # no-prompt 模式按 image 展示，prompted/video 模式按 instance 展示。
+    # no-prompt 模式按 image 展示，prompted 模式按 instance 展示。
     if visual_limit <= 0:
         return []
 
@@ -295,69 +293,6 @@ def _build_visual_records(
                 break
         return records
 
-    if inference_mode == InferenceMode.VIDEO_PROPAGATION:
-        try:
-            track_view = build_track_view(samples)
-        except Exception as exc:
-            for item in samples:
-                _write_sample_error(
-                    config=config,
-                    method=method,
-                    sample=item,
-                    exc=exc,
-                    context=_merge_error_context(error_context, {"track_name": track_name, "stage": "visual_video_track_view"}),
-                )
-            return records
-        for _, items in track_view.items():
-            group_sample_ids = [item.sample_id for item in items]
-            try:
-                predictions = method.predict_sequence(items)
-            except Exception as exc:
-                for item in items:
-                    _write_sample_error(
-                        config=config,
-                        method=method,
-                        sample=item,
-                        exc=exc,
-                        context=_merge_error_context(
-                            error_context,
-                            {
-                                "track_name": track_name,
-                                "stage": "visual_video_prediction",
-                                "group_sample_ids": group_sample_ids,
-                            },
-                        ),
-                    )
-                continue
-            for item in items:
-                try:
-                    pred_mask, _ = align_mask_to_sample(predictions[item.sample_id], item)
-                    records.append(
-                        {
-                            "sample": item,
-                            "pred_mask": pred_mask,
-                            "gt_mask": _visual_gt_mask(item),
-                        }
-                    )
-                except Exception as exc:
-                    _write_sample_error(
-                        config=config,
-                        method=method,
-                        sample=item,
-                        exc=exc,
-                        context=_merge_error_context(
-                            error_context,
-                            {
-                                "track_name": track_name,
-                                "stage": "visual_video_row_build",
-                                "group_sample_ids": group_sample_ids,
-                            },
-                        ),
-                    )
-                if len(records) >= visual_limit:
-                    return records
-        return records
-
     for item in samples[:visual_limit]:
         try:
             prediction = method.predict_sample(item)
@@ -395,67 +330,24 @@ def set_global_seed(seed: int) -> None:
 
 def _resolve_method(config: AppConfig, command: str, baseline_name: Optional[str]):
     baselines = build_baseline_registry(config)
-    if command == "baseline":
-        if baseline_name is None:
-            raise RuntimeError("baseline_name is required for the baseline command.")
-        resolved_name = canonical_baseline_name(baseline_name)
-        if resolved_name not in baselines:
-            valid = ", ".join(sorted({canonical_baseline_name(name) for name in baselines}))
-            raise RuntimeError(f"Unknown baseline {baseline_name!r}. Valid baselines: {valid}")
-        return resolved_name, baselines[resolved_name]
-    if command == "evaluate":
-        return "sam2_pretrained_box_prompt", baselines["sam2_pretrained_box_prompt"]
-    raise ValueError(f"Unknown command: {command}")
+    if command != "baseline":
+        raise ValueError(f"Unknown command: {command}")
+    if baseline_name is None:
+        raise RuntimeError("baseline_name is required for the baseline command.")
+    if baseline_name not in baselines:
+        valid = ", ".join(sorted(baselines))
+        raise RuntimeError(f"Unknown baseline {baseline_name!r}. Valid baselines: {valid}")
+    return baseline_name, baselines[baseline_name]
 
 
 def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = None) -> None:
     # run_command 是 main.py 的执行核心：
     # 先解析配置和数据集，再按 seed 重建 method，最后写 results/summary/rows/metadata。
+    if command != "baseline":
+        raise ValueError(f"Unknown command: {command}")
+
     output_dir = config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
-    benchmark_spec = _build_benchmark_spec(config, config.inference_mode)
-
-    if command == "transfer":
-        result = run_transfer_stage(config)
-        write_results(output_dir, benchmark_spec=benchmark_spec, artifact_manifest={"records": [result.record.to_dict()]}, summary={"command": command}, results=[], eval_rows=[])
-        return
-    if command == "adapt":
-        transfer = run_transfer_stage(config)
-        adapt = run_adapt_stage(config)
-        write_results(output_dir, benchmark_spec=benchmark_spec, artifact_manifest={"records": [transfer.record.to_dict(), adapt.record.to_dict()]}, summary={"command": command}, results=[], eval_rows=[])
-        return
-    if command == "distill":
-        distill = run_distill_stage(config)
-        write_results(output_dir, benchmark_spec=benchmark_spec, artifact_manifest={"records": [distill.record.to_dict()]}, summary={"command": command}, results=[], eval_rows=[])
-        return
-    if command == "quantize":
-        quant = run_quantize_stage(config)
-        write_results(output_dir, benchmark_spec=benchmark_spec, artifact_manifest={"records": [quant.record.to_dict()]}, summary={"command": command}, results=[], eval_rows=[])
-        return
-    if command == "pipeline":
-        transfer = run_transfer_stage(config)
-        adapt = run_adapt_stage(config)
-        distill = run_distill_stage(config)
-        quant = run_quantize_stage(config)
-        write_results(
-            output_dir,
-            benchmark_spec=benchmark_spec,
-            artifact_manifest={"records": [transfer.record.to_dict(), adapt.record.to_dict(), distill.record.to_dict(), quant.record.to_dict()]},
-            summary={"command": command},
-            results=[],
-            eval_rows=[],
-        )
-        return
-    if command == "ablation-grid":
-        write_results(
-            output_dir,
-            benchmark_spec=benchmark_spec,
-            artifact_manifest={"records": []},
-            summary={"command": command, "ablations": config.ablations},
-            results=[],
-            eval_rows=[],
-        )
-        return
 
     dataset = build_dataset_adapter(config).load(config)
     resolved_baseline_name, template_method = _resolve_method(config, command, baseline_name)
@@ -463,7 +355,7 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
 
     artifact_records = [
         ArtifactRecord(
-            stage=PipelineStage.EVALUATE.value,
+            stage="evaluate",
             artifact_dir=str(output_dir),
             artifact_name=f"{command}_{resolved_baseline_name}",
             metadata={
@@ -521,7 +413,7 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
                 visual_dir = output_dir / "visuals" / resolved_baseline_name / f"seed_{seed}"
                 artifact_records.append(
                     ArtifactRecord(
-                        stage=PipelineStage.EVALUATE.value,
+                        stage="evaluate",
                         artifact_dir=str(visual_dir),
                         artifact_name=f"visuals_seed_{seed}",
                         metadata={"count": len(visual_paths), "paths": [str(path) for path in visual_paths]},
@@ -552,7 +444,7 @@ def run_command(config: AppConfig, command: str, baseline_name: Optional[str] = 
             "records": artifact_records
             + [
                 ArtifactRecord(
-                    stage=PipelineStage.EVALUATE.value,
+                    stage="evaluate",
                     artifact_dir=str(path.parent),
                     artifact_name=name,
                     metadata={"path": str(path)},

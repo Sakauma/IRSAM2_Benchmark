@@ -20,8 +20,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MAIN_PY = PROJECT_ROOT / "main.py"
 ANALYSIS_PY = PROJECT_ROOT / "scripts" / "analyze_paper_results.py"
 DEFAULT_BENCHMARK_CONFIG = PROJECT_ROOT / "configs" / "server_benchmark_full.local.yaml"
-DEFAULT_LEGACY_PATHS = PROJECT_ROOT / "configs" / "local_paths.yaml"
-DEFAULT_LEGACY_SUITE_CONFIG = PROJECT_ROOT / "configs" / "server_5090_full_benchmark.yaml"
 REQUIRED_RUN_FILES = (
     "benchmark_spec.json",
     "run_metadata.json",
@@ -114,7 +112,7 @@ def _default_config_from_env() -> Path | None:
 
 def _base_matrix_from_complete_config(raw: Dict[str, Any], source: Path) -> Dict[str, Any]:
     # 完整 YAML 同时保存 path/suite/matrix。这里抽出“实验矩阵”部分，
-    # 形状保持和 paper_experiments_v1.yaml 一致，复用已有分析脚本。
+    # 形状保持和分析模块需要的 matrix 一致。
     required = ("runtime_defaults", "evaluation_defaults", "datasets", "methods")
     missing = [key for key in required if key not in raw]
     if missing:
@@ -123,7 +121,6 @@ def _base_matrix_from_complete_config(raw: Dict[str, Any], source: Path) -> Dict
         "model_defaults": copy.deepcopy(raw.get("model_defaults", {})),
         "runtime_defaults": copy.deepcopy(raw["runtime_defaults"]),
         "evaluation_defaults": copy.deepcopy(raw["evaluation_defaults"]),
-        "stage_defaults": copy.deepcopy(raw.get("stage_defaults", {})),
         "datasets": copy.deepcopy(raw["datasets"]),
         "methods": copy.deepcopy(raw["methods"]),
         "groups": copy.deepcopy(raw.get("groups", {})),
@@ -147,54 +144,29 @@ def _suite_config_from_complete_config(raw: Dict[str, Any], source: Path) -> Dic
         "artifact_subdir": raw.get("artifact_subdir", benchmark.get("artifact_subdir", "paper_5090")),
         "runtime": copy.deepcopy(raw.get("runtime", {})),
         "smoke_test_runtime": copy.deepcopy(raw.get("smoke_test_runtime", {})),
-        "micro_runtime": copy.deepcopy(raw.get("micro_runtime", {})),
         "checkpoints": copy.deepcopy(checkpoints),
         "modes": copy.deepcopy(raw["modes"]),
         "suites": copy.deepcopy(raw["suites"]),
         "analysis": copy.deepcopy(raw.get("analysis", {})),
-        "official_matrix": copy.deepcopy(raw.get("official_matrix", {})),
     }
 
 
-def _load_complete_benchmark_config(config_path: Path, paths_override: Path | None = None) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, str | None]]:
+def _load_complete_benchmark_config(config_path: Path) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, str | None]]:
     # 推荐入口：一个 YAML 包含路径、模型、数据集、方法、suite 和分析配置。
-    # paths_override 仅用于临时替换机器路径，不改变实验矩阵本身。
     if not config_path.exists():
         raise FileNotFoundError(
             f"Complete benchmark config not found: {config_path}\n"
-            "Create it from configs/server_benchmark_full.example.yaml or pass --paths/--suite-config for the legacy mode."
+            "Create it from configs/server_benchmark_full.example.yaml."
         )
     raw = _load_yaml(config_path)
     paths = copy.deepcopy(raw.get("paths", {}))
-    if paths_override is not None:
-        if not paths_override.exists():
-            raise FileNotFoundError(f"Path override config not found: {paths_override}")
-        paths = _deep_merge(paths, _load_yaml(paths_override))
     base_matrix = _base_matrix_from_complete_config(raw, config_path)
     suite_config = _suite_config_from_complete_config(raw, config_path)
     return paths, suite_config, base_matrix, {
         "mode": "complete",
         "config": str(config_path.resolve()),
-        "paths_config": str(paths_override.resolve()) if paths_override is not None else None,
+        "paths_config": None,
         "suite_config": None,
-    }
-
-
-def _load_legacy_benchmark_config(paths_path: Path, suite_config_path: Path) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, str | None]]:
-    # 兼容入口：老配置把路径、suite 和 paper matrix 拆成三个 YAML。
-    # 新实验不建议继续扩展这条路径，但保留它避免破坏历史命令。
-    if not paths_path.exists():
-        raise FileNotFoundError(f"Path config not found: {paths_path}")
-    if not suite_config_path.exists():
-        raise FileNotFoundError(f"Suite config not found: {suite_config_path}")
-    paths = _load_yaml(paths_path)
-    suite_config = _load_yaml(suite_config_path)
-    base_matrix = _load_yaml(_resolve_project_path(suite_config.get("matrix_source", "configs/paper_experiments_v1.yaml")))
-    return paths, suite_config, base_matrix, {
-        "mode": "legacy",
-        "config": None,
-        "paths_config": str(paths_path.resolve()),
-        "suite_config": str(suite_config_path.resolve()),
     }
 
 
@@ -320,18 +292,7 @@ def _build_app_config(
         "dataset": dataset_config,
         "runtime": runtime,
         "evaluation": evaluation,
-        "stages": copy.deepcopy(base_matrix.get("stage_defaults", {})),
-        "ablations": {
-            "suite": suite_key,
-            "experiment_id": suite_entry["experiment_id"],
-            "checkpoint": checkpoint["alias"],
-            "model_id": checkpoint["model_id"],
-            "dataset": dataset_id,
-            "method": method_id,
-            "tags": method_entry.get("ablation_tags", []),
-        },
         "method": copy.deepcopy(method_entry.get("method", {"name": method_id, "modality": "ir"})),
-        "modules": copy.deepcopy(method_entry.get("modules", {})),
     }
 
 
@@ -364,7 +325,6 @@ def _build_generated_matrix(
         "model_defaults": model_defaults,
         "runtime_defaults": copy.deepcopy(base_matrix.get("runtime_defaults", {})),
         "evaluation_defaults": copy.deepcopy(base_matrix.get("evaluation_defaults", {})),
-        "stage_defaults": copy.deepcopy(base_matrix.get("stage_defaults", {})),
         "datasets": selected_datasets,
         "methods": selected_methods,
         "groups": {suite_key: [suite_entry["experiment_id"]]},
@@ -573,8 +533,6 @@ def main(argv: List[str] | None = None) -> int:
         type=Path,
         help="Complete benchmark YAML containing paths, models, datasets, methods, suites, runtime, and analysis settings.",
     )
-    parser.add_argument("--paths", type=Path, help="Legacy path YAML, or optional path override for --config.")
-    parser.add_argument("--suite-config", type=Path, help="Legacy suite YAML used only when --config is not provided.")
     parser.add_argument("--suites", help="Comma-separated suite keys. Default: all suites from suite config.")
     parser.add_argument("--checkpoints", help="Comma-separated checkpoint aliases. Default: all four official SAM2.1 checkpoints.")
     parser.add_argument("--modes", help="Comma-separated method ids. Default: all configured modes.")
@@ -587,15 +545,12 @@ def main(argv: List[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     config_path = _resolve_optional_project_path(args.config) or _default_config_from_env()
-    paths_path = _resolve_optional_project_path(args.paths)
-    suite_config_path = _resolve_optional_project_path(args.suite_config)
-    if config_path is not None:
-        paths, suite_config, base_matrix, config_sources = _load_complete_benchmark_config(config_path, paths_path)
-    else:
-        paths, suite_config, base_matrix, config_sources = _load_legacy_benchmark_config(
-            paths_path or DEFAULT_LEGACY_PATHS,
-            suite_config_path or DEFAULT_LEGACY_SUITE_CONFIG,
+    if config_path is None:
+        raise FileNotFoundError(
+            "Complete benchmark config not found. Pass --config or create configs/server_benchmark_full.local.yaml "
+            "from configs/server_benchmark_full.example.yaml."
         )
+    paths, suite_config, base_matrix, config_sources = _load_complete_benchmark_config(config_path)
     artifact_subdir = str(suite_config.get("artifact_subdir", "paper_5090"))
     if args.smoke_test:
         artifact_subdir = f"{artifact_subdir}_smoke"

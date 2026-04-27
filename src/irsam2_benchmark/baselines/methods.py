@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import numpy as np
-import torch
-from PIL import Image
 
 from ..config import AppConfig
 from ..core.interfaces import InferenceMode
@@ -17,8 +14,6 @@ from ..data.prompt_synthesis import (
 )
 from ..data.sample import Sample
 from ..models import SAM2ModelAdapter, load_image_rgb
-from ..priors import PriorFactory
-from ..prompts import PromptFactory
 
 
 def box_to_mask(box: list[float], height: int, width: int) -> np.ndarray:
@@ -30,7 +25,7 @@ def box_to_mask(box: list[float], height: int, width: int) -> np.ndarray:
 
 
 class BaseMethod:
-    # 所有 baseline 都暴露统一接口：单样本、批量样本、视频序列。
+    # 所有 baseline 都暴露统一接口：单样本和批量样本。
     # runner 会根据 inference_mode 选择对应评估协议。
     name = "base"
     family = "base"
@@ -41,9 +36,6 @@ class BaseMethod:
 
     def predict_samples(self, samples: List[Sample]) -> Dict[str, Dict[str, Any]]:
         return {sample.sample_id: self.predict_sample(sample) for sample in samples}
-
-    def predict_sequence(self, samples: List[Sample]) -> Dict[str, np.ndarray]:
-        return {sample.sample_id: self.predict_sample(sample)["mask"] for sample in samples}
 
 
 class BBoxRectMaskBaseline(BaseMethod):
@@ -189,95 +181,6 @@ class NoPromptAutoMaskSAM2(BaseMethod):
         return {"instances": instances, "auto_mask_points_per_batch": points_per_batch}
 
 
-def load_image_tensor(path) -> torch.Tensor:
-    # physics auto-prompt 只需要单通道亮度张量；SAM2 推理仍走归一化后的 RGB 伪三通道。
-    raw = np.array(Image.open(path).convert("L"), dtype=np.uint8)
-    min_v = float(raw.min())
-    max_v = float(raw.max())
-    norm = (raw.astype(np.float32) - min_v) / max(1e-6, max_v - min_v)
-    return torch.from_numpy(norm).unsqueeze(0).unsqueeze(0)
-
-
-class PhysicsAutoPromptSAM2(BaseMethod):
-    name = "PhysicsAutoPromptSAM2"
-    family = "ir_prompted_sam2"
-    inference_mode = InferenceMode.BOX_POINT
-
-    def __init__(self, config: AppConfig, adapter: SAM2ModelAdapter):
-        self.config = config
-        self.adapter = adapter
-        prior_config = config.modules.get(
-            "prior",
-            {
-                "name": "prior_fusion",
-                "enabled": ["local_contrast", "multi_scale_top_hat", "snr_like"],
-                "scales": [7, 15, 31],
-                "weights": {"local_contrast": 0.4, "multi_scale_top_hat": 0.4, "snr_like": 0.2},
-            },
-        )
-        prompt_config = config.modules.get(
-            "prompt",
-            {
-                "name": "heuristic_physics",
-                "type": "box+point",
-                "percentile": 99.5,
-                "top_k": 1,
-                "min_component_area": 2,
-                "box_pad_ratio": 0.25,
-            },
-        )
-        self.prior = PriorFactory.build(prior_config)
-        self.prompt_generator = PromptFactory.build(prompt_config)
-
-    def predict_sample(self, sample: Sample) -> Dict[str, Any]:
-        # 先从红外先验图生成候选 prompt，再把 prompt 交给 SAM2 分割。
-        image_tensor = load_image_tensor(sample.image_path)
-        with torch.inference_mode():
-            prior_maps = self.prior(image_tensor)
-            prompt = self.prompt_generator(image_tensor, prior_maps)
-        image_rgb = load_image_rgb(sample.image_path)
-        kwargs: Dict[str, Any] = {"multimask_output": False}
-        if prompt.get("box") is not None:
-            kwargs["box"] = prompt["box"]
-        if prompt.get("point") is not None:
-            kwargs["points"] = np.array([prompt["point"]], dtype=np.float32)
-            kwargs["point_labels"] = np.array([1], dtype=np.int32)
-        result = self.adapter.predict_image(image_rgb, **kwargs)
-        masks = result["masks"]
-        scores = result["scores"]
-        best_idx = int(np.argmax(scores))
-        return {"mask": masks[best_idx].astype(np.float32), "score": float(scores[best_idx]), "prompt": prompt}
-
-
-class PretrainedSAM2VideoPropagation(BaseMethod):
-    name = "PretrainedSAM2VideoPropagation"
-    family = "sam2"
-    inference_mode = InferenceMode.VIDEO_PROPAGATION
-
-    def __init__(self, adapter: SAM2ModelAdapter, prompt_policy):
-        self.adapter = adapter
-        self.prompt_policy = prompt_policy
-
-    def predict_sample(self, sample: Sample) -> Dict[str, Any]:
-        raise RuntimeError("Video propagation is sequence-only. Use predict_sequence().")
-
-    def predict_sequence(self, samples: List[Sample]) -> Dict[str, np.ndarray]:
-        # 视频传播只在 sequence/track view 中调用，不能逐 instance 独立评估。
-        return self.adapter.predict_video_sequence(samples, self.prompt_policy)
-
-
-class ArtifactBackedReferenceMethod(BaseMethod):
-    """引用方法先稳定平台接口；真正训练逻辑后续可无缝替换。"""
-
-    def __init__(self, name: str, family: str, inference_mode: InferenceMode):
-        self.name = name
-        self.family = family
-        self.inference_mode = inference_mode
-
-    def predict_sample(self, sample: Sample) -> Dict[str, Any]:
-        raise RuntimeError(f"{self.name} is a reference-stage placeholder. Plug in a trained artifact before using it.")
-
-
 CANONICAL_BASELINE_NAMES = (
     "bbox_rect",
     "sam2_pretrained_box_prompt",
@@ -285,44 +188,16 @@ CANONICAL_BASELINE_NAMES = (
     "sam2_pretrained_point_prompt",
     "sam2_pretrained_box_point_prompt",
     "sam2_no_prompt_auto_mask",
-    "sam2_physics_auto_prompt",
-    "sam2_video_propagation",
-    "reference_adaptation",
-    "reference_pseudo",
-    "reference_student",
-    "reference_quantized_student",
 )
-
-LEGACY_BASELINE_ALIASES = {
-    # 兼容旧 YAML 和历史命令。新配置不要再使用这些名字，因为 zero-shot 容易被误解为 no-prompt。
-    "sam2_zero_shot": "sam2_pretrained_box_prompt",
-    "sam2_zero_shot_tight_box": "sam2_pretrained_tight_box_prompt",
-    "sam2_zero_shot_point": "sam2_pretrained_point_prompt",
-    "sam2_zero_shot_box_point": "sam2_pretrained_box_point_prompt",
-}
-
-
-def canonical_baseline_name(name: str) -> str:
-    return LEGACY_BASELINE_ALIASES.get(name, name)
 
 
 def build_baseline_registry(config: AppConfig) -> Dict[str, BaseMethod]:
     adapter = SAM2ModelAdapter(config)
-    canonical: Dict[str, BaseMethod] = {
+    return {
         "bbox_rect": BBoxRectMaskBaseline(),
         "sam2_pretrained_box_prompt": PretrainedPromptedSAM2(adapter, prompt_mode=InferenceMode.BOX),
         "sam2_pretrained_tight_box_prompt": PretrainedPromptedSAM2(adapter, prompt_mode=InferenceMode.BOX, box_variant="tight"),
         "sam2_pretrained_point_prompt": PretrainedPromptedSAM2(adapter, prompt_mode=InferenceMode.POINT),
         "sam2_pretrained_box_point_prompt": PretrainedPromptedSAM2(adapter, prompt_mode=InferenceMode.BOX_POINT),
         "sam2_no_prompt_auto_mask": NoPromptAutoMaskSAM2(adapter),
-        "sam2_physics_auto_prompt": PhysicsAutoPromptSAM2(config, adapter),
-        "sam2_video_propagation": PretrainedSAM2VideoPropagation(adapter, prompt_policy=config.evaluation.prompt_policy),
-        "reference_adaptation": ArtifactBackedReferenceMethod("ReferenceAdaptation", "reference", InferenceMode.ADAPTED_TEACHER),
-        "reference_pseudo": ArtifactBackedReferenceMethod("ReferencePseudo", "reference", InferenceMode.ADAPTED_TEACHER),
-        "reference_student": ArtifactBackedReferenceMethod("ReferenceStudent", "reference", InferenceMode.DISTILLED_STUDENT),
-        "reference_quantized_student": ArtifactBackedReferenceMethod("ReferenceQuantizedStudent", "reference", InferenceMode.QUANTIZED_STUDENT),
-    }
-    return {
-        **canonical,
-        **{legacy: canonical[canonical_name] for legacy, canonical_name in LEGACY_BASELINE_ALIASES.items()},
     }

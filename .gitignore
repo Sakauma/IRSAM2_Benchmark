@@ -9,7 +9,6 @@ htmlcov/
 *.egg-info/
 
 # Local machine/private configs
-configs/local_paths.yaml
 configs/*.local.yaml
 
 # Generated experiment outputs

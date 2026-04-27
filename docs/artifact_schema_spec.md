@@ -9,7 +9,7 @@
 - `results.json`
 - `eval_reports/rows.json`
 
-一个 baseline/evaluate run 只有在 `eval_reports/rows.json` 非空且 `summary.json` 中的 `mean` 非空时，才应被矩阵 runner 视为完成。所有样本都失败时必须保留 `eval_reports/error_log.jsonl`，并让上层 runner 记录失败。
+一个 baseline run 只有在 `eval_reports/rows.json` 非空且 `summary.json` 中的 `mean` 非空时，才应被矩阵 runner 视为完成。所有样本都失败时必须保留 `eval_reports/error_log.jsonl`，并让上层 runner 记录失败。
 
 `artifact_manifest.json` 至少需要记录：
 
@@ -26,13 +26,16 @@
 
 - `run_metadata.json`：记录命令、展开后的配置、数据集路径、checkpoint 路径/大小/mtime/sha256、SAM2 repo、Git commit、Python、PyTorch、CUDA 和 GPU 信息。
 
-## 官方矩阵附加产物
+## 完整矩阵附加产物
 
-通过 `scripts/run_official_baseline_matrix.py` 运行官方矩阵时，矩阵根目录还会额外写出：
+通过 `scripts/run_5090_full_benchmark.py` 运行完整矩阵时，矩阵根目录还会额外写出：
 
-- `matrix_summary.json`
-- `matrix_summary.csv`
-- `matrix_failures.json`
-- `matrix_failures.csv`
+- `benchmark_manifest_latest.json`
+- `run_manifest_latest.json`
+- `run_manifest_latest.csv`
+- `run_failures_latest.json`
+- `run_failures_latest.csv`
+- `analysis/checkpoint_sweep_summary.json`
+- `analysis/checkpoint_sweep_summary.csv`
 
-`matrix_summary.*` 汇总成功和断点续跑跳过的组合。`matrix_failures.*` 记录失败组合，包含数据集、模型、模式、输出目录、错误类型、返回码、错误消息、开始/结束时间和耗时。
+`run_manifest_latest.*` 汇总成功、失败、dry-run 和断点续跑跳过的组合。`run_failures_latest.*` 记录失败组合，包含 suite、checkpoint、数据集、方法、输出目录、命令、返回码和错误消息。

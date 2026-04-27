@@ -10,7 +10,7 @@
 - `sequence_id`
 - `frame_index`
 - `temporal_key`
-- `track_id`（可选，但 Track C / 视频传播场景下必需）
+- `track_id`（可选；当前 baseline 不依赖它）
 - `category`
 - `device_source`
 - `annotation_protocol_flag`
@@ -20,7 +20,7 @@
 
 - `frame_id`：图像级标识符，同一帧中的所有实例共享它
 - `sample_id`：实例级唯一标识符
-- `track_id`：当数据集支持跨帧传播评估时，显式表示同一目标的跨帧身份
+- `track_id`：如果数据集本身提供跨帧身份，可以保留该字段供后续分析使用
 
 ## 已支持的数据集族
 

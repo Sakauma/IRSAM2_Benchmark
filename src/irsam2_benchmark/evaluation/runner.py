@@ -15,12 +15,11 @@ from ..core.interfaces import InferenceMode
 from ..data.masks import sample_mask_array, sample_mask_or_zeros
 from ..data.prompt_synthesis import mask_to_tight_box
 from ..data.sample import Sample
-from ..data.views import build_image_view, build_track_view
+from ..data.views import build_image_view
 from .image_metrics import bbox_iou, boundary_f1, boundary_f1_tolerance, dice_score, mask_iou
 from .instance_metrics import greedy_match_instances
 from .prompt_metrics import prompt_metrics
 from .small_target_metrics import small_target_metrics
-from .temporal_metrics import compute_temporal_metrics
 
 
 def _progress_bar(
@@ -311,126 +310,13 @@ def evaluate_method(
     inference_mode: InferenceMode,
     error_context: Dict[str, Any] | None = None,
 ) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    # evaluate_method 是三类推理协议的统一入口：
-    # 1. video_propagation：按 track/sequence 评估时序传播；
-    # 2. no_prompt_auto_mask：按 image 评估自动 mask generator；
-    # 3. 其它 prompted 模式：按 instance/sample 评估 box、point、box+point。
+    # evaluate_method 是两类推理协议的统一入口：
+    # 1. no_prompt_auto_mask：按 image 评估自动 mask generator；
+    # 2. 其它 prompted 模式：按 instance/sample 评估 box、point、box+point。
     modality = getattr(getattr(config, "dataset", None), "modality", "ir")
     run_error_context = dict(error_context or {})
 
     rows: List[Dict[str, Any]] = []
-    if inference_mode == InferenceMode.VIDEO_PROPAGATION:
-        # video 模式要求同一 track 内每帧只有一个 sample，否则无法明确传播目标。
-        try:
-            track_view = build_track_view(samples)
-        except Exception as exc:
-            for item in samples:
-                _write_sample_error(
-                    config=config,
-                    method=method,
-                    sample=item,
-                    exc=exc,
-                    context=_merge_error_context(run_error_context, {"track_name": track_name, "stage": "video_track_view"}),
-                )
-            return {}, []
-        progress = _progress_bar(
-            method=method,
-            config=config,
-            inference_mode=inference_mode,
-            error_context=run_error_context,
-            total=len(samples),
-            unit="frames",
-        )
-        sequence_metrics = []
-        try:
-            for (sequence_id, track_id), items in track_view.items():
-                group_sample_ids = [item.sample_id for item in items]
-                frame_ids = {item.frame_id for item in items}
-                if len(frame_ids) != len(items):
-                    exc = RuntimeError(
-                        f"Video propagation expects one sample per frame within a track, got duplicates for sequence_id={sequence_id!r}, track_id={track_id!r}."
-                    )
-                    for item in items:
-                        _write_sample_error(
-                            config=config,
-                            method=method,
-                            sample=item,
-                            exc=exc,
-                            context=_merge_error_context(
-                                run_error_context,
-                                {
-                                    "track_name": track_name,
-                                    "stage": "video_track_validation",
-                                    "group_sample_ids": group_sample_ids,
-                                },
-                            ),
-                        )
-                    if progress is not None:
-                        progress.update(len(items))
-                    continue
-                start = time.perf_counter()
-                try:
-                    predictions = method.predict_sequence(items)
-                except Exception as exc:
-                    for item in items:
-                        _write_sample_error(
-                            config=config,
-                            method=method,
-                            sample=item,
-                            exc=exc,
-                            context=_merge_error_context(
-                                run_error_context,
-                                {
-                                    "track_name": track_name,
-                                    "stage": "video_sequence_prediction",
-                                    "group_sample_ids": group_sample_ids,
-                                },
-                            ),
-                        )
-                    if progress is not None:
-                        progress.update(len(items))
-                    continue
-                elapsed_ms = (time.perf_counter() - start) * 1000.0 / max(1, len(items))
-                sequence_rows = []
-                for item in items:
-                    try:
-                        pred_mask, mask_alignment = align_mask_to_sample(predictions[item.sample_id], item)
-                        gt_mask = sample_mask_or_zeros(item)
-                        row = build_segmentation_row(item, pred_mask, gt_mask, elapsed_ms, modality=modality, mask_alignment=mask_alignment)
-                        row["track"] = track_name
-                        row["track_id"] = track_id
-                        sequence_rows.append({**row, "pred_mask": pred_mask})
-                        rows.append(row)
-                    except Exception as exc:
-                        _write_sample_error(
-                            config=config,
-                            method=method,
-                            sample=item,
-                            exc=exc,
-                            context=_merge_error_context(
-                                run_error_context,
-                                {
-                                    "track_name": track_name,
-                                    "stage": "video_row_build",
-                                    "group_sample_ids": group_sample_ids,
-                                },
-                            ),
-                        )
-                if sequence_rows:
-                    temporal = compute_temporal_metrics(sequence_rows)
-                    temporal["sequence_id"] = sequence_id
-                    temporal["track_id"] = track_id
-                    sequence_metrics.append(temporal)
-                if progress is not None:
-                    progress.update(len(items))
-        finally:
-            if progress is not None:
-                progress.close()
-        summary = _aggregate(rows)
-        if sequence_metrics:
-            summary.update(_aggregate(sequence_metrics))
-        return summary, rows
-
     if inference_mode == InferenceMode.NO_PROMPT_AUTO_MASK:
         # 自动掩码模式不使用外部 prompt，因此必须按图片聚合 GT instance，而不是逐 instance 调用。
         image_groups = list(build_image_view(samples).items())

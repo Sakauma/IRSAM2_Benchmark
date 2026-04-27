@@ -18,15 +18,6 @@ def _load_runner():
     return module
 
 
-def _load_micro_runner():
-    script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_5090_micro_benchmark.py"
-    spec = importlib.util.spec_from_file_location("run_5090_micro_benchmark_under_test", script_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module
-
-
 def _write_full_config(path: Path, artifact_root: Path) -> None:
     example_path = Path(__file__).resolve().parents[1] / "configs" / "server_benchmark_full.example.yaml"
     payload = yaml.safe_load(example_path.read_text(encoding="utf-8"))
@@ -122,45 +113,6 @@ class Full5090BenchmarkTests(unittest.TestCase):
             config = yaml.safe_load(first_config.read_text(encoding="utf-8"))
             self.assertEqual(config["runtime"]["max_samples"], 10)
             self.assertEqual(config["runtime"]["max_images"], 10)
-
-    def test_micro_benchmark_generates_24_image_configs(self):
-        runner = _load_micro_runner()
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            config_path = root / "server_benchmark_full.local.yaml"
-            _write_full_config(config_path, root / "artifacts")
-            output = io.StringIO()
-            with redirect_stdout(output):
-                self.assertEqual(
-                    runner.main(
-                        [
-                            "--config",
-                            str(config_path),
-                            "--suites",
-                            "mask",
-                            "--checkpoints",
-                            "large",
-                            "--modes",
-                            "box",
-                            "--dry-run",
-                            "--python-bin",
-                            "python",
-                        ]
-                    ),
-                    0,
-                )
-            text = output.getvalue()
-            self.assertIn("[plan] runs=4", text)
-            manifest_path = root / "artifacts" / "paper_5090_micro" / "benchmark_manifest_latest.json"
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            first_config = Path(manifest["records"][0]["config_path"])
-            config = yaml.safe_load(first_config.read_text(encoding="utf-8"))
-            self.assertEqual(config["runtime"]["max_images"], 24)
-            self.assertEqual(config["runtime"]["max_samples"], 0)
-            self.assertEqual(config["runtime"]["visual_limit"], 24)
-            self.assertEqual(config["runtime"]["image_batch_size"], 8)
-            self.assertEqual(config["runtime"]["auto_mask_points_per_batch"], 128)
-            self.assertIn("/paper_5090_micro/runs/mask/large", config["runtime"]["artifact_root"])
 
     def test_checkpoint_summary_reads_completed_runs(self):
         runner = _load_runner()

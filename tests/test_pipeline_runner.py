@@ -42,8 +42,6 @@ def _build_test_config(root: Path, *, save_visuals: bool, seeds: list[int], upda
                     "inference_mode": "box",
                     "prompt_policy": {"name": "p", "prompt_type": "box", "prompt_source": "gt", "prompt_budget": 1, "multi_mask": False},
                 },
-                "stages": {},
-                "ablations": {},
             }
         ),
         encoding="utf-8",
@@ -283,7 +281,7 @@ class PipelineRunnerSeedTests(unittest.TestCase):
             self.assertIn("git", metadata)
             self.assertIn("torch", metadata)
 
-    def test_run_command_canonicalizes_legacy_prompted_sam2_name(self):
+    def test_run_command_rejects_unknown_baseline_name(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             config = _build_test_config(root, save_visuals=False, seeds=[42], update_reference_results=False)
@@ -309,10 +307,8 @@ class PipelineRunnerSeedTests(unittest.TestCase):
             with patch("irsam2_benchmark.pipeline.runner.build_dataset_adapter", side_effect=fake_build_dataset_adapter), patch(
                 "irsam2_benchmark.pipeline.runner.build_baseline_registry", side_effect=fake_build_baseline_registry
             ), patch("irsam2_benchmark.pipeline.runner.evaluate_method", side_effect=fake_evaluate_method):
-                run_command(config, "baseline", baseline_name="sam2_zero_shot")
-
-            metadata = json.loads((config.output_dir / "run_metadata.json").read_text(encoding="utf-8"))
-            self.assertEqual(metadata["baseline_name"], "sam2_pretrained_box_prompt")
+                with self.assertRaisesRegex(RuntimeError, "Unknown baseline"):
+                    run_command(config, "baseline", baseline_name="sam2_zero_shot")
 
 
 if __name__ == "__main__":

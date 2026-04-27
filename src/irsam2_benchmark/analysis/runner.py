@@ -36,7 +36,9 @@ def run_analysis(analysis_path: str | Path, *, dry_run: bool = False) -> Dict[st
     analysis_path = Path(analysis_path).resolve()
     root = _analysis_root(analysis_path)
     analysis_config = read_yaml(analysis_path)
-    matrix_path = _resolve_path(root, analysis_config.get("matrix", "configs/paper_experiments_v1.yaml"))
+    if "matrix" not in analysis_config:
+        raise KeyError("analysis config must define matrix")
+    matrix_path = _resolve_path(root, analysis_config["matrix"])
     matrix = read_yaml(matrix_path)
     artifact_root = _resolve_path(root, analysis_config.get("artifact_root", "artifacts/paper_v1"))
     output_dir = _resolve_path(root, analysis_config.get("output_dir", "artifacts/paper_v1/analysis"))
@@ -72,11 +74,10 @@ def run_analysis(analysis_path: str | Path, *, dry_run: bool = False) -> Dict[st
 
     tables_dir = output_dir / "tables"
     table_outputs: Dict[str, str] = {}
-    # 这些表分别对应主表、MultiModal 大小目标分表、自动 prompt/no-prompt 表、消融表和面积桶表。
+    # 这些表分别对应主表、MultiModal 大小目标分表、no-prompt 自动掩码表和面积桶表。
     table_outputs.update(output_pair(tables_dir, "main_baseline_table", main_baseline_table(rows, metrics)))
     table_outputs.update(output_pair(tables_dir, "multimodal_size_table", multimodal_size_table(rows, metrics)))
-    table_outputs.update(output_pair(tables_dir, "auto_prompt_table", _filter_methods(rows, {"sam2_no_prompt_auto_mask", "sam2_physics_auto_prompt"}, metrics)))
-    table_outputs.update(output_pair(tables_dir, "ablation_table", _filter_prefix(rows, "physics_", metrics)))
+    table_outputs.update(output_pair(tables_dir, "auto_mask_table", _filter_methods(rows, {"sam2_no_prompt_auto_mask"}, metrics)))
     table_outputs.update(output_pair(tables_dir, "bucket_table", bucket_table(rows, metrics)))
 
     significance_rows = run_paired_tests(rows, analysis_config)
@@ -101,12 +102,3 @@ def _filter_methods(rows: list[Dict[str, Any]], methods: set[str], metrics: list
 
     return summarize_by([row for row in rows if row.get("method") in methods], ["dataset", "method", "eval_unit"], metrics)
 
-
-def _filter_prefix(rows: list[Dict[str, Any]], prefix: str, metrics: list[str]) -> list[Dict[str, Any]]:
-    from .tables import summarize_by
-
-    return summarize_by(
-        [row for row in rows if str(row.get("method", "")).startswith(prefix) or row.get("method") == "sam2_physics_auto_prompt"],
-        ["dataset", "method", "eval_unit"],
-        metrics,
-    )

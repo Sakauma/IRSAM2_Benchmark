@@ -67,13 +67,6 @@ python scripts/run_5090_full_benchmark.py --config configs/server_benchmark_full
 python scripts/run_5090_full_benchmark.py --config configs/server_benchmark_full.local.yaml --smoke-test
 ```
 
-再跑 24 张图像级 micro test。它会展开和正式实验相同的组合，但每个数据集只跑前 24 张图像，输出到独立的 `paper_5090_micro/`：
-
-```bash
-python scripts/run_5090_micro_benchmark.py --config configs/server_benchmark_full.local.yaml --dry-run
-python scripts/run_5090_micro_benchmark.py --config configs/server_benchmark_full.local.yaml --stop-on-error
-```
-
 正式运行全部组合：
 
 ```bash
@@ -152,6 +145,6 @@ python scripts/run_5090_full_benchmark.py \
 - `no_prompt` 使用 SAM2 官方自动网格点批次 `auto_mask_points_per_batch`，不是跨图像重写。
 - `no_prompt` 通常最慢，且容易产生大量 false alarm。
 - 如果某张图在预测、mask 对齐、指标计算或可视化阶段报错，当前 run 不会退出；错误会写入 `eval_reports/error_log.jsonl`，字段包含 `sample_id`、`frame_id`、`image_path`、`mask_path`、`stage`、`error_type`、`error_message` 和 `traceback`，后续可按这些字段单独重跑。
-- 默认 `seeds: [42]` 是有意设置；当前是 zero-shot 推理基准，不是训练稳定性实验。
+- 默认 `seeds: [42]` 是有意设置；当前是预训练 SAM2 推理基准，不是训练稳定性实验。
 - `RBGT-Tiny` 的结果只能作为弱标注补充证据，不应写进 mask 主表。
 - 论文主文应把 `box` 写成 mask-derived loose-box oracle，不应写成数据集原生 box 标注。

@@ -188,7 +188,6 @@ cat /root/autodl-tmp/irsam2_artifacts/paper_5090/benchmark_manifest_latest.json
 
 - `configs/server_benchmark_full.local.yaml`
 - `configs/server_benchmark_full.example.yaml`
-- `configs/paper_analysis_v1.yaml`
 
 建议把代码状态也写入 artifact：
 

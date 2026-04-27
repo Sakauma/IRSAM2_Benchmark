@@ -17,7 +17,7 @@ from irsam2_benchmark.analysis import run_analysis  # noqa: E402
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Analyze completed IR-only paper benchmark artifacts.")
-    parser.add_argument("--analysis", type=Path, default=PROJECT_ROOT / "configs" / "paper_analysis_v1.yaml")
+    parser.add_argument("--analysis", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
     run_analysis(args.analysis, dry_run=args.dry_run)
@@ -26,4 +26,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

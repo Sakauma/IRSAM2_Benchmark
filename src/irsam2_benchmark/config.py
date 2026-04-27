@@ -91,7 +91,6 @@ class EvaluationConfig:
     prompt_policy_version: str = "prompt_policy_v1"
     metric_schema_version: str = "metric_schema_v1"
     reference_result_version: str = "reference_results_v1"
-    temporal_eval_policy: str = "sequence_aware"
     prompt_policy: PromptPolicy = field(
         default_factory=lambda: PromptPolicy(
             name="default_box_gt",
@@ -104,14 +103,6 @@ class EvaluationConfig:
 
 
 @dataclass
-class StageConfig:
-    transfer: Dict[str, Any] = field(default_factory=dict)
-    adapt: Dict[str, Any] = field(default_factory=dict)
-    distill: Dict[str, Any] = field(default_factory=dict)
-    quantize: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
 class AppConfig:
     root: Path
     config_path: Path
@@ -119,10 +110,7 @@ class AppConfig:
     dataset: DatasetConfig
     runtime: RuntimeConfig
     evaluation: EvaluationConfig
-    stages: StageConfig
-    ablations: Dict[str, Any]
     method: Dict[str, Any] = field(default_factory=dict)
-    modules: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def dataset_root(self) -> Path:
@@ -199,11 +187,7 @@ def load_app_config(config_path: str | Path) -> AppConfig:
             prompt_policy_version=evaluation.get("prompt_policy_version", "prompt_policy_v1"),
             metric_schema_version=evaluation.get("metric_schema_version", "metric_schema_v1"),
             reference_result_version=evaluation.get("reference_result_version", "reference_results_v1"),
-            temporal_eval_policy=evaluation.get("temporal_eval_policy", "sequence_aware"),
             prompt_policy=_build_prompt_policy(evaluation["prompt_policy"]),
         ),
-        stages=StageConfig(**raw.get("stages", {})),
-        ablations=raw.get("ablations", {}),
         method=raw.get("method", {}),
-        modules=raw.get("modules", {}),
     )

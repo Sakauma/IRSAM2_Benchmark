@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -10,8 +9,7 @@ import numpy as np
 from PIL import Image
 
 from ..config import AppConfig
-from ..core.interfaces import ModelCapabilities, PromptPolicy, PromptType
-from ..data.sample import Sample
+from ..core.interfaces import ModelCapabilities
 
 
 def _require_module(module_name: str, package_name: str):
@@ -53,15 +51,9 @@ class SAM2ModelAdapter:
         self.repo = config.sam2_repo
         self.model = None
         self.image_predictor = None
-        self.video_predictor = None
         self.auto_mask_generator = None
         self.capabilities = ModelCapabilities(
             supports_auto_mask=True,
-            supports_video_propagation=True,
-            supports_transfer=True,
-            supports_adapt=True,
-            supports_distill_teacher=True,
-            supports_quant_export=True,
         )
 
     def ensure_loaded(self) -> None:
@@ -86,29 +78,11 @@ class SAM2ModelAdapter:
             self.model = build_sam2(self.config.model.cfg, str(ckpt_path), mode="eval", **model_kwargs)
         self.model.eval()
         self.image_predictor = image_predictor_cls(self.model)
-        self.video_predictor = self._build_video_predictor()
         self.auto_mask_generator = self._build_auto_mask_generator()
 
     def _resolve_symbol(self, module_name: str, symbol_name: str):
         module = importlib.import_module(module_name)
         return getattr(module, symbol_name)
-
-    def _build_video_predictor(self):
-        # 不同 SAM2 checkout 暴露的视频 API 名称略有差异，这里按常见入口做兼容探测。
-        ckpt_path = self._resolve_checkpoint_path()
-        candidates = [
-            ("sam2.build_sam", "build_sam2_video_predictor"),
-            ("sam2.sam2_video_predictor", "SAM2VideoPredictor"),
-        ]
-        for module_name, symbol_name in candidates:
-            try:
-                symbol = self._resolve_symbol(module_name, symbol_name)
-                if symbol_name.startswith("build_"):
-                    return symbol(self.config.model.cfg, str(ckpt_path), device=self.config.runtime.device)
-                return symbol(self.model)
-            except Exception:
-                continue
-        return None
 
     def _resolve_checkpoint_path(self) -> Path:
         # 允许 YAML 写绝对路径、相对 SAM2 repo 的路径，或相对 benchmark 项目的路径。
@@ -212,94 +186,3 @@ class SAM2ModelAdapter:
         if self.auto_mask_generator is None:
             raise RuntimeError("Automatic mask generation is not available in the local SAM2 checkout.")
         return list(self.auto_mask_generator.generate(image_rgb))
-
-    def predict_video_sequence(self, samples: list[Sample], prompt_policy: PromptPolicy) -> dict[str, np.ndarray]:
-        # SAM2 video predictor 读取目录中的帧，因此这里临时把同一 track 的帧写成连续 png。
-        self.ensure_loaded()
-        if self.video_predictor is None:
-            raise RuntimeError("Video propagation is not available in the local SAM2 checkout.")
-        if not samples:
-            return {}
-
-        sequence_ids = {sample.sequence_id for sample in samples}
-        track_ids = {sample.track_id for sample in samples}
-        if len(sequence_ids) != 1:
-            raise RuntimeError(f"Video propagation expects one sequence per call, got {sorted(sequence_ids)!r}.")
-        if len(track_ids) != 1 or None in track_ids:
-            raise RuntimeError("Video propagation expects one non-empty track_id per call.")
-
-        seen_frame_ids: set[str] = set()
-        for sample in samples:
-            if sample.frame_id in seen_frame_ids:
-                raise RuntimeError(
-                    f"Video propagation expects one sample per frame within a track, got duplicate frame_id={sample.frame_id!r}."
-                )
-            seen_frame_ids.add(sample.frame_id)
-
-        with tempfile.TemporaryDirectory(prefix="irsam2_video_") as temp_dir:
-            temp_root = Path(temp_dir)
-            for idx, sample in enumerate(samples):
-                with Image.open(sample.image_path) as image:
-                    image.save(temp_root / f"{idx:06d}.png")
-
-            init_state = getattr(self.video_predictor, "init_state", None)
-            add_prompt = getattr(self.video_predictor, "add_new_points_or_box", None)
-            propagate = getattr(self.video_predictor, "propagate_in_video", None)
-            if init_state is None or add_prompt is None or propagate is None:
-                raise RuntimeError("The local SAM2 video predictor does not expose the expected API.")
-
-            state = init_state(video_path=str(temp_root))
-            first_sample = samples[0]
-            # 初始 prompt 只加在第一帧；refresh_interval 可按策略在后续帧重新注入 prompt。
-            point_coords = None
-            point_labels = None
-            box = None
-            if prompt_policy.prompt_type == PromptType.BOX and first_sample.bbox_loose is not None:
-                box = np.array(first_sample.bbox_loose, dtype=np.float32)
-            elif prompt_policy.prompt_type == PromptType.POINT and first_sample.point_prompt is not None:
-                point_coords = np.array([first_sample.point_prompt], dtype=np.float32)
-                point_labels = np.array([1], dtype=np.int32)
-            elif prompt_policy.prompt_type == PromptType.BOX_POINT:
-                box = np.array(first_sample.bbox_loose, dtype=np.float32) if first_sample.bbox_loose is not None else None
-                if first_sample.point_prompt is not None:
-                    point_coords = np.array([first_sample.point_prompt], dtype=np.float32)
-                    point_labels = np.array([1], dtype=np.int32)
-
-            add_prompt(
-                inference_state=state,
-                frame_idx=0,
-                obj_id=1,
-                points=point_coords,
-                labels=point_labels,
-                box=box,
-            )
-
-            predictions: dict[str, np.ndarray] = {}
-            refresh_interval = prompt_policy.refresh_interval
-            for frame_idx, object_ids, mask_logits in propagate(state):
-                del object_ids
-                if hasattr(mask_logits, "detach"):
-                    logits = mask_logits.detach().cpu().numpy()
-                else:
-                    logits = np.asarray(mask_logits)
-                if logits.ndim >= 3:
-                    logits = logits[0]
-                mask = (logits > 0).astype(np.float32)
-                predictions[samples[frame_idx].sample_id] = mask
-                if refresh_interval and frame_idx > 0 and frame_idx % refresh_interval == 0 and frame_idx < len(samples):
-                    sample = samples[frame_idx]
-                    refresh_box = np.array(sample.bbox_loose, dtype=np.float32) if sample.bbox_loose is not None else None
-                    refresh_points = None
-                    refresh_labels = None
-                    if sample.point_prompt is not None:
-                        refresh_points = np.array([sample.point_prompt], dtype=np.float32)
-                        refresh_labels = np.array([1], dtype=np.int32)
-                    add_prompt(
-                        inference_state=state,
-                        frame_idx=frame_idx,
-                        obj_id=1,
-                        points=refresh_points,
-                        labels=refresh_labels,
-                        box=refresh_box,
-                    )
-            return predictions

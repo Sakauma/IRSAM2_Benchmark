@@ -1,24 +1,21 @@
 # IRSAM2_Benchmark
 
-`IRSAM2_Benchmark` 是面向红外小目标分割论文实验的 `SAM2` benchmark 平台。
+`IRSAM2_Benchmark` 是面向红外目标分割实验的 SAM2 benchmark 工程。
 
-当前平台只服务红外图像实验。真实 RGB 图像不会作为输入、对比项或融合分支进入实验流程。`SAM2` 需要三通道输入时，平台只会把单通道红外图像归一化后复制为三通道。
+当前工程只保留一条主流程：用完整 YAML 展开 SAM2 baseline 矩阵，运行 prompted 与 no-prompt 自动掩码评估，随后基于 artifacts 生成分析表格。旧版 paper runner、quick/smoke 包装脚本、迁移/蒸馏/量化占位接口已经移除。
 
 ## 当前能力
 
-- 支持 `SAM2` box、point、box+point、no-prompt automatic mask baseline。
-- 支持 IR physics-prior 自动 prompt baseline：`sam2_physics_auto_prompt`。
-- 支持 COCO polygon、COCO box、`images/ + masks/`、`RBGT-Tiny` 红外分支数据接入。
-- 支持 `MultiModal` 的 polygon 标注作为 mask supervision。
-- 支持小目标指标和 prompt 质量指标。
-- 支持论文实验矩阵 YAML，一条命令展开多数据集、多方法、多消融实验。
-- 预留 adapter、decoder、loss、distiller、quantizer 的模块化接口，后续训练、蒸馏、量化可以按配置消融。
+- 支持 SAM2 box、tight box、point、box+point 显式 prompt baseline。
+- 支持 SAM2 no-prompt automatic mask baseline。
+- 支持 `NUAA-SIRST`、`NUDT-SIRST`、`IRSTD-1K`、`MultiModal` 四个 mask-supervised 数据集。
+- 支持 `RBGT-Tiny` 红外分支作为弱标注补充数据集。
+- 支持总体、小目标、大目标分组指标。
+- 支持单 YAML 配置路径、模型、方法、数据集、seed、batch、suite 和分析参数。
 
 ## 安装
 
-平台运行最基本的 `SAM2` baseline 也需要 PyTorch，因此 `torch` 和 `torchvision` 是核心依赖，不是可选训练依赖。
-
-建议先按本机 CUDA 环境安装 PyTorch，再安装本仓库：
+先按本机 CUDA 环境安装 PyTorch，再安装本仓库：
 
 ```bash
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
@@ -27,161 +24,123 @@ pip install -e .
 
 如果 CUDA 版本不是 `cu124`，请用 PyTorch 官网生成的安装命令替换第一行。
 
-`SAM2` 官方源码不复制进本仓库。你需要在本机保留一个 `facebookresearch/sam2` 仓库，并在运行用 YAML 中配置它的位置。
+SAM2 官方源码不放在本仓库内。你需要保留一个 `facebookresearch/sam2` 仓库，并在 YAML 中配置它的位置。
 
-## 配置方式
+## 配置
 
-服务器 benchmark 推荐使用单一完整 YAML。这个 YAML 同时记录路径、模型、方法、数据集、suite、seed、batch 和分析参数。
-
-先复制模板：
+复制完整配置模板：
 
 ```bash
 cp configs/server_benchmark_full.example.yaml configs/server_benchmark_full.local.yaml
 ```
 
-然后编辑 `configs/server_benchmark_full.local.yaml` 中的 `paths`、`runtime`、`models`、`datasets`、`methods`、`suites` 和 `analysis`。该文件包含真实服务器路径，已经被 `.gitignore` 的 `configs/*.local.yaml` 规则排除，不建议提交。
+编辑 `configs/server_benchmark_full.local.yaml`：
 
-旧的论文矩阵入口 `run_paper_experiments.py` 仍支持 `configs/local_paths.yaml`。如果只运行旧入口，可以继续复制路径模板：
+- `paths.sam2.repo`：SAM2 官方仓库路径。
+- `paths.sam2.checkpoint_root`：SAM2 checkpoint 目录。
+- `paths.datasets.*`：各数据集根目录。
+- `paths.artifacts.root`：benchmark 输出目录。
+- `runtime`：正式运行的 batch、seed、visual 等参数。
+- `smoke_test_runtime`：`--smoke-test` 使用的轻量参数。
+- `models`：要评估的 SAM2 checkpoint。
+- `suites`：要展开的数据集和方法组合。
 
+`configs/*.local.yaml` 被 `.gitignore` 排除，不应提交。
 
-```bash
-cp configs/local_paths.example.yaml configs/local_paths.yaml
-```
+## 运行完整基准
 
-然后编辑 `configs/local_paths.yaml`：
-
-```yaml
-sam2:
-  repo: "/path/to/sam2"
-  checkpoint_root: "/path/to/sam2/checkpoints"
-
-artifacts:
-  root: "artifacts"
-
-datasets:
-  nuaa_sirst: "/path/to/NUAA-SIRST"
-  nudt_sirst: "/path/to/NUDT-SIRST"
-  irstd_1k: "/path/to/IRSTD-1K"
-  multimodal: "/path/to/MultiModal"
-  rbgt_tiny_ir_box: "/path/to/RBGT-Tiny"
-
-execution:
-  cuda_visible_devices: "0"
-  pytorch_cuda_alloc_conf: "expandable_segments:True"
-
-runtime:
-  seeds: [42]
-```
-
-## 论文实验入口
-
-机器可读实验矩阵：
-
-- `configs/paper_experiments_v1.yaml`
-
-人工可读实验清单：
-
-- `docs/paper_experiment_matrix.md`
-
-先 dry-run 检查展开后的命令和路径：
+先 dry-run 检查展开结果：
 
 ```bash
-python scripts/run_paper_experiments.py \
-  --matrix configs/paper_experiments_v1.yaml \
-  --paths configs/local_paths.yaml \
-  --group p0_all \
+python scripts/run_5090_full_benchmark.py \
+  --config configs/server_benchmark_full.local.yaml \
   --dry-run
 ```
 
-确认无误后运行 P0 全部实验：
+跑轻量 smoke：
 
 ```bash
-python scripts/run_paper_experiments.py \
-  --matrix configs/paper_experiments_v1.yaml \
-  --paths configs/local_paths.yaml \
-  --group p0_all
+python scripts/run_5090_full_benchmark.py \
+  --config configs/server_benchmark_full.local.yaml \
+  --smoke-test \
+  --stop-on-error
 ```
 
-实验跑完后生成论文级分析：
+正式运行：
 
 ```bash
-python scripts/analyze_paper_results.py \
-  --analysis configs/paper_analysis_v1.yaml
+python scripts/run_5090_full_benchmark.py \
+  --config configs/server_benchmark_full.local.yaml
 ```
 
-分析产物默认写入 `artifacts/paper_v1/analysis/`，包括论文表格、显著性检验、错误分桶、案例索引和 Markdown 报告。
-
-`run_paper_experiments.py` 会把每个展开后的运行配置持久化到 `artifacts/paper_v1/generated/run_configs/<group>/`，便于复跑和审计。
-
-可选实验组：
-
-- `p0_baselines`：oracle prompt baseline。
-- `p0_auto_prompt`：Track A physics auto-prompt 与单独的 Track B no-prompt auto-mask。
-- `p0_ablation`：physics prior 和 prompt 后处理消融。
-- `p0_all`：以上全部 P0 实验。
-
-## 5090 单卡完整基准
-
-如果要在单张 RTX 5090 服务器上跑完整基准，推荐使用专用入口：
+常用筛选参数：
 
 ```bash
-python scripts/run_5090_full_benchmark.py --config configs/server_benchmark_full.local.yaml --dry-run
-python scripts/run_5090_full_benchmark.py --config configs/server_benchmark_full.local.yaml --smoke-test
-python scripts/run_5090_full_benchmark.py --config configs/server_benchmark_full.local.yaml
+python scripts/run_5090_full_benchmark.py \
+  --config configs/server_benchmark_full.local.yaml \
+  --suites mask \
+  --checkpoints tiny,small \
+  --modes box,point
 ```
 
-该入口默认展开：
+`--rerun` 会强制重跑已完成组合；默认会跳过完整 artifacts。
 
-- 4 个 SAM2.1 checkpoint：`tiny`、`small`、`base_plus`、`large`
-- 4 种主 prompt policy：`box`、`point`、`box+point`、`no_prompt`
-- 4 个 mask 主数据集和单独的 `RBGT-Tiny` box-only 补充数据集
-- `base_plus` 上额外运行 `tight_box` vs `loose_box`，检查 mask-derived box 生成策略是否影响结论
+## 单条 baseline
 
-完整运行方案见 `docs/server_5090_benchmark.md`。服务器运行、验收和结果归档清单见 `docs/server_benchmark_runbook.md`。
-
-## 单条 baseline 命令
-
-如果只想手动跑某个配置，可以直接使用 CLI：
+矩阵脚本会自动生成单 run YAML。需要手动复跑某个生成配置时，可以直接调用 CLI：
 
 ```bash
-python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_pretrained_box_prompt
-python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_pretrained_tight_box_prompt
-python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_pretrained_point_prompt
-python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_pretrained_box_point_prompt
-python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_no_prompt_auto_mask
-python -m irsam2_benchmark.cli run baseline --config configs/benchmark_v1.yaml --baseline sam2_physics_auto_prompt
+python -m irsam2_benchmark.cli run baseline \
+  --config artifacts/paper_5090/generated/run_configs/mask/tiny/nuaa_sirst_sam2_box_oracle.yaml \
+  --baseline sam2_pretrained_box_prompt
 ```
 
-快速 smoke test：
+当前合法 baseline 名称：
 
-```bash
-python -m irsam2_benchmark.cli run baseline --config configs/benchmark_smoke.yaml --baseline bbox_rect
-```
+- `bbox_rect`
+- `sam2_pretrained_box_prompt`
+- `sam2_pretrained_tight_box_prompt`
+- `sam2_pretrained_point_prompt`
+- `sam2_pretrained_box_point_prompt`
+- `sam2_no_prompt_auto_mask`
 
 ## 数据集约定
 
-论文主实验使用四个 mask-supervised 红外数据集：
+主实验使用四个 mask-supervised 数据集：
 
 - `NUAA-SIRST`
 - `NUDT-SIRST`
 - `IRSTD-1K`
 - `MultiModal`
 
-`MultiModal` 使用 `img/ + label/` 结构，平台通过 `MultiModalAdapter` 将 JSON polygon 解码为 mask。
+`MultiModal` 使用 `img/ + label/` 结构，平台会把 JSON polygon 解码为 mask。
 
-`RBGT-Tiny` 只使用红外分支和 box 标注。它不进入主 mask mIoU 表，主要用于 box-only weak supervision 或后续 prompt 相关实验。
+`RBGT-Tiny` 只使用红外分支和 COCO 风格标注。它是补充 suite，不和四个 mask 主数据集混在同一主表中解释。
 
-对 mask-supervised 数据集，`box` 和 `point` prompt 不是原生标注。平台会从 GT mask 确定性生成 prompt：
+对 mask-supervised 数据集，box 和 point prompt 都从 GT mask 确定性生成：
 
-- `box` 默认是 `mask_derived_adaptive_loose_box_centroid_point_v2` 中的 adaptive loose box：先取 GT mask 最小外接矩形，再按 `pad_ratio=0.15`、`min_pad=2px` 外扩，但最终边长不超过 tight box 的 2 倍。
-- `tight_box` 是 GT mask 前景的最小外接矩形，仅用于 prompt 协议敏感性诊断。
-- `point` 是 GT mask 前景像素质心。
+- `box`：GT mask tight box 外扩得到 adaptive loose box。
+- `tight_box`：GT mask 前景最小外接矩形。
+- `point`：GT mask 前景像素质心。
 
 ## 结果输出
 
-服务器 benchmark 的默认输出目录由 `configs/server_benchmark_full.local.yaml` 中的 `paths.artifacts.root` 控制；旧论文矩阵入口仍由 `configs/local_paths.yaml` 中的 `artifacts.root` 控制。
+完整 benchmark 默认写入：
 
-每次运行会写出：
+```text
+artifacts/
+└── paper_5090/
+    ├── benchmark_manifest_latest.json
+    ├── run_manifest_latest.csv
+    ├── generated/
+    │   ├── run_configs/
+    │   ├── matrices/
+    │   └── analysis_configs/
+    ├── runs/
+    └── analysis/
+```
+
+每个 run 至少包含：
 
 - `benchmark_spec.json`
 - `run_metadata.json`
@@ -189,90 +148,45 @@ python -m irsam2_benchmark.cli run baseline --config configs/benchmark_smoke.yam
 - `summary.json`
 - `results.json`
 - `eval_reports/rows.json`
-- 可选可视化结果
 
-论文实验矩阵会按以下结构组织输出：
+如果单样本失败，会写入 `eval_reports/error_log.jsonl`。
 
-```text
-artifacts/
-└── paper_v1/
-    ├── T1_oracle_prompt_baselines/
-    ├── T2_ir_auto_prompt/
-    ├── T7_no_prompt_auto_mask/
-    └── T3_prior_prompt_ablation/
+## 分析
+
+`run_5090_full_benchmark.py` 会在 suite 配置 `run_analysis: true` 时自动生成并执行分析配置。也可以手动运行：
+
+```bash
+python scripts/analyze_paper_results.py \
+  --analysis artifacts/paper_5090/generated/analysis_configs/mask/tiny.yaml
 ```
 
-## 指标
-
-常规分割指标：
-
-- `mIoU`
-- `Dice`
-- `BoundaryF1Tol1`
-- `LatencyMs`
-- `BBoxIoU`
-
-红外小目标指标：
-
-- `TargetRecallIoU10`
-- `TargetRecallIoU25`
-- `TargetRecallIoU50`
-- `FalseAlarmPixelsPerMP`
-- `FalseAlarmComponents`
-- `GTAreaPixels`
-- `PredAreaPixels`
-
-Prompt 质量指标：
-
-- `PromptHitRate`
-- `PromptDistanceToCentroid`
-- `PromptBoxCoverage`
-
-## 模块化接口
-
-当前已预留以下 factory：
-
-- `PriorFactory`
-- `PromptFactory`
-- `AdapterFactory`
-- `DecoderFactory`
-- `LossFactory`
-- `DistillerFactory`
-- `QuantizerFactory`
-
-P0 已实现：
-
-- `prior_fusion`
-- `heuristic_physics`
-- `sam2_physics_auto_prompt`
-
-训练、蒸馏、量化阶段后续应复用同一套 `modules` 配置接口，不要另起一套实验入口。
+分析输出包括主表、MultiModal 大小目标分表、no-prompt 自动掩码表、面积桶表、显著性检验和案例索引。
 
 ## 测试
 
-运行完整单元测试：
+运行单元测试：
 
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-当前测试覆盖：
+运行主配置 dry-run 测试：
 
-- 数据集 adapter。
-- COCO polygon mask 解码。
-- `RBGT-Tiny` 红外分支读取。
-- `SAM2` adapter 行为。
-- physics prior/prompt 模块。
-- 小目标指标和 prompt 指标。
-- 论文实验矩阵 dry-run。
+```bash
+python scripts/run_5090_full_benchmark.py \
+  --config configs/server_benchmark_full.local.yaml \
+  --suites mask \
+  --checkpoints tiny \
+  --modes box \
+  --dry-run
+```
 
-## 文档索引
+## 文档
 
-- `docs/README.md`：文档总入口。
-- `docs/paper_experiment_matrix.md`：论文实验矩阵说明。
-- `docs/eval_v2_roadmap.md`：评估模块后续改进计划。
-- `docs/metric_cards.md`：指标定义。
-- `docs/dataset_cards.md`：数据集约定。
-- `docs/artifact_schema_spec.md`：输出 schema。
 - `configs/README.md`：配置文件说明。
 - `scripts/README.md`：脚本说明。
+- `docs/server_5090_benchmark.md`：完整基准运行方案。
+- `docs/server_benchmark_runbook.md`：服务器运行和验收清单。
+- `docs/metric_cards.md`：指标定义。
+- `docs/dataset_cards.md`：数据集约定。
+- `docs/artifact_schema_spec.md`：artifact schema。

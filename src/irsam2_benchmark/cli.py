@@ -22,17 +22,15 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--analysis", required=True, type=Path)
     analyze.add_argument("--dry-run", action="store_true")
 
-    # 这些子命令共用同一个 AppConfig；当前论文主路径实际使用 baseline。
-    for name in ["transfer", "adapt", "distill", "quantize", "evaluate", "pipeline", "ablation-grid", "baseline"]:
-        child = run_sub.add_parser(name)
-        child.add_argument("--config", required=True, type=Path)
-        if name == "baseline":
-            child.add_argument(
-                "--baseline",
-                required=True,
-                metavar="NAME",
-                help="Baseline name. Canonical names: " + ", ".join(CANONICAL_BASELINE_NAMES),
-            )
+    baseline = run_sub.add_parser("baseline")
+    baseline.add_argument("--config", required=True, type=Path)
+    baseline.add_argument(
+        "--baseline",
+        required=True,
+        choices=CANONICAL_BASELINE_NAMES,
+        metavar="NAME",
+        help="Baseline name.",
+    )
     return parser
 
 

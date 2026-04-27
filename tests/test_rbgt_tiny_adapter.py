@@ -68,8 +68,6 @@ class RBGTTinyAdapterTests(unittest.TestCase):
                             "inference_mode": "box",
                             "prompt_policy": {"name": "p", "prompt_type": "box", "prompt_source": "gt", "prompt_budget": 1, "multi_mask": False},
                         },
-                        "stages": {},
-                        "ablations": {},
                     }
                 ),
                 encoding="utf-8",
