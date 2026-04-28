@@ -214,6 +214,10 @@ def _resolve_explicit_track_id(record: object) -> Optional[str]:
     return None
 
 
+def _path_parts(value: object) -> tuple[str, ...]:
+    return tuple(part for part in Path(str(value)).as_posix().split("/") if part)
+
+
 class MultiModalAdapter(DatasetAdapter):
     adapter_name = "multimodal_raw"
     notes = "Reads raw MultiModal img/ + label/ JSON files and synthesizes prompts from polygons."
@@ -386,11 +390,59 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
     def can_handle(self, config: AppConfig) -> bool:
         return config.dataset.adapter == self.adapter_name or config.dataset.dataset_id == "RBGT-Tiny"
 
+    def _annotation_files(self, ann_dir: Path) -> List[Path]:
+        ir_named = sorted(ann_dir.glob("instances_01*.json"))
+        if ir_named:
+            return ir_named
+        branch_named = [
+            path
+            for path in sorted(ann_dir.glob("*.json"))
+            if any(token in path.stem.lower().split("_") for token in ("01", "ir", "infrared", "thermal"))
+        ]
+        return branch_named or sorted(ann_dir.glob("*.json"))
+
+    def _annotation_file_is_ir_specific(self, ann_path: Path) -> bool:
+        stem_parts = ann_path.stem.lower().split("_")
+        return any(token in stem_parts for token in ("01", "ir", "infrared", "thermal"))
+
+    def _image_file_is_ir_branch(self, file_name: object) -> bool:
+        parts = {part.lower() for part in _path_parts(file_name)}
+        return bool(parts & {"01", "ir", "infrared", "thermal"})
+
+    def _resolve_image_root(self, root: Path, images_dir: Optional[str]) -> Path:
+        configured = root / (images_dir or "image")
+        if configured.exists():
+            return configured
+        for candidate_name in ("image", "images"):
+            candidate = root / candidate_name
+            if candidate.exists():
+                return candidate
+        return configured
+
+    def _image_root_is_flat_ir_only(self, image_root: Path) -> bool:
+        try:
+            children = list(image_root.iterdir())
+        except OSError:
+            return False
+        return any(child.is_file() for child in children)
+
+    def _resolve_image_path(self, image_root: Path, file_name: object, ann_path: Path) -> Path:
+        relative = Path(str(file_name))
+        direct = image_root / relative
+        if direct.exists():
+            return direct
+        if self._annotation_file_is_ir_specific(ann_path):
+            for candidate in image_root.rglob(relative.name):
+                if candidate.is_file():
+                    return candidate
+        return direct
+
     def load_samples(self, config: AppConfig) -> List[Sample]:
         root = _dataset_root(config)
         ann_dir = root / (config.dataset.annotations_dir or "annotations_coco")
-        image_root = root / (config.dataset.images_dir or "image")
-        ann_files = sorted(ann_dir.glob("instances_01*.json"))
+        image_root = self._resolve_image_root(root, config.dataset.images_dir)
+        ann_files = self._annotation_files(ann_dir)
+        image_root_is_flat_ir_only = self._image_root_is_flat_ir_only(image_root)
         samples: List[Sample] = []
         seen_images: set[str] = set()
         for ann_path in ann_files:
@@ -402,9 +454,10 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
                 if image_info is None:
                     continue
                 file_name = image_info["file_name"]
-                if "/01/" not in Path(file_name).as_posix():
+                ann_is_ir_specific = self._annotation_file_is_ir_specific(ann_path)
+                if not ann_is_ir_specific and not image_root_is_flat_ir_only and not self._image_file_is_ir_branch(file_name):
                     continue
-                image_path = image_root / file_name
+                image_path = self._resolve_image_path(image_root, file_name, ann_path)
                 if not image_path.exists():
                     continue
                 if _limit_reached(config.runtime.max_images, len(seen_images)) and file_name not in seen_images:
