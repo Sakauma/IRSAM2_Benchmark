@@ -9,10 +9,7 @@ from typing import Any, Dict, Optional
 from .core.fingerprints import sha256_file
 from .core.interfaces import InferenceMode, PromptPolicy, PromptSource, PromptType, Track
 
-try:  # pragma: no cover - optional dependency
-    import yaml
-except Exception:  # pragma: no cover - optional dependency
-    yaml = None
+import yaml
 
 
 def _read_structured_file(path: Path) -> Dict[str, Any]:
@@ -20,8 +17,6 @@ def _read_structured_file(path: Path) -> Dict[str, Any]:
     if path.suffix.lower() == ".json":
         return json.loads(path.read_text(encoding="utf-8"))
     if path.suffix.lower() in {".yaml", ".yml"}:
-        if yaml is None:
-            raise RuntimeError("PyYAML is required to read YAML config files.")
         return yaml.safe_load(path.read_text(encoding="utf-8"))
     raise ValueError(f"Unsupported config file format: {path}")
 
