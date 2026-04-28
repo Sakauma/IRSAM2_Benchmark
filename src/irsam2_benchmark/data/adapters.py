@@ -419,12 +419,21 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
                 return candidate
         return configured
 
-    def _image_root_is_flat_ir_only(self, image_root: Path) -> bool:
+    def _image_root_is_ir_only_layout(self, image_root: Path) -> bool:
+        image_suffixes = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff"}
+        branch_tokens = {"00", "01", "rgb", "visible", "vis", "color", "ir", "infrared", "thermal"}
+        seen_image = False
         try:
-            children = list(image_root.iterdir())
+            for path in image_root.rglob("*"):
+                if not path.is_file() or path.suffix.lower() not in image_suffixes:
+                    continue
+                seen_image = True
+                parent_parts = {part.lower() for part in path.relative_to(image_root).parts[:-1]}
+                if parent_parts & branch_tokens:
+                    return False
         except OSError:
             return False
-        return any(child.is_file() for child in children)
+        return seen_image
 
     def _resolve_image_path(self, image_root: Path, file_name: object, ann_path: Path) -> Path:
         relative = Path(str(file_name))
@@ -442,7 +451,7 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
         ann_dir = root / (config.dataset.annotations_dir or "annotations_coco")
         image_root = self._resolve_image_root(root, config.dataset.images_dir)
         ann_files = self._annotation_files(ann_dir)
-        image_root_is_flat_ir_only = self._image_root_is_flat_ir_only(image_root)
+        image_root_is_ir_only_layout = self._image_root_is_ir_only_layout(image_root)
         samples: List[Sample] = []
         seen_images: set[str] = set()
         for ann_path in ann_files:
@@ -455,7 +464,7 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
                     continue
                 file_name = image_info["file_name"]
                 ann_is_ir_specific = self._annotation_file_is_ir_specific(ann_path)
-                if not ann_is_ir_specific and not image_root_is_flat_ir_only and not self._image_file_is_ir_branch(file_name):
+                if not ann_is_ir_specific and not image_root_is_ir_only_layout and not self._image_file_is_ir_branch(file_name):
                     continue
                 image_path = self._resolve_image_path(image_root, file_name, ann_path)
                 if not image_path.exists():

@@ -197,6 +197,29 @@ class RBGTTinyAdapterTests(unittest.TestCase):
             self.assertEqual(loaded.manifest.sample_count, 1)
             self.assertEqual(loaded.samples[0].image_path.parent.name, "images")
 
+    def test_rbgt_adapter_reads_ir_only_sequence_subdirectories(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_root = root / "images" / "DJI_0022_1"
+            ann_root = root / "annotations_coco"
+            image_root.mkdir(parents=True)
+            ann_root.mkdir()
+            Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(image_root / "00000.jpg")
+            payload = {
+                "images": [{"id": 1, "file_name": "DJI_0022_1/00000.jpg", "width": 8, "height": 8}],
+                "annotations": [{"id": 1, "image_id": 1, "category_id": 1, "bbox": [1, 1, 3, 3]}],
+                "categories": [{"id": 1, "name": "target"}],
+            }
+            (ann_root / "instances_test2017.json").write_text(json.dumps(payload), encoding="utf-8")
+            config_path = root / "config.json"
+            _write_rbgt_config(config_path)
+            config = load_app_config(config_path)
+
+            loaded = build_dataset_adapter(config).load(config)
+
+            self.assertEqual(loaded.manifest.sample_count, 1)
+            self.assertEqual(loaded.samples[0].image_path.parent.name, "DJI_0022_1")
+
 
 if __name__ == "__main__":
     unittest.main()
