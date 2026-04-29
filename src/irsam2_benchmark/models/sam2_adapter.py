@@ -122,6 +122,28 @@ class SAM2ModelAdapter:
             raise RuntimeError("SAM2 image predictor did not initialize.")
         return self.image_predictor
 
+    @staticmethod
+    def _prediction_payload(masks: Any, scores: Any, logits: Any) -> dict[str, Any]:
+        return {
+            "masks": np.asarray(masks, dtype=np.float32),
+            "scores": np.asarray(scores, dtype=np.float32),
+            "logits": np.asarray(logits, dtype=np.float32),
+        }
+
+    @staticmethod
+    def _prompt_count(
+        *,
+        boxes: list[Optional[Iterable[float]]] | None,
+        points: list[Optional[np.ndarray]] | None,
+        point_labels: list[Optional[np.ndarray]] | None,
+    ) -> int:
+        lengths = [len(value) for value in (boxes, points, point_labels) if value is not None]
+        if not lengths:
+            return 1
+        if len(set(lengths)) != 1:
+            raise ValueError(f"Prompt batch fields have mismatched lengths: {lengths!r}.")
+        return lengths[0]
+
     def predict_image(
         self,
         image_rgb: np.ndarray,
@@ -141,11 +163,33 @@ class SAM2ModelAdapter:
             multimask_output=multimask_output,
             return_logits=True,
         )
-        return {
-            "masks": np.asarray(masks, dtype=np.float32),
-            "scores": np.asarray(scores, dtype=np.float32),
-            "logits": np.asarray(logits, dtype=np.float32),
-        }
+        return self._prediction_payload(masks, scores, logits)
+
+    def predict_prompts_for_image(
+        self,
+        image_rgb: np.ndarray,
+        *,
+        boxes: list[Optional[Iterable[float]]] | None = None,
+        points: list[Optional[np.ndarray]] | None = None,
+        point_labels: list[Optional[np.ndarray]] | None = None,
+        multimask_output: bool = False,
+    ) -> list[dict[str, Any]]:
+        # 同一张图的多个 prompt 共享一次 image embedding，避免重复 set_image。
+        image_predictor = self._require_image_predictor()
+        prompt_count = self._prompt_count(boxes=boxes, points=points, point_labels=point_labels)
+        image_predictor.set_image(image_rgb)
+        results: list[dict[str, Any]] = []
+        for idx in range(prompt_count):
+            box = None if boxes is None or boxes[idx] is None else np.array(boxes[idx], dtype=np.float32)
+            masks, scores, logits = image_predictor.predict(
+                box=box,
+                point_coords=None if points is None else points[idx],
+                point_labels=None if point_labels is None else point_labels[idx],
+                multimask_output=multimask_output,
+                return_logits=True,
+            )
+            results.append(self._prediction_payload(masks, scores, logits))
+        return results
 
     def predict_images(
         self,
@@ -183,11 +227,7 @@ class SAM2ModelAdapter:
             return_logits=True,
         )
         return [
-            {
-                "masks": np.asarray(masks[idx], dtype=np.float32),
-                "scores": np.asarray(scores[idx], dtype=np.float32),
-                "logits": np.asarray(logits[idx], dtype=np.float32),
-            }
+            self._prediction_payload(masks[idx], scores[idx], logits[idx])
             for idx in range(len(image_rgbs))
         ]
 

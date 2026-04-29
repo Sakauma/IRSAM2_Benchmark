@@ -11,6 +11,21 @@ class StubImagePredictor:
     def __init__(self):
         self.image_batch = None
         self.box_batch = None
+        self.image = None
+        self.set_image_calls = 0
+        self.predict_calls = []
+
+    def set_image(self, image):
+        self.image = image
+        self.set_image_calls += 1
+
+    def predict(self, **kwargs):
+        self.predict_calls.append(kwargs)
+        idx = len(self.predict_calls)
+        masks = np.full((1, 2, 2), idx, dtype=np.float32)
+        scores = np.array([0.4 + idx], dtype=np.float32)
+        logits = np.full((1, 2, 2), idx, dtype=np.float32)
+        return masks, scores, logits
 
     def set_image_batch(self, image_batch):
         self.image_batch = image_batch
@@ -79,6 +94,18 @@ class SAM2AdapterImageBatchTests(unittest.TestCase):
         self.assertEqual(float(results[1]["masks"][0, 0, 0]), 2.0)
         self.assertEqual(len(adapter.image_predictor.image_batch), 2)
         self.assertEqual(adapter.image_predictor.box_batch[0].tolist(), [0.0, 0.0, 2.0, 2.0])
+
+    def test_predict_prompts_for_image_sets_image_once(self):
+        adapter = DummyImageBatchAdapter()
+        image = np.zeros((4, 4, 3), dtype=np.uint8)
+
+        results = adapter.predict_prompts_for_image(image, boxes=[[0, 0, 2, 2], [1, 1, 3, 3]])
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(adapter.image_predictor.set_image_calls, 1)
+        self.assertEqual(len(adapter.image_predictor.predict_calls), 2)
+        self.assertEqual(adapter.image_predictor.predict_calls[0]["box"].tolist(), [0.0, 0.0, 2.0, 2.0])
+        self.assertEqual(float(results[1]["masks"][0, 0, 0]), 2.0)
 
     def test_auto_mask_generator_receives_points_per_batch(self):
         adapter = DummyAutoMaskAdapter()

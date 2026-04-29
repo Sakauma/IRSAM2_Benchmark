@@ -13,7 +13,14 @@ from PIL import Image
 
 from ..config import AppConfig
 from ..core.interfaces import DatasetAdapterProtocol
-from .masks import MASK_SOURCE_KEY, coco_segmentation_to_polygons, polygon_to_mask
+from .masks import (
+    MASK_SOURCE_KEY,
+    coco_rle_is_decodable,
+    coco_segmentation_to_mask,
+    coco_segmentation_to_polygons,
+    is_coco_rle_segmentation,
+    polygon_to_mask,
+)
 from .prompt_synthesis import connected_components, expand_box_xyxy, mask_derived_prompt_metadata, mask_to_point_prompt, mask_to_tight_box
 from .sample import Sample
 
@@ -539,14 +546,21 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
             annotation_json = _xml_json(obj, "coco_annotation_json")
             if isinstance(annotation_json, dict):
                 segmentation = annotation_json.get("segmentation")
-        if not coco_segmentation_to_polygons(segmentation):
-            return None
-        return {
-            "type": "coco_polygon",
-            "segmentation": segmentation,
-            "height": height,
-            "width": width,
-        }
+        if coco_segmentation_to_polygons(segmentation):
+            return {
+                "type": "coco_polygon",
+                "segmentation": segmentation,
+                "height": height,
+                "width": width,
+            }
+        if is_coco_rle_segmentation(segmentation) and coco_rle_is_decodable(segmentation):
+            return {
+                "type": "coco_rle",
+                "segmentation": segmentation,
+                "height": height,
+                "width": width,
+            }
+        return None
 
     def _load_voc_samples(self, config: AppConfig, ann_dir: Path, image_root: Path) -> List[Sample]:
         samples: List[Sample] = []
@@ -913,19 +927,7 @@ def _samples_from_generic_mask(
 def _decode_coco_segmentation(segmentation: object, height: int, width: int) -> Optional[np.ndarray]:
     if not segmentation:
         return None
-    if isinstance(segmentation, list):
-        canvas = np.zeros((height, width), dtype=np.float32)
-        for polygon in segmentation:
-            if polygon and isinstance(polygon[0], list):
-                for nested_polygon in polygon:
-                    if len(nested_polygon) >= 6:
-                        canvas = np.maximum(canvas, _polygon_to_mask(nested_polygon, height, width))
-                continue
-            if len(polygon) < 6:
-                continue
-            canvas = np.maximum(canvas, _polygon_to_mask(polygon, height, width))
-        return canvas if canvas.any() else None
-    return None
+    return coco_segmentation_to_mask(segmentation, height=height, width=width)
 
 
 def _target_scale_from_area(area: float) -> str:

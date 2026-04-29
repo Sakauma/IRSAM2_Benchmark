@@ -120,6 +120,17 @@ def _chunks(items: List[Sample], batch_size: int) -> Iterable[List[Sample]]:
         yield items[start : start + batch_size]
 
 
+def _prompted_batches(items: List[Sample], batch_size: int, *, reuse_image_embedding: bool) -> Iterable[List[Sample]]:
+    if not reuse_image_embedding:
+        yield from _chunks(items, batch_size)
+        return
+    image_groups: Dict[str, List[Sample]] = {}
+    for item in items:
+        key = str(item.image_path)
+        image_groups.setdefault(key, []).append(item)
+    yield from image_groups.values()
+
+
 def _is_cuda_oom(exc: Exception) -> bool:
     text = str(exc).lower()
     return isinstance(exc, RuntimeError) and "cuda" in text and "out of memory" in text
@@ -436,7 +447,9 @@ def evaluate_method(
         return _aggregate(rows), rows
 
     # prompted 模式是当前论文主表使用的路径。batch_size 写入每行，便于复现实验吞吐差异。
-    configured_batch_size = max(1, int(getattr(getattr(config, "runtime", None), "image_batch_size", 1)))
+    runtime = getattr(config, "runtime", None)
+    configured_batch_size = max(1, int(getattr(runtime, "image_batch_size", 1)))
+    reuse_image_embedding = bool(getattr(runtime, "reuse_image_embedding", False))
     batch_index = 0
     progress = _progress_bar(
         method=method,
@@ -447,7 +460,9 @@ def evaluate_method(
         unit="samples",
     )
     try:
-        for requested_batch_index, batch in enumerate(_chunks(samples, configured_batch_size)):
+        for requested_batch_index, batch in enumerate(
+            _prompted_batches(samples, configured_batch_size, reuse_image_embedding=reuse_image_embedding)
+        ):
             batch_results = _predict_batch_with_fallback(
                 method,
                 batch,

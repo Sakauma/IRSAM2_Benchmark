@@ -45,6 +45,85 @@ def coco_polygon_to_mask(segmentation: object, height: int, width: int) -> np.nd
     return canvas if canvas.any() else None
 
 
+def is_coco_rle_segmentation(segmentation: object) -> bool:
+    if not isinstance(segmentation, dict):
+        return False
+    counts = segmentation.get("counts")
+    return isinstance(counts, (list, str))
+
+
+def coco_rle_is_decodable(segmentation: object) -> bool:
+    if not is_coco_rle_segmentation(segmentation):
+        return False
+    assert isinstance(segmentation, dict)
+    counts = segmentation.get("counts")
+    if isinstance(counts, list):
+        return True
+    try:
+        from pycocotools import mask as mask_utils  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def _rle_size(segmentation: dict[str, Any], height: int, width: int) -> tuple[int, int]:
+    size = segmentation.get("size")
+    if isinstance(size, list) and len(size) == 2:
+        return max(1, int(size[0])), max(1, int(size[1]))
+    return height, width
+
+
+def _decode_uncompressed_rle(counts: Sequence[object], height: int, width: int) -> np.ndarray | None:
+    flat = np.zeros(height * width, dtype=np.uint8)
+    offset = 0
+    value = 0
+    for raw_count in counts:
+        count = int(raw_count)
+        next_offset = min(offset + max(0, count), flat.size)
+        if value == 1 and next_offset > offset:
+            flat[offset:next_offset] = 1
+        offset = next_offset
+        value = 1 - value
+        if offset >= flat.size:
+            break
+    mask = flat.reshape((height, width), order="F").astype(np.float32)
+    return mask if mask.any() else None
+
+
+def _decode_compressed_rle(segmentation: dict[str, Any], height: int, width: int) -> np.ndarray | None:
+    try:
+        from pycocotools import mask as mask_utils
+    except Exception:
+        return None
+    counts = segmentation.get("counts")
+    encoded_counts = counts.encode("utf-8") if isinstance(counts, str) else counts
+    decoded = mask_utils.decode({"size": [height, width], "counts": encoded_counts})
+    if decoded.ndim == 3:
+        decoded = decoded.max(axis=2)
+    mask = np.asarray(decoded, dtype=np.float32)
+    return mask if mask.any() else None
+
+
+def coco_rle_to_mask(segmentation: object, height: int, width: int) -> np.ndarray | None:
+    if not is_coco_rle_segmentation(segmentation):
+        return None
+    assert isinstance(segmentation, dict)
+    rle_height, rle_width = _rle_size(segmentation, height, width)
+    counts = segmentation.get("counts")
+    if isinstance(counts, list):
+        return _decode_uncompressed_rle(counts, height=rle_height, width=rle_width)
+    if isinstance(counts, str):
+        return _decode_compressed_rle(segmentation, height=rle_height, width=rle_width)
+    return None
+
+
+def coco_segmentation_to_mask(segmentation: object, height: int, width: int) -> np.ndarray | None:
+    polygon_mask = coco_polygon_to_mask(segmentation, height=height, width=width)
+    if polygon_mask is not None:
+        return polygon_mask
+    return coco_rle_to_mask(segmentation, height=height, width=width)
+
+
 def _mask_path_to_array(mask_path: Path) -> np.ndarray:
     mask = np.array(Image.open(mask_path))
     if mask.ndim == 3:
@@ -77,6 +156,9 @@ def sample_mask_array(sample: Sample) -> np.ndarray | None:
     if source_type == "coco_polygon":
         segmentation: Any = source.get("segmentation", source.get("polygons"))
         return coco_polygon_to_mask(segmentation, height=height, width=width)
+    if source_type in {"coco_rle", "coco_segmentation"}:
+        segmentation = source.get("segmentation")
+        return coco_segmentation_to_mask(segmentation, height=height, width=width)
     return None
 
 

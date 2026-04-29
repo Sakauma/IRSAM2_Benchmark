@@ -1,0 +1,152 @@
+# RBGT-Tiny VOC safe benchmark template.
+# Copy to configs/server_benchmark_4090x3_rbgt_voc_safe.local.yaml and fill machine paths.
+# This template is intentionally minimal: large checkpoint, box prompt, one RBGT VOC run.
+benchmark:
+  suite_name: "server_benchmark_4090x3_rbgt_voc_safe"
+  artifact_subdir: "paper_4090x3_rbgt_voc_safe"
+
+paths:
+  sam2:
+    repo: "/path/to/sam2"
+    checkpoint_root: "/path/to/sam2/checkpoints"
+  artifacts:
+    root: "artifacts"
+  reference_results:
+    root: "reference_results"
+  datasets:
+    rbgt_tiny_ir_box: "/path/to/RBGT-Tiny"
+
+execution:
+  cuda_visible_devices: "0"
+  pytorch_cuda_alloc_conf: "expandable_segments:True"
+
+model_defaults:
+  model_id: "sam2.1_hiera_large"
+  family: "sam2"
+  cfg: "configs/sam2.1/sam2.1_hiera_l.yaml"
+  ckpt: "checkpoints/sam2.1_hiera_large.pt"
+  repo: ""
+
+runtime_defaults:
+  artifact_root: "artifacts"
+  reference_results_root: "reference_results"
+  output_name: "paper_4090x3_rbgt_voc_safe/default"
+  device: "cuda"
+  num_workers: 0
+  smoke_test: false
+  max_samples: 0
+  max_images: 0
+  save_visuals: false
+  visual_limit: 0
+  update_reference_results: false
+  seeds: [42]
+  image_batch_size: 1
+  reuse_image_embedding: true
+  auto_mask_points_per_batch: 64
+  batch_oom_fallback: true
+  max_failure_rate: 0.05
+  show_progress: true
+  progress_update_interval_s: 1.0
+
+runtime:
+  device: "cuda"
+  num_workers: 0
+  seeds: [42]
+  image_batch_size: 1
+  reuse_image_embedding: true
+  save_visuals: false
+  visual_limit: 0
+
+smoke_test_runtime:
+  smoke_test: true
+  max_samples: 10
+  max_images: 10
+  seeds: [42]
+
+evaluation_defaults:
+  benchmark_version: "irsam2-paper-v1-rbgt-voc"
+  track: "track_a_image_prompted"
+  protocol: "rbgt_voc_box_only"
+  inference_mode: "box"
+  split_version: "paper_split_v1"
+  prompt_policy_version: "paper_prompt_policy_v1"
+  metric_schema_version: "metric_schema_v1"
+  reference_result_version: "paper_reference_results_v1"
+  prompt_policy:
+    name: "rbgt_voc_box_prompt"
+    prompt_type: "box"
+    prompt_source: "gt"
+    prompt_budget: 1
+    refresh_interval: null
+    multi_mask: false
+    notes: "RBGT-Tiny VOC per-image XML annotations with GT box prompt."
+
+datasets:
+  rbgt_tiny_ir_box:
+    root_env: "RBGT_TINY_ROOT"
+    config:
+      dataset_id: "RBGT-Tiny"
+      adapter: "rbgt_tiny_ir_only"
+      root: "datasets/RBGT-Tiny"
+      modality: "ir"
+      images_dir: "images"
+      annotations_dir: "annotations_voc"
+      mask_mode: "bbox"
+      class_map: {}
+
+methods:
+  sam2_box_oracle:
+    baseline: "sam2_pretrained_box_prompt"
+    method:
+      name: "sam2_box_oracle"
+      family: "sam2_oracle_prompt"
+      modality: "ir"
+      prompt_generation_protocol: "rbgt_voc_gt_box_v1"
+      box_variant: "loose"
+    evaluation:
+      inference_mode: "box"
+      prompt_policy:
+        name: "rbgt_voc_box_prompt"
+        prompt_type: "box"
+        prompt_source: "gt"
+        prompt_budget: 1
+        refresh_interval: null
+        multi_mask: false
+        notes: "SAM2 with RBGT-Tiny VOC GT box prompt."
+
+models:
+  - alias: "large"
+    model_id: "sam2.1_hiera_large"
+    family: "sam2"
+    cfg: "configs/sam2.1/sam2.1_hiera_l.yaml"
+    ckpt: "checkpoints/sam2.1_hiera_large.pt"
+    runtime:
+      image_batch_size: 1
+      reuse_image_embedding: true
+      auto_mask_points_per_batch: 64
+
+modes:
+  - method: "sam2_box_oracle"
+    alias: "box"
+
+analysis:
+  primary_metric: "BBoxIoU"
+  metrics: ["BBoxIoU", "PromptBoxBBoxIoU", "LatencyMs"]
+  lower_is_better: ["LatencyMs"]
+  group_keys: ["dataset", "method", "eval_unit", "supervision_type", "target_scale", "annotation_protocol_flag"]
+  comparisons: []
+
+suites:
+  rbgt_box:
+    experiment_id: "T4090_rbgt_voc_box_large"
+    purpose: "RBGT-Tiny VOC box-prompt single-run safety configuration."
+    models: ["large"]
+    modes: ["sam2_box_oracle"]
+    datasets: ["rbgt_tiny_ir_box"]
+    runtime:
+      image_batch_size: 1
+      reuse_image_embedding: true
+      auto_mask_points_per_batch: 64
+      save_visuals: false
+      visual_limit: 0
+    run_analysis: false

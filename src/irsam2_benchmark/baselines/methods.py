@@ -129,26 +129,32 @@ class PretrainedPromptedSAM2(BaseMethod):
         return self._prediction_from_result(result, prompt)
 
     def predict_samples(self, samples: List[Sample]) -> Dict[str, Dict[str, Any]]:
-        # 批量路径只减少 set_image/predict 调用开销，不改变每个 sample 的 prompt 内容。
+        # 同一图像内的多实例 prompt 共享一次 SAM2 image embedding。
         if not samples:
             return {}
-        images = [load_image_rgb(sample.image_path) for sample in samples]
         kwargs_and_prompts = [self._predict_kwargs_and_prompt(sample) for sample in samples]
-        kwargs_list = [item[0] for item in kwargs_and_prompts]
-        prompts = [item[1] for item in kwargs_and_prompts]
-        results = self.adapter.predict_images(
-            images,
-            boxes=[kwargs.get("box") for kwargs in kwargs_list],
-            points=[kwargs.get("points") for kwargs in kwargs_list],
-            point_labels=[kwargs.get("point_labels") for kwargs in kwargs_list],
-            multimask_output=self.inference_mode == InferenceMode.MULTI_MASK,
-        )
-        if len(results) != len(samples):
-            raise RuntimeError(f"Batch prediction returned {len(results)} results for {len(samples)} samples.")
-        return {
-            sample.sample_id: self._prediction_from_result(result, prompt)
-            for sample, result, prompt in zip(samples, results, prompts)
-        }
+        image_groups: Dict[str, List[int]] = {}
+        for idx, sample in enumerate(samples):
+            image_groups.setdefault(str(sample.image_path), []).append(idx)
+
+        predictions: Dict[str, Dict[str, Any]] = {}
+        for indices in image_groups.values():
+            group_samples = [samples[idx] for idx in indices]
+            group_kwargs = [kwargs_and_prompts[idx][0] for idx in indices]
+            group_prompts = [kwargs_and_prompts[idx][1] for idx in indices]
+            image_rgb = load_image_rgb(group_samples[0].image_path)
+            results = self.adapter.predict_prompts_for_image(
+                image_rgb,
+                boxes=[kwargs.get("box") for kwargs in group_kwargs],
+                points=[kwargs.get("points") for kwargs in group_kwargs],
+                point_labels=[kwargs.get("point_labels") for kwargs in group_kwargs],
+                multimask_output=self.inference_mode == InferenceMode.MULTI_MASK,
+            )
+            if len(results) != len(group_samples):
+                raise RuntimeError(f"Prompt prediction returned {len(results)} results for {len(group_samples)} samples.")
+            for sample, result, prompt in zip(group_samples, results, group_prompts):
+                predictions[sample.sample_id] = self._prediction_from_result(result, prompt)
+        return predictions
 
 
 class NoPromptAutoMaskSAM2(BaseMethod):

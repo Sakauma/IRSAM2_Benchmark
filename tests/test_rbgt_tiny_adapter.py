@@ -351,6 +351,38 @@ class RBGTTinyAdapterTests(unittest.TestCase):
             self.assertEqual(sample.metadata[MASK_SOURCE_KEY]["type"], "coco_polygon")
             self.assertGreater(float(sample_mask_array(sample).sum()), 0.0)
 
+    def test_rbgt_adapter_reads_voc_segmentation_as_lazy_uncompressed_rle(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_root = root / "image" / "DJI_0001" / "01"
+            ann_root = root / "annotations_coco"
+            image_root.mkdir(parents=True)
+            ann_root.mkdir()
+            Image.fromarray(np.zeros((4, 4), dtype=np.uint8)).save(image_root / "00000.jpg")
+            rle = {"size": [4, 4], "counts": [0, 4, 12]}
+            payload = {
+                "images": [{"id": 1, "file_name": "DJI_0001/01/00000.jpg", "width": 4, "height": 4}],
+                "annotations": [{"id": 2, "image_id": 1, "category_id": 1, "bbox": [0, 0, 1, 4], "segmentation": rle}],
+                "categories": [{"id": 1, "name": "target"}],
+            }
+            (ann_root / "instances_test2017.json").write_text(json.dumps(payload), encoding="utf-8")
+            convert_dataset(root=root, overwrite=True)
+            config_path = root / "config.json"
+            _write_rbgt_config(config_path, annotations_dir="annotations_voc", mask_mode="segmentation")
+            config = load_app_config(config_path)
+
+            loaded = build_dataset_adapter(config).load(config)
+
+            self.assertEqual(loaded.manifest.sample_count, 1)
+            sample = loaded.samples[0]
+            self.assertEqual(sample.supervision_type, "mask")
+            self.assertEqual(sample.metadata[MASK_SOURCE_KEY]["type"], "coco_rle")
+            mask = sample_mask_array(sample)
+            self.assertIsNotNone(mask)
+            self.assertEqual(mask.shape, (4, 4))
+            self.assertEqual(float(mask.sum()), 4.0)
+            self.assertTrue(np.all(mask[:, 0] == 1.0))
+
 
 if __name__ == "__main__":
     unittest.main()

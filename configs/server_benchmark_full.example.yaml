@@ -60,6 +60,7 @@ runtime_defaults:
   update_reference_results: false
   seeds: [42]
   image_batch_size: 1
+  reuse_image_embedding: true
   auto_mask_points_per_batch: 64
   batch_oom_fallback: true
   max_failure_rate: 0.05

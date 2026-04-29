@@ -16,6 +16,7 @@ def make_sample(
     *,
     sample_id: str,
     frame_id: str,
+    image_path: Path | str = Path("dummy.png"),
     frame_index: int = 0,
     sequence_id: str = "seq",
     track_id: str | None = None,
@@ -27,7 +28,7 @@ def make_sample(
     supervision_type: str = "mask",
 ) -> Sample:
     return Sample(
-        image_path=Path("dummy.png"),
+        image_path=Path(image_path),
         sample_id=sample_id,
         frame_id=frame_id,
         sequence_id=sequence_id,
@@ -54,11 +55,12 @@ class DummyConfig:
 
     class runtime:
         image_batch_size = 1
+        reuse_image_embedding = False
         batch_oom_fallback = True
 
 
 class LoggingConfig:
-    def __init__(self, output_dir: Path, *, image_batch_size: int = 1, show_progress: bool = False):
+    def __init__(self, output_dir: Path, *, image_batch_size: int = 1, reuse_image_embedding: bool = False, show_progress: bool = False):
         self.output_dir = output_dir
         self.config_path = output_dir / "config.yaml"
         self.dataset = type("Dataset", (), {"modality": "ir", "dataset_id": "dummy_dataset"})()
@@ -66,7 +68,13 @@ class LoggingConfig:
         self.runtime = type(
             "Runtime",
             (),
-            {"image_batch_size": image_batch_size, "batch_oom_fallback": True, "show_progress": show_progress, "progress_update_interval_s": 0.0},
+            {
+                "image_batch_size": image_batch_size,
+                "reuse_image_embedding": reuse_image_embedding,
+                "batch_oom_fallback": True,
+                "show_progress": show_progress,
+                "progress_update_interval_s": 0.0,
+            },
         )()
 
 
@@ -176,7 +184,7 @@ class EvaluationRunnerTests(unittest.TestCase):
     def test_evaluate_method_batches_prompted_samples_by_runtime_size(self):
         mask = box_to_area([0, 0, 4, 4], 4, 4)
         samples = [
-            make_sample(sample_id=f"frame_{idx}__inst_0", frame_id=f"frame_{idx}", mask_array=mask)
+            make_sample(sample_id=f"frame_{idx}__inst_0", frame_id=f"frame_{idx}", image_path=f"frame_{idx}.png", mask_array=mask)
             for idx in range(5)
         ]
 
@@ -211,6 +219,44 @@ class EvaluationRunnerTests(unittest.TestCase):
         self.assertEqual([row["BatchIndex"] for row in rows], [0, 0, 1, 1, 2])
         self.assertEqual([row["BatchItemIndex"] for row in rows], [0, 1, 0, 1, 0])
         self.assertTrue(all("BatchLatencyMs" in row for row in rows))
+
+    def test_evaluate_method_groups_prompted_samples_by_image_when_enabled(self):
+        mask = box_to_area([0, 0, 4, 4], 4, 4)
+        samples = [
+            make_sample(sample_id="frame_0__inst_0", frame_id="frame_0", image_path="shared.png", mask_array=mask),
+            make_sample(sample_id="frame_0__inst_1", frame_id="frame_0", image_path="shared.png", mask_array=mask),
+            make_sample(sample_id="frame_1__inst_0", frame_id="frame_1", image_path="other.png", mask_array=mask),
+        ]
+
+        class Config(DummyConfig):
+            class runtime:
+                image_batch_size = 1
+                reuse_image_embedding = True
+                batch_oom_fallback = True
+
+        class DummyBatchMethod:
+            def __init__(self):
+                self.calls = []
+
+            def predict_samples(self, batch):
+                self.calls.append([sample.sample_id for sample in batch])
+                return {
+                    sample.sample_id: {"mask": np.ones((4, 4), dtype=np.float32), "prompt": None}
+                    for sample in batch
+                }
+
+        method = DummyBatchMethod()
+        _, rows = evaluate_method(
+            method=method,
+            samples=samples,
+            config=Config(),
+            track_name="track_a_mask_prompt",
+            inference_mode=InferenceMode.BOX,
+        )
+
+        self.assertEqual(method.calls, [["frame_0__inst_0", "frame_0__inst_1"], ["frame_1__inst_0"]])
+        self.assertEqual([row["BatchSize"] for row in rows], [2, 2, 1])
+        self.assertEqual([row["BatchIndex"] for row in rows], [0, 0, 1])
 
     def test_evaluate_method_reports_tqdm_progress_when_enabled(self):
         mask = box_to_area([0, 0, 4, 4], 4, 4)

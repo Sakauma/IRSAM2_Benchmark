@@ -54,6 +54,25 @@ def _write_full_config(path: Path, artifact_root: Path) -> None:
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
 
+def _write_rbgt_voc_safe_config(path: Path, artifact_root: Path) -> None:
+    example_path = Path(__file__).resolve().parents[1] / "configs" / "server_benchmark_4090x3_rbgt_voc_safe.example.yaml"
+    payload = yaml.safe_load(example_path.read_text(encoding="utf-8"))
+    sam2_repo = path.parent / "sam2"
+    checkpoint_root = path.parent / "checkpoints"
+    rbgt_root = path.parent / "datasets" / "RBGT-Tiny"
+    sam2_repo.mkdir()
+    checkpoint_root.mkdir()
+    rbgt_root.mkdir(parents=True)
+    (checkpoint_root / "sam2.1_hiera_large.pt").write_text("checkpoint", encoding="utf-8")
+    payload["paths"] = {
+        "sam2": {"repo": str(sam2_repo), "checkpoint_root": str(checkpoint_root)},
+        "artifacts": {"root": str(artifact_root)},
+        "reference_results": {"root": str(path.parent / "reference_results")},
+        "datasets": {"rbgt_tiny_ir_box": str(rbgt_root)},
+    }
+    path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+
 class Full5090BenchmarkTests(unittest.TestCase):
     def test_run_subprocess_streams_output_and_writes_log(self):
         runner = _load_runner()
@@ -105,8 +124,12 @@ class Full5090BenchmarkTests(unittest.TestCase):
 
             manifest_path = root / "artifacts" / "paper_5090" / "benchmark_manifest_latest.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            run_id = manifest["run_id"]
             self.assertEqual(manifest["run_count"], 4)
             self.assertEqual(manifest["failed_count"], 0)
+            self.assertTrue((root / "artifacts" / "paper_5090" / f"benchmark_manifest_{run_id}.json").exists())
+            run_manifest = json.loads((root / "artifacts" / "paper_5090" / f"run_manifest_{run_id}.json").read_text(encoding="utf-8"))
+            self.assertEqual(run_manifest["run_id"], run_id)
             first_config = Path(manifest["records"][0]["config_path"])
             config = yaml.safe_load(first_config.read_text(encoding="utf-8"))
             self.assertEqual(config["model"]["repo"], str(root / "sam2"))
@@ -122,6 +145,37 @@ class Full5090BenchmarkTests(unittest.TestCase):
             self.assertEqual(config["fingerprints"]["source_config_sha256"], manifest["config_sha256"])
             self.assertEqual(manifest["config_mode"], "complete")
             self.assertEqual(manifest["config"], str(config_path.resolve()))
+
+    def test_rbgt_voc_safe_example_generates_single_large_run(self):
+        runner = _load_runner()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "server_benchmark_4090x3_rbgt_voc_safe.local.yaml"
+            _write_rbgt_voc_safe_config(config_path, root / "artifacts")
+            self.assertEqual(
+                runner.main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "--dry-run",
+                        "--no-analysis",
+                        "--python-bin",
+                        "python",
+                    ]
+                ),
+                0,
+            )
+
+            manifest_path = root / "artifacts" / "paper_4090x3_rbgt_voc_safe" / "benchmark_manifest_latest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["run_count"], 1)
+            config = yaml.safe_load(Path(manifest["records"][0]["config_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(config["model"]["model_id"], "sam2.1_hiera_large")
+            self.assertEqual(config["dataset"]["images_dir"], "images")
+            self.assertEqual(config["dataset"]["annotations_dir"], "annotations_voc")
+            self.assertEqual(config["dataset"]["mask_mode"], "bbox")
+            self.assertEqual(config["runtime"]["image_batch_size"], 1)
+            self.assertTrue(config["runtime"]["reuse_image_embedding"])
 
     def test_smoke_test_writes_to_separate_artifact_subdir(self):
         runner = _load_runner()

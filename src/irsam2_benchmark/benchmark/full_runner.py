@@ -60,6 +60,13 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
+def _manifest_run_id(created_at: str) -> str:
+    timestamp = created_at.replace("+00:00", "Z")
+    for char in (":", "-", "."):
+        timestamp = timestamp.replace(char, "")
+    return f"{timestamp}-pid{os.getpid()}"
+
+
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     result = copy.deepcopy(base)
     for key, value in (override or {}).items():
@@ -532,11 +539,16 @@ def _suite_method_ids(global_mode_entries: List[Dict[str, Any]], suite_entry: Di
     return [str(item["method"]) for item in _select_modes(global_mode_entries, selected_modes)]
 
 
-def _write_run_outputs(manifest_dir: Path, records: List[Dict[str, Any]], failures: List[Dict[str, Any]]) -> None:
-    _write_json(manifest_dir / "run_manifest_latest.json", {"records": records, "failures": failures})
+def _write_run_outputs(manifest_dir: Path, records: List[Dict[str, Any]], failures: List[Dict[str, Any]], run_id: str) -> None:
+    manifest_payload = {"run_id": run_id, "records": records, "failures": failures}
+    _write_json(manifest_dir / "run_manifest_latest.json", manifest_payload)
     _write_csv(manifest_dir / "run_manifest_latest.csv", records)
     _write_json(manifest_dir / "run_failures_latest.json", failures)
     _write_csv(manifest_dir / "run_failures_latest.csv", failures)
+    _write_json(manifest_dir / f"run_manifest_{run_id}.json", manifest_payload)
+    _write_csv(manifest_dir / f"run_manifest_{run_id}.csv", records)
+    _write_json(manifest_dir / f"run_failures_{run_id}.json", failures)
+    _write_csv(manifest_dir / f"run_failures_{run_id}.csv", failures)
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -590,8 +602,7 @@ def _write_checkpoint_summary(manifest_dir: Path, records: List[Dict[str, Any]])
 
 def _write_final_manifest(manifest_dir: Path, manifest: Dict[str, Any]) -> None:
     _write_json(manifest_dir / "benchmark_manifest_latest.json", manifest)
-    timestamp = str(manifest["created_at"]).replace(":", "").replace("-", "")
-    _write_json(manifest_dir / f"benchmark_manifest_{timestamp}.json", manifest)
+    _write_json(manifest_dir / f"benchmark_manifest_{manifest['run_id']}.json", manifest)
 
 
 def validate_complete_config(
@@ -735,6 +746,7 @@ def main(argv: List[str] | None = None) -> int:
     failures: List[Dict[str, Any]] = []
     analysis_records: List[Dict[str, Any]] = []
     created_at = datetime.now(timezone.utc).isoformat()
+    run_id = _manifest_run_id(created_at)
 
     run_plan = []
     for suite_key, suite_entry in _iter_requested_suites(suite_config, selected_suites):
@@ -839,7 +851,7 @@ def main(argv: List[str] | None = None) -> int:
                     log_path=log_path,
                 )
             )
-            _write_run_outputs(manifest_dir, records, failures)
+            _write_run_outputs(manifest_dir, records, failures, run_id)
             continue
         if args.dry_run:
             print(f"{prefix} dry_run", flush=True)
@@ -900,7 +912,7 @@ def main(argv: List[str] | None = None) -> int:
                 records.append(failure)
                 failures.append(failure)
                 print(f"{prefix} failed invalid_artifacts", flush=True)
-                _write_run_outputs(manifest_dir, records, failures)
+                _write_run_outputs(manifest_dir, records, failures, run_id)
                 if args.stop_on_error:
                     break
         else:
@@ -922,10 +934,10 @@ def main(argv: List[str] | None = None) -> int:
             records.append(failure)
             failures.append(failure)
             print(f"{prefix} failed returncode={result.returncode}", flush=True)
-            _write_run_outputs(manifest_dir, records, failures)
+            _write_run_outputs(manifest_dir, records, failures, run_id)
             if args.stop_on_error:
                 break
-        _write_run_outputs(manifest_dir, records, failures)
+        _write_run_outputs(manifest_dir, records, failures, run_id)
 
     if args.dry_run:
         for item in analysis_records:
@@ -964,6 +976,7 @@ def main(argv: List[str] | None = None) -> int:
         # benchmark_manifest_latest.json 是本次运行的审计入口：
         # 记录配置来源、展开后的 run 数、每个子进程命令和分析状态。
         "created_at": created_at,
+        "run_id": run_id,
         "project_root": str(PROJECT_ROOT),
         "config_mode": config_sources["mode"],
         "config": config_sources["config"],
@@ -984,7 +997,7 @@ def main(argv: List[str] | None = None) -> int:
         "failures": failures,
     }
     _write_final_manifest(manifest_dir, manifest)
-    _write_run_outputs(manifest_dir, records, failures)
+    _write_run_outputs(manifest_dir, records, failures, run_id)
     print(
         f"[done] completed={manifest['completed_count']} skipped={manifest['skipped_existing_count']} failures={manifest['failed_count']}",
         flush=True,
