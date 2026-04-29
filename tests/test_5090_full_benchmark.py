@@ -112,7 +112,7 @@ class Full5090BenchmarkTests(unittest.TestCase):
             self.assertEqual(config["model"]["repo"], str(root / "sam2"))
             self.assertEqual(config["model"]["ckpt"], str(root / "checkpoints" / "sam2.1_hiera_tiny.pt"))
             self.assertEqual(config["runtime"]["seeds"], [42])
-            self.assertEqual(config["runtime"]["image_batch_size"], 32)
+            self.assertEqual(config["runtime"]["image_batch_size"], 1)
             self.assertEqual(config["runtime"]["auto_mask_points_per_batch"], 256)
             self.assertEqual(config["runtime"]["reference_results_root"], str(root / "reference_results"))
             self.assertIn("/paper_5090/runs/mask/tiny", config["runtime"]["artifact_root"])
@@ -152,6 +152,51 @@ class Full5090BenchmarkTests(unittest.TestCase):
             config = yaml.safe_load(first_config.read_text(encoding="utf-8"))
             self.assertEqual(config["runtime"]["max_samples"], 10)
             self.assertEqual(config["runtime"]["max_images"], 10)
+
+    def test_suite_runtime_overrides_checkpoint_runtime(self):
+        runner = _load_runner()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "server_benchmark_full.local.yaml"
+            _write_full_config(config_path, root / "artifacts")
+            payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            for model in payload["models"]:
+                if model["alias"] == "large":
+                    model["runtime"]["image_batch_size"] = 8
+                    model["runtime"]["auto_mask_points_per_batch"] = 128
+            payload["suites"]["rbgt_box"]["runtime"] = {
+                "image_batch_size": 1,
+                "auto_mask_points_per_batch": 64,
+                "save_visuals": False,
+                "visual_limit": 0,
+            }
+            config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+            self.assertEqual(
+                runner.main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "--suites",
+                        "rbgt_box",
+                        "--checkpoints",
+                        "large",
+                        "--modes",
+                        "box",
+                        "--dry-run",
+                        "--no-analysis",
+                    ]
+                ),
+                0,
+            )
+
+            manifest_path = root / "artifacts" / "paper_5090" / "benchmark_manifest_latest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            config = yaml.safe_load(Path(manifest["records"][0]["config_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(config["runtime"]["image_batch_size"], 1)
+            self.assertEqual(config["runtime"]["auto_mask_points_per_batch"], 64)
+            self.assertFalse(config["runtime"]["save_visuals"])
+            self.assertEqual(config["runtime"]["visual_limit"], 0)
 
     def test_checkpoint_summary_reads_completed_runs(self):
         runner = _load_runner()

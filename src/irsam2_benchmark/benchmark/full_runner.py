@@ -251,14 +251,17 @@ def _run_is_complete(output_dir: Path) -> bool:
 def _runtime_config(
     base_runtime: Dict[str, Any],
     suite_config: Dict[str, Any],
+    suite_entry: Dict[str, Any],
     checkpoint: Dict[str, Any],
     paths: Dict[str, Any],
     smoke_test: bool,
 ) -> Dict[str, Any]:
     # runtime 覆盖顺序从低到高：
-    # base defaults -> suite runtime -> checkpoint runtime -> smoke runtime -> machine paths runtime。
+    # base defaults -> global runtime -> checkpoint runtime -> suite runtime -> smoke runtime -> machine paths runtime。
+    # suite runtime 放在 checkpoint runtime 之后，这样 RBGT 这类特殊 suite 可以把大模型 batch 强制降到 1。
     runtime = _deep_merge(base_runtime, suite_config.get("runtime", {}))
     runtime = _deep_merge(runtime, checkpoint.get("runtime", {}))
+    runtime = _deep_merge(runtime, suite_entry.get("runtime", {}))
     if smoke_test:
         runtime = _deep_merge(runtime, suite_config.get("smoke_test_runtime", {}))
     runtime = _deep_merge(runtime, paths.get("runtime", {}))
@@ -299,7 +302,7 @@ def _build_app_config(
     method_entry = _resolve_method(base_matrix["methods"], method_id)
     dataset_config = copy.deepcopy(dataset_entry["config"])
     dataset_config["root"] = _resolve_dataset_root(dataset_entry, paths, dataset_id)
-    runtime = _runtime_config(base_matrix.get("runtime_defaults", {}), suite_config, checkpoint, paths, smoke_test)
+    runtime = _runtime_config(base_matrix.get("runtime_defaults", {}), suite_config, suite_entry, checkpoint, paths, smoke_test)
     runtime["artifact_root"] = str(artifact_root)
     runtime["output_name"] = f"{suite_entry['experiment_id']}/{dataset_id}/{method_id}"
     evaluation = _deep_merge(base_matrix["evaluation_defaults"], method_entry.get("evaluation", {}))

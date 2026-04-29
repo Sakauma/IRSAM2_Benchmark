@@ -265,7 +265,9 @@ methods:
         notes: "SAM2 automatic mask generator without external prompts."
 
 # checkpoint sweep。
-# alias 会进入输出路径；runtime 可以按 checkpoint 调整 batch 和 auto-mask 网格密度。
+# alias 会进入输出路径；SAM2 prompted 推理按图像逐步设置 predictor，batch 对吞吐帮助有限。
+# image_batch_size 默认固定为 1，避免多进程 benchmark 同时放大显存/内存峰值。
+# auto_mask_points_per_batch 仍可按 checkpoint 调整自动掩码网格密度。
 models:
   - alias: "tiny"
     model_id: "sam2.1_hiera_tiny"
@@ -273,7 +275,7 @@ models:
     cfg: "configs/sam2.1/sam2.1_hiera_t.yaml"
     ckpt: "checkpoints/sam2.1_hiera_tiny.pt"
     runtime:
-      image_batch_size: 32
+      image_batch_size: 1
       auto_mask_points_per_batch: 256
   - alias: "small"
     model_id: "sam2.1_hiera_small"
@@ -281,7 +283,7 @@ models:
     cfg: "configs/sam2.1/sam2.1_hiera_s.yaml"
     ckpt: "checkpoints/sam2.1_hiera_small.pt"
     runtime:
-      image_batch_size: 24
+      image_batch_size: 1
       auto_mask_points_per_batch: 256
   - alias: "base_plus"
     model_id: "sam2.1_hiera_base_plus"
@@ -289,7 +291,7 @@ models:
     cfg: "configs/sam2.1/sam2.1_hiera_b+.yaml"
     ckpt: "checkpoints/sam2.1_hiera_base_plus.pt"
     runtime:
-      image_batch_size: 16
+      image_batch_size: 1
       auto_mask_points_per_batch: 192
   - alias: "large"
     model_id: "sam2.1_hiera_large"
@@ -297,7 +299,7 @@ models:
     cfg: "configs/sam2.1/sam2.1_hiera_l.yaml"
     ckpt: "checkpoints/sam2.1_hiera_large.pt"
     runtime:
-      image_batch_size: 8
+      image_batch_size: 1
       auto_mask_points_per_batch: 128
 
 # modes 给命令行 --modes 提供短别名。

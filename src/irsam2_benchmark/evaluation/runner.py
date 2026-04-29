@@ -22,6 +22,38 @@ from .prompt_metrics import prompt_metrics
 from .small_target_metrics import small_target_metrics
 
 
+class _LineProgress:
+    def __init__(self, *, desc: str, total: int, unit: str, mininterval: float):
+        self.desc = desc
+        self.total = total
+        self.unit = unit
+        self.mininterval = max(0.0, float(mininterval))
+        self.count = 0
+        self.started_at = time.perf_counter()
+        self.last_print_at = 0.0
+        self._print(force=True)
+
+    def update(self, n: int) -> None:
+        self.count += int(n)
+        self._print(force=self.count >= self.total)
+
+    def close(self) -> None:
+        self._print(force=True)
+
+    def _print(self, *, force: bool) -> None:
+        now = time.perf_counter()
+        if not force and now - self.last_print_at < self.mininterval:
+            return
+        elapsed = max(0.0, now - self.started_at)
+        rate = self.count / elapsed if elapsed > 0 else 0.0
+        print(
+            f"[progress] {self.desc} {self.count}/{self.total} {self.unit} elapsed={elapsed:.1f}s rate={rate:.2f}/{self.unit}",
+            file=sys.stderr,
+            flush=True,
+        )
+        self.last_print_at = now
+
+
 def _progress_bar(
     *,
     method: BenchmarkMethodProtocol,
@@ -43,13 +75,17 @@ def _progress_bar(
     method_name = str(error_context.get("baseline_name") or getattr(method, "name", method.__class__.__name__))
     seed = error_context.get("seed")
     seed_label = f" seed={seed}" if seed is not None else ""
+    desc = f"{dataset_id} {method_name}{seed_label} {inference_mode.value}"
+    mininterval = float(getattr(runtime, "progress_update_interval_s", 1.0))
+    if not sys.stderr.isatty():
+        return _LineProgress(desc=desc, total=total, unit=unit, mininterval=mininterval)
     return tqdm(
         total=total,
         unit=unit,
-        desc=f"{dataset_id} {method_name}{seed_label} {inference_mode.value}",
+        desc=desc,
         dynamic_ncols=True,
         leave=True,
-        mininterval=float(getattr(runtime, "progress_update_interval_s", 1.0)),
+        mininterval=mininterval,
         file=sys.stderr,
     )
 
