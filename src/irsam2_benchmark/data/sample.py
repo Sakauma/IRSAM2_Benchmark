@@ -60,5 +60,5 @@ class Sample:
         return (
             self.mask_array is not None
             or self.mask_path is not None
-            or (isinstance(source, dict) and source.get("type") == "polygon")
+            or (isinstance(source, dict) and source.get("type") in {"polygon", "coco_polygon"})
         )

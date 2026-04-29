@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import warnings
+import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -12,7 +13,7 @@ from PIL import Image
 
 from ..config import AppConfig
 from ..core.interfaces import DatasetAdapterProtocol
-from .masks import MASK_SOURCE_KEY, polygon_to_mask
+from .masks import MASK_SOURCE_KEY, coco_segmentation_to_polygons, polygon_to_mask
 from .prompt_synthesis import connected_components, expand_box_xyxy, mask_derived_prompt_metadata, mask_to_point_prompt, mask_to_tight_box
 from .sample import Sample
 
@@ -218,6 +219,31 @@ def _path_parts(value: object) -> tuple[str, ...]:
     return tuple(part for part in Path(str(value)).as_posix().split("/") if part)
 
 
+def _xml_text(parent: ET.Element, path: str, default: str = "") -> str:
+    element = parent.find(path)
+    if element is None or element.text is None:
+        return default
+    return element.text.strip()
+
+
+def _xml_float(parent: ET.Element, path: str, default: float = 0.0) -> float:
+    text = _xml_text(parent, path)
+    if text == "":
+        return default
+    return float(text)
+
+
+def _xml_json(parent: ET.Element, path: str) -> object:
+    text = _xml_text(parent, path)
+    if not text:
+        return None
+    return json.loads(text)
+
+
+def _mask_mode_requests_segmentation(mask_mode: str) -> bool:
+    return mask_mode.strip().lower() in {"segmentation", "segmentations", "mask", "masks"}
+
+
 class MultiModalAdapter(DatasetAdapter):
     adapter_name = "multimodal_raw"
     notes = "Reads raw MultiModal img/ + label/ JSON files and synthesizes prompts from polygons."
@@ -385,7 +411,7 @@ class CocoLikeAdapter(DatasetAdapter):
 
 class RBGTTinyIRAdapter(CocoLikeAdapter):
     adapter_name = "rbgt_tiny_ir_only"
-    notes = "Reads RBGT-Tiny grayscale branch from COCO-style annotations."
+    notes = "Reads RBGT-Tiny grayscale branch from COCO-style or per-image VOC-style annotations."
 
     def can_handle(self, config: AppConfig) -> bool:
         return config.dataset.adapter == self.adapter_name or config.dataset.dataset_id == "RBGT-Tiny"
@@ -451,10 +477,167 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
                     return candidate
         return direct
 
+    def _use_voc_annotations(self, ann_dir: Path) -> bool:
+        if "voc" in ann_dir.name.lower():
+            return True
+        try:
+            return next(ann_dir.rglob("*.xml"), None) is not None
+        except OSError:
+            return False
+
+    def _voc_image_path(self, image_root: Path, xml_root: ET.Element, ann_path: Path) -> Path:
+        path_text = _xml_text(xml_root, "path")
+        if path_text:
+            path = Path(path_text)
+            if path.is_absolute():
+                return path
+            candidate = image_root / path
+            if candidate.exists():
+                return candidate
+        filename = _xml_text(xml_root, "filename")
+        if filename:
+            return self._resolve_image_path(
+                image_root,
+                filename,
+                ann_path,
+                image_root_is_ir_only_layout=self._image_root_is_ir_only_layout(image_root),
+            )
+        return image_root / ann_path.with_suffix("").name
+
+    def _voc_frame_id(self, image_path: Path, image_root: Path, xml_root: ET.Element) -> str:
+        path_text = _xml_text(xml_root, "path")
+        if path_text and not Path(path_text).is_absolute():
+            return Path(path_text).as_posix()
+        try:
+            return image_path.relative_to(image_root).as_posix()
+        except ValueError:
+            filename = _xml_text(xml_root, "filename")
+            return filename or image_path.name
+
+    def _voc_bbox(self, obj: ET.Element, width: int, height: int) -> Optional[List[float]]:
+        bbox = obj.find("bndbox")
+        if bbox is None:
+            return None
+        xmin = max(0.0, min(float(width), _xml_float(bbox, "xmin")))
+        ymin = max(0.0, min(float(height), _xml_float(bbox, "ymin")))
+        xmax = max(0.0, min(float(width), _xml_float(bbox, "xmax")))
+        ymax = max(0.0, min(float(height), _xml_float(bbox, "ymax")))
+        if xmax <= xmin or ymax <= ymin:
+            return None
+        return [xmin, ymin, xmax, ymax]
+
+    def _voc_object_track_id(self, obj: ET.Element) -> Optional[str]:
+        track_id = _xml_text(obj, "track_id")
+        if track_id:
+            return track_id
+        annotation_json = _xml_json(obj, "coco_annotation_json")
+        return _resolve_explicit_track_id(annotation_json)
+
+    def _voc_segmentation_source(self, obj: ET.Element, width: int, height: int) -> Optional[Dict[str, object]]:
+        segmentation = _xml_json(obj, "coco_segmentation_json")
+        if segmentation is None:
+            annotation_json = _xml_json(obj, "coco_annotation_json")
+            if isinstance(annotation_json, dict):
+                segmentation = annotation_json.get("segmentation")
+        if not coco_segmentation_to_polygons(segmentation):
+            return None
+        return {
+            "type": "coco_polygon",
+            "segmentation": segmentation,
+            "height": height,
+            "width": width,
+        }
+
+    def _load_voc_samples(self, config: AppConfig, ann_dir: Path, image_root: Path) -> List[Sample]:
+        samples: List[Sample] = []
+        seen_images: set[str] = set()
+        use_segmentation = _mask_mode_requests_segmentation(config.dataset.mask_mode)
+        for ann_path in sorted(ann_dir.rglob("*.xml")):
+            xml_root = ET.parse(ann_path).getroot()
+            image_path = self._voc_image_path(image_root, xml_root, ann_path)
+            if not image_path.exists():
+                continue
+            frame_id = self._voc_frame_id(image_path, image_root, xml_root)
+            if not self._image_file_is_ir_branch(frame_id) and not self._annotation_file_is_ir_specific(ann_path):
+                continue
+            if _limit_reached(config.runtime.max_images, len(seen_images)) and frame_id not in seen_images:
+                return samples
+            seen_images.add(frame_id)
+            width = int(_xml_float(xml_root, "size/width", float(_image_size(image_path)[0])))
+            height = int(_xml_float(xml_root, "size/height", float(_image_size(image_path)[1])))
+            sequence_id = _relative_sequence_id(image_path, image_root)
+            frame_index = _infer_frame_index(image_path)
+            device_source = _infer_device_source(image_path, image_root)
+            for obj_idx, obj in enumerate(xml_root.findall("object")):
+                tight = self._voc_bbox(obj, width, height)
+                if tight is None:
+                    continue
+                category = _xml_text(obj, "name", "unknown")
+                ann_id = _xml_text(obj, "coco_annotation_id", str(obj_idx))
+                area = _xml_float(obj, "area", (tight[2] - tight[0]) * (tight[3] - tight[1]))
+                loose = expand_box_xyxy(tight, width=width, height=height)
+                point = [(tight[0] + tight[2]) / 2.0, (tight[1] + tight[3]) / 2.0]
+                track_id = self._voc_object_track_id(obj)
+                sample_id = f"{frame_id}__ann_{ann_id}"
+                metadata: Dict[str, object] = {"coco_annotation_id": ann_id}
+                segmentation_source = self._voc_segmentation_source(obj, width, height) if use_segmentation else None
+                if segmentation_source is not None:
+                    metadata[MASK_SOURCE_KEY] = segmentation_source
+                    samples.append(
+                        Sample(
+                            image_path=image_path,
+                            sample_id=f"{sample_id}::{category}::voc_coco_segmentation",
+                            frame_id=frame_id,
+                            sequence_id=sequence_id,
+                            frame_index=frame_index,
+                            temporal_key=frame_id,
+                            track_id=track_id,
+                            width=width,
+                            height=height,
+                            category=category,
+                            target_scale=_target_scale_from_area(area),
+                            device_source=device_source,
+                            annotation_protocol_flag="voc_coco_segmentation",
+                            supervision_type="mask",
+                            bbox_tight=tight,
+                            bbox_loose=loose,
+                            point_prompt=point,
+                            metadata=metadata,
+                        )
+                    )
+                else:
+                    samples.append(
+                        Sample(
+                            image_path=image_path,
+                            sample_id=f"{sample_id}::{category}::voc_bbox_only",
+                            frame_id=frame_id,
+                            sequence_id=sequence_id,
+                            frame_index=frame_index,
+                            temporal_key=frame_id,
+                            track_id=track_id,
+                            width=width,
+                            height=height,
+                            category=category,
+                            target_scale=_target_scale_from_area(area),
+                            device_source=device_source,
+                            annotation_protocol_flag="voc_bbox_only",
+                            supervision_type="bbox",
+                            bbox_tight=tight,
+                            bbox_loose=loose,
+                            point_prompt=point,
+                            metadata=metadata,
+                        )
+                    )
+                if _limit_reached(config.runtime.max_samples, len(samples)):
+                    return samples
+        return samples
+
     def load_samples(self, config: AppConfig) -> List[Sample]:
         root = _dataset_root(config)
         ann_dir = root / (config.dataset.annotations_dir or "annotations_coco")
         image_root = self._resolve_image_root(root, config.dataset.images_dir)
+        if self._use_voc_annotations(ann_dir):
+            return self._load_voc_samples(config, ann_dir, image_root)
         ann_files = self._annotation_files(ann_dir)
         image_root_is_ir_only_layout = self._image_root_is_ir_only_layout(image_root)
         samples: List[Sample] = []

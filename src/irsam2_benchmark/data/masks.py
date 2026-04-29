@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -17,6 +17,32 @@ def polygon_to_mask(points: Sequence[float], height: int, width: int) -> np.ndar
     xy = [(float(points[i]), float(points[i + 1])) for i in range(0, len(points), 2)]
     ImageDraw.Draw(canvas).polygon(xy, outline=1, fill=1)
     return np.array(canvas, dtype=np.float32)
+
+
+def _is_polygon_points(value: object) -> bool:
+    return isinstance(value, list) and len(value) >= 6 and all(isinstance(item, (int, float)) for item in value)
+
+
+def coco_segmentation_to_polygons(segmentation: object) -> list[list[float]]:
+    """Return all polygon lists from a COCO polygon segmentation object."""
+    if _is_polygon_points(segmentation):
+        return [[float(item) for item in segmentation]]  # type: ignore[arg-type]
+    if not isinstance(segmentation, list):
+        return []
+    polygons: list[list[float]] = []
+    for item in segmentation:
+        polygons.extend(coco_segmentation_to_polygons(item))
+    return polygons
+
+
+def coco_polygon_to_mask(segmentation: object, height: int, width: int) -> np.ndarray | None:
+    polygons = coco_segmentation_to_polygons(segmentation)
+    if not polygons:
+        return None
+    canvas = np.zeros((height, width), dtype=np.float32)
+    for polygon in polygons:
+        canvas = np.maximum(canvas, polygon_to_mask(polygon, height=height, width=width))
+    return canvas if canvas.any() else None
 
 
 def _mask_path_to_array(mask_path: Path) -> np.ndarray:
@@ -40,15 +66,18 @@ def sample_mask_array(sample: Sample) -> np.ndarray | None:
     source = sample.metadata.get(MASK_SOURCE_KEY)
     if not isinstance(source, dict):
         return None
-    if source.get("type") != "polygon":
-        return None
-
-    points = source.get("points")
-    if not isinstance(points, list) or len(points) < 6:
-        return None
     height = int(source.get("height", sample.height))
     width = int(source.get("width", sample.width))
-    return polygon_to_mask(points, height=height, width=width)
+    source_type = source.get("type")
+    if source_type == "polygon":
+        points = source.get("points")
+        if not isinstance(points, list) or len(points) < 6:
+            return None
+        return polygon_to_mask(points, height=height, width=width)
+    if source_type == "coco_polygon":
+        segmentation: Any = source.get("segmentation", source.get("polygons"))
+        return coco_polygon_to_mask(segmentation, height=height, width=width)
+    return None
 
 
 def sample_mask_or_zeros(sample: Sample) -> np.ndarray:
