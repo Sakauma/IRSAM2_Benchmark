@@ -247,6 +247,14 @@ def align_mask_to_sample(mask: np.ndarray, item: Sample) -> tuple[np.ndarray, Di
     return aligned, metadata
 
 
+def _prediction_latency_ms(pred: Dict[str, Any], fallback_ms: float) -> float:
+    raw = pred.get("LatencyMs", pred.get("latency_ms", fallback_ms))
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return fallback_ms
+
+
 def _predict_batch_with_fallback(
     method,
     batch: List[Sample],
@@ -478,7 +486,11 @@ def evaluate_method(
                         pred = predictions[item.sample_id]
                         pred_mask, mask_alignment = align_mask_to_sample(pred["mask"], item)
                         gt_mask = sample_mask_or_zeros(item)
-                        row = build_segmentation_row(item, pred_mask, gt_mask, per_sample_elapsed_ms, modality=modality, prompt=pred.get("prompt"), mask_alignment=mask_alignment)
+                        latency_ms = _prediction_latency_ms(pred, per_sample_elapsed_ms)
+                        row = build_segmentation_row(item, pred_mask, gt_mask, latency_ms, modality=modality, prompt=pred.get("prompt"), mask_alignment=mask_alignment)
+                        prediction_metadata = pred.get("metadata")
+                        if isinstance(prediction_metadata, dict):
+                            row.update(prediction_metadata)
                         row["BatchSize"] = len(actual_batch)
                         row["BatchIndex"] = batch_index
                         row["BatchRequestedIndex"] = requested_batch_index

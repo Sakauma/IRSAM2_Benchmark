@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
 from typing import Any, Dict, List
 
 import numpy as np
+from PIL import Image
 
 from ..config import AppConfig
 from ..core.interfaces import BenchmarkMethodProtocol, InferenceMode
@@ -47,6 +51,120 @@ class BBoxRectMaskBaseline(BaseMethod):
     def predict_sample(self, sample: Sample) -> Dict[str, Any]:
         box = sample.bbox_loose or sample.bbox_tight or [0.0, 0.0, 1.0, 1.0]
         return {"mask": box_to_mask(box, sample.height, sample.width), "score": 1.0}
+
+
+def _safe_relative_path(value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute() or any(part == ".." for part in path.parts):
+        raise ValueError(f"External prediction frame_id must be a safe relative path, got {value!r}.")
+    return path
+
+
+def _resolve_prediction_root(config: AppConfig, raw_root: str) -> Path:
+    env_root = os.environ.get("EXTERNAL_PREDICTION_ROOT")
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+    path = Path(raw_root).expanduser()
+    if path.is_absolute():
+        return path
+    candidates = [
+        Path.cwd() / path,
+        config.root / path,
+        config.root.parent / path,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return candidates[0].resolve()
+
+
+class ExternalPredictionMaskBaseline(BaseMethod):
+    name = "ExternalPredictionMaskBaseline"
+    family = "external_prediction"
+    inference_mode = InferenceMode.SINGLE_MASK
+
+    def __init__(self, config: AppConfig):
+        self._configuration_error: str | None = None
+        raw_root = config.method.get("prediction_root")
+        if not raw_root:
+            self._configuration_error = "external_prediction_mask requires method.prediction_root."
+            self.prediction_root = Path()
+        else:
+            self.prediction_root = _resolve_prediction_root(config, str(raw_root))
+        self.dataset_id = str(config.method.get("prediction_dataset_id") or config.dataset.dataset_id)
+        self.prediction_suffix = str(config.method.get("prediction_suffix", ".png"))
+        if not self.prediction_suffix.startswith("."):
+            self.prediction_suffix = f".{self.prediction_suffix}"
+        self.threshold = float(config.method.get("prediction_threshold", 0.5))
+        self.model_name = str(config.method.get("external_model_name") or config.method.get("name") or "external_prediction")
+        self._latency_by_frame_id = {} if self._configuration_error else self._load_latency_manifest()
+
+    @property
+    def _dataset_dir(self) -> Path:
+        return self.prediction_root / self.dataset_id
+
+    def _load_latency_manifest(self) -> Dict[str, float]:
+        manifest_path = self._dataset_dir / "manifest.jsonl"
+        if not manifest_path.exists():
+            return {}
+        latency: Dict[str, float] = {}
+        with manifest_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                text = line.strip()
+                if not text:
+                    continue
+                record = json.loads(text)
+                frame_id = record.get("frame_id")
+                latency_ms = record.get("latency_ms")
+                if frame_id is None or latency_ms is None:
+                    continue
+                latency[str(frame_id)] = float(latency_ms)
+        return latency
+
+    def _prediction_path(self, frame_id: str) -> Path:
+        rel = _safe_relative_path(frame_id)
+        appended = self._dataset_dir / Path(f"{rel.as_posix()}{self.prediction_suffix}")
+        replaced = self._dataset_dir / rel.with_suffix(self.prediction_suffix)
+        candidates = [appended]
+        if replaced != appended:
+            candidates.append(replaced)
+        if rel.suffix:
+            candidates.append(self._dataset_dir / rel)
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        candidate_list = ", ".join(str(path) for path in candidates)
+        raise FileNotFoundError(f"External prediction mask not found for frame_id={frame_id!r}. Tried: {candidate_list}")
+
+    def predict_sample(self, sample: Sample) -> Dict[str, Any]:
+        if self._configuration_error:
+            raise ValueError(self._configuration_error)
+        prediction_path = self._prediction_path(sample.frame_id)
+        with Image.open(prediction_path) as image:
+            arr = np.asarray(image.convert("L"), dtype=np.float32)
+        if arr.size and float(arr.max()) > 1.0:
+            arr = arr / 255.0
+        mask = (arr > self.threshold).astype(np.float32)
+        payload: Dict[str, Any] = {
+            "mask": mask,
+            "score": 1.0,
+            "prompt": {
+                "protocol": "external_prediction_import_v1",
+                "source": "external_prediction",
+                "box_variant": "none",
+            },
+            "metadata": {
+                "ExternalPredictionModel": self.model_name,
+                "ExternalPredictionDatasetId": self.dataset_id,
+                "ExternalPredictionPath": str(prediction_path),
+                "ExternalPredictionRoot": str(self.prediction_root),
+                "ExternalPredictionThreshold": self.threshold,
+            },
+        }
+        latency_ms = self._latency_by_frame_id.get(sample.frame_id)
+        if latency_ms is not None:
+            payload["LatencyMs"] = latency_ms
+        return payload
 
 
 class PretrainedPromptedSAM2(BaseMethod):
@@ -272,6 +390,7 @@ class HeuristicAutoPromptedSAM2(BaseMethod):
 
 CANONICAL_BASELINE_NAMES = (
     "bbox_rect",
+    "external_prediction_mask",
     "sam2_pretrained_box_prompt",
     "sam2_pretrained_tight_box_prompt",
     "sam2_pretrained_point_prompt",
@@ -288,6 +407,7 @@ def build_baseline_registry(config: AppConfig) -> Dict[str, BenchmarkMethodProto
     adapter = SAM2ModelAdapter(config)
     return {
         "bbox_rect": BBoxRectMaskBaseline(),
+        "external_prediction_mask": ExternalPredictionMaskBaseline(config),
         "sam2_pretrained_box_prompt": PretrainedPromptedSAM2(adapter, prompt_mode=InferenceMode.BOX),
         "sam2_pretrained_tight_box_prompt": PretrainedPromptedSAM2(adapter, prompt_mode=InferenceMode.BOX, box_variant="tight"),
         "sam2_pretrained_point_prompt": PretrainedPromptedSAM2(adapter, prompt_mode=InferenceMode.POINT),

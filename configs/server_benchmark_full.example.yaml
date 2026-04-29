@@ -338,6 +338,29 @@ methods:
         refresh_interval: null
         multi_mask: false
         notes: "SAM2 with heuristic box, positive point, and negative ring points."
+  dnanet_external_prediction:
+    # 先用 scripts/export_dnanet_predictions.py 导出 PNG mask，再由 benchmark 读取并计算同一套指标。
+    # 这样 P0 外部模型不需要接入 SAM2 adapter，也不会占用正在跑 baseline 的显存。
+    baseline: "external_prediction_mask"
+    method:
+      name: "dnanet_external_prediction"
+      family: "ir_std_external_prediction"
+      modality: "ir"
+      external_model_name: "DNANet"
+      prediction_root: "artifacts/external_predictions/dnanet"
+      prediction_suffix: ".png"
+      prediction_threshold: 0.5
+    evaluation:
+      track: "track_a_image_prompted"
+      inference_mode: "single_mask"
+      prompt_policy:
+        name: "external_prediction_no_prompt"
+        prompt_type: "none"
+        prompt_source: "none"
+        prompt_budget: 0
+        refresh_interval: null
+        multi_mask: false
+        notes: "Precomputed external segmentation mask imported from DNANet exporter."
 
 # checkpoint sweep。
 # alias 会进入输出路径；SAM2 prompted 推理按图像逐步设置 predictor，batch 对吞吐帮助有限。
@@ -397,6 +420,8 @@ modes:
     alias: "auto_box_point"
   - method: "sam2_heuristic_auto_box_point_neg"
     alias: "auto_box_point_neg"
+  - method: "dnanet_external_prediction"
+    alias: "dnanet_external"
 
 # 通用分析默认值。每个 suite 可以覆盖 metrics、comparisons 等字段。
 analysis:
@@ -461,6 +486,19 @@ suites:
       - name: "auto_box_point_neg_vs_auto_box_point"
         baseline: "sam2_heuristic_auto_box_point"
         candidate: "sam2_heuristic_auto_box_point_neg"
+  p0_external_predictions:
+    # 外部预测导入 suite。models 字段使用 base_plus 仅满足现有 runner 的矩阵维度；
+    # 真正的外部模型名称、checkpoint 和逐图 latency 由导出 manifest 与结果行记录。
+    experiment_id: "P0_external_prediction_baselines"
+    purpose: "Import precomputed P0 external model masks into IRSAM2 metrics."
+    models: ["base_plus"]
+    modes: ["dnanet_external_prediction"]
+    datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k"]
+    run_analysis: true
+    primary_metric: "mIoU"
+    metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "LatencyMs"]
+    lower_is_better: ["FalseAlarmPixelsPerMP", "FalseAlarmComponents", "LatencyMs"]
+    comparisons: []
   rbgt_box:
     # RBGT-Tiny 是弱标注/COCO 风格补充，不应和 mask 数据集混在同一主表里。
     experiment_id: "T5090_rbgt_box_prompt_modes"
