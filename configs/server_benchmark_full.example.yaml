@@ -264,6 +264,80 @@ methods:
         refresh_interval: null
         multi_mask: true
         notes: "SAM2 automatic mask generator without external prompts."
+  sam2_heuristic_auto_point:
+    baseline: "sam2_heuristic_auto_point_prompt"
+    method:
+      name: "sam2_heuristic_auto_point"
+      family: "sam2_heuristic_auto_prompt"
+      modality: "ir"
+      prompt_generation_protocol: "heuristic_ir_auto_prompt_v1"
+      point_variant: "highest_scoring_ir_response_peak"
+    evaluation:
+      inference_mode: "point"
+      prompt_policy:
+        name: "heuristic_ir_auto_point"
+        prompt_type: "point"
+        prompt_source: "synthesized"
+        prompt_budget: 1
+        refresh_interval: null
+        multi_mask: false
+        notes: "SAM2 with image-derived IR heuristic positive point prompt."
+  sam2_heuristic_auto_box:
+    baseline: "sam2_heuristic_auto_box_prompt"
+    method:
+      name: "sam2_heuristic_auto_box"
+      family: "sam2_heuristic_auto_prompt"
+      modality: "ir"
+      prompt_generation_protocol: "heuristic_ir_auto_prompt_v1"
+      box_variant: "heuristic_response_component"
+    evaluation:
+      inference_mode: "box"
+      prompt_policy:
+        name: "heuristic_ir_auto_box"
+        prompt_type: "box"
+        prompt_source: "synthesized"
+        prompt_budget: 1
+        refresh_interval: null
+        multi_mask: false
+        notes: "SAM2 with image-derived IR heuristic box prompt."
+  sam2_heuristic_auto_box_point:
+    baseline: "sam2_heuristic_auto_box_point_prompt"
+    method:
+      name: "sam2_heuristic_auto_box_point"
+      family: "sam2_heuristic_auto_prompt"
+      modality: "ir"
+      prompt_generation_protocol: "heuristic_ir_auto_prompt_v1"
+      box_variant: "heuristic_response_component"
+      point_variant: "highest_scoring_ir_response_peak"
+    evaluation:
+      inference_mode: "box+point"
+      prompt_policy:
+        name: "heuristic_ir_auto_box_point"
+        prompt_type: "box+point"
+        prompt_source: "synthesized"
+        prompt_budget: 2
+        refresh_interval: null
+        multi_mask: false
+        notes: "SAM2 with image-derived IR heuristic box and positive point prompt."
+  sam2_heuristic_auto_box_point_neg:
+    baseline: "sam2_heuristic_auto_box_point_neg_prompt"
+    method:
+      name: "sam2_heuristic_auto_box_point_neg"
+      family: "sam2_heuristic_auto_prompt"
+      modality: "ir"
+      prompt_generation_protocol: "heuristic_ir_auto_prompt_v1"
+      box_variant: "heuristic_response_component"
+      point_variant: "highest_scoring_ir_response_peak_with_negative_ring"
+    evaluation:
+      inference_mode: "box+point"
+      prompt_policy:
+        name: "heuristic_ir_auto_box_point_neg"
+        prompt_type: "box+point"
+        prompt_source: "synthesized"
+        prompt_budget: 6
+        refresh_interval: null
+        multi_mask: false
+        notes: "SAM2 with heuristic box, positive point, and negative ring points."
 
 # checkpoint sweep。
 # alias 会进入输出路径；SAM2 prompted 推理按图像逐步设置 predictor，batch 对吞吐帮助有限。
@@ -315,6 +389,14 @@ modes:
     alias: "box_point"
   - method: "sam2_no_prompt_auto_mask"
     alias: "no_prompt"
+  - method: "sam2_heuristic_auto_point"
+    alias: "auto_point"
+  - method: "sam2_heuristic_auto_box"
+    alias: "auto_box"
+  - method: "sam2_heuristic_auto_box_point"
+    alias: "auto_box_point"
+  - method: "sam2_heuristic_auto_box_point_neg"
+    alias: "auto_box_point_neg"
 
 # 通用分析默认值。每个 suite 可以覆盖 metrics、comparisons 等字段。
 analysis:
@@ -361,6 +443,24 @@ suites:
     metrics: ["instance_precision", "instance_recall", "instance_f1", "matched_instance_iou", "num_pred_instances", "LatencyMs"]
     lower_is_better: ["num_pred_instances", "LatencyMs"]
     comparisons: []
+  heuristic_auto_prompt:
+    # image-derived prompt policy; Track A prompted segmentation, not Track B automatic-mask.
+    experiment_id: "T_auto_prompt_v1"
+    purpose: "Heuristic IR auto prompt baseline for SAM2 prompted segmentation."
+    models: ["base_plus"]
+    modes: ["sam2_heuristic_auto_point", "sam2_heuristic_auto_box", "sam2_heuristic_auto_box_point", "sam2_heuristic_auto_box_point_neg"]
+    datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal"]
+    run_analysis: true
+    primary_metric: "mIoU"
+    metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "PromptHitRate", "PromptDistanceToCentroid", "PromptBoxCoverage", "AutoPromptCandidateScore", "AutoPromptNegativePointCount", "NegativePromptInGtRate", "LatencyMs"]
+    lower_is_better: ["FalseAlarmPixelsPerMP", "FalseAlarmComponents", "NegativePromptInGtRate", "LatencyMs"]
+    comparisons:
+      - name: "auto_box_point_vs_auto_box"
+        baseline: "sam2_heuristic_auto_box"
+        candidate: "sam2_heuristic_auto_box_point"
+      - name: "auto_box_point_neg_vs_auto_box_point"
+        baseline: "sam2_heuristic_auto_box_point"
+        candidate: "sam2_heuristic_auto_box_point_neg"
   rbgt_box:
     # RBGT-Tiny 是弱标注/COCO 风格补充，不应和 mask 数据集混在同一主表里。
     experiment_id: "T5090_rbgt_box_prompt_modes"

@@ -43,5 +43,25 @@ def prompt_metrics(prompt: Dict[str, object] | None, gt_mask: np.ndarray) -> Dic
             metrics["PromptDistanceToCentroid"] = float(((float(point[0]) - cx) ** 2 + (float(point[1]) - cy) ** 2) ** 0.5)
     if isinstance(box, list):
         metrics["PromptBoxCoverage"] = _box_coverage(box, gt_mask)
+    if "candidate_score" in prompt:
+        metrics["AutoPromptCandidateScore"] = float(prompt.get("candidate_score") or 0.0)
+    points = prompt.get("points")
+    labels = prompt.get("point_labels")
+    if isinstance(points, list):
+        metrics["AutoPromptNumPoints"] = float(len(points))
+    if isinstance(labels, list):
+        negative_count = sum(1 for label in labels if int(label) == 0)
+        metrics["AutoPromptNegativePointCount"] = float(negative_count)
+        if isinstance(points, list) and negative_count > 0:
+            h, w = gt_mask.shape
+            negative_hits = 0
+            for candidate_point, label in zip(points, labels):
+                if int(label) != 0 or not isinstance(candidate_point, list) or len(candidate_point) < 2:
+                    continue
+                x, y = int(round(float(candidate_point[0]))), int(round(float(candidate_point[1])))
+                if 0 <= y < h and 0 <= x < w and gt_mask[y, x] > 0.5:
+                    negative_hits += 1
+            metrics["NegativePromptInGtRate"] = float(negative_hits) / float(negative_count)
+    if "fallback" in prompt:
+        metrics["AutoPromptFallback"] = 1.0 if bool(prompt.get("fallback")) else 0.0
     return metrics
-

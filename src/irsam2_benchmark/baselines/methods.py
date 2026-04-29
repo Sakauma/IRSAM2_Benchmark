@@ -6,6 +6,7 @@ import numpy as np
 
 from ..config import AppConfig
 from ..core.interfaces import BenchmarkMethodProtocol, InferenceMode
+from ..data.auto_prompt import HEURISTIC_IR_AUTO_PROMPT_PROTOCOL, generate_heuristic_ir_auto_prompt_from_path
 from ..data.prompt_synthesis import (
     MASK_DERIVED_CENTROID_POINT_PROTOCOL,
     MASK_DERIVED_LOOSE_BOX_CENTROID_POINT_PROTOCOL,
@@ -187,6 +188,88 @@ class NoPromptAutoMaskSAM2(BaseMethod):
         return {"instances": instances, "auto_mask_points_per_batch": points_per_batch}
 
 
+class HeuristicAutoPromptedSAM2(BaseMethod):
+    name = "HeuristicAutoPromptedSAM2"
+    family = "sam2"
+
+    def __init__(
+        self,
+        adapter: SAM2ModelAdapter,
+        prompt_mode: InferenceMode,
+        *,
+        use_negative_ring: bool = False,
+        top_k: int = 1,
+    ):
+        self.adapter = adapter
+        self.inference_mode = prompt_mode
+        self.use_negative_ring = use_negative_ring
+        self.top_k = top_k
+
+    def _auto_prompt(self, sample: Sample) -> Dict[str, Any]:
+        auto_prompt = generate_heuristic_ir_auto_prompt_from_path(
+            sample.image_path,
+            top_k=self.top_k,
+            negative_ring=self.use_negative_ring,
+        )
+        prompt = {
+            **auto_prompt.metadata,
+            "protocol": HEURISTIC_IR_AUTO_PROMPT_PROTOCOL,
+            "box_variant": "heuristic",
+            "point_rule": "highest_scoring_ir_response_peak",
+            "box_rule": "connected_response_component_around_primary_peak",
+        }
+        return prompt
+
+    def _predict_kwargs_and_prompt(self, sample: Sample) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        prompt = self._auto_prompt(sample)
+        kwargs: Dict[str, Any] = {"multimask_output": self.inference_mode == InferenceMode.MULTI_MASK}
+        if self.inference_mode == InferenceMode.POINT:
+            kwargs["points"] = np.array([prompt["point"]], dtype=np.float32)
+            kwargs["point_labels"] = np.array([1], dtype=np.int32)
+        elif self.inference_mode == InferenceMode.BOX:
+            kwargs["box"] = prompt["box"]
+        elif self.inference_mode == InferenceMode.BOX_POINT:
+            kwargs["box"] = prompt["box"]
+            kwargs["points"] = np.array(prompt["points"], dtype=np.float32)
+            kwargs["point_labels"] = np.array(prompt["point_labels"], dtype=np.int32)
+        else:
+            raise ValueError(f"Unsupported heuristic auto prompt mode: {self.inference_mode.value}")
+        return kwargs, prompt
+
+    def _prediction_from_result(self, result: Dict[str, Any], prompt: Dict[str, Any]) -> Dict[str, Any]:
+        masks = result["masks"]
+        scores = result["scores"]
+        best_idx = int(np.argmax(scores))
+        return {"mask": masks[best_idx].astype(np.float32), "score": float(scores[best_idx]), "prompt": prompt}
+
+    def predict_sample(self, sample: Sample) -> Dict[str, Any]:
+        image_rgb = load_image_rgb(sample.image_path)
+        kwargs, prompt = self._predict_kwargs_and_prompt(sample)
+        result = self.adapter.predict_image(image_rgb, **kwargs)
+        return self._prediction_from_result(result, prompt)
+
+    def predict_samples(self, samples: List[Sample]) -> Dict[str, Dict[str, Any]]:
+        if not samples:
+            return {}
+        images = [load_image_rgb(sample.image_path) for sample in samples]
+        kwargs_and_prompts = [self._predict_kwargs_and_prompt(sample) for sample in samples]
+        kwargs_list = [item[0] for item in kwargs_and_prompts]
+        prompts = [item[1] for item in kwargs_and_prompts]
+        results = self.adapter.predict_images(
+            images,
+            boxes=[kwargs.get("box") for kwargs in kwargs_list],
+            points=[kwargs.get("points") for kwargs in kwargs_list],
+            point_labels=[kwargs.get("point_labels") for kwargs in kwargs_list],
+            multimask_output=self.inference_mode == InferenceMode.MULTI_MASK,
+        )
+        if len(results) != len(samples):
+            raise RuntimeError(f"Batch prediction returned {len(results)} results for {len(samples)} samples.")
+        return {
+            sample.sample_id: self._prediction_from_result(result, prompt)
+            for sample, result, prompt in zip(samples, results, prompts)
+        }
+
+
 CANONICAL_BASELINE_NAMES = (
     "bbox_rect",
     "sam2_pretrained_box_prompt",
@@ -194,6 +277,10 @@ CANONICAL_BASELINE_NAMES = (
     "sam2_pretrained_point_prompt",
     "sam2_pretrained_box_point_prompt",
     "sam2_no_prompt_auto_mask",
+    "sam2_heuristic_auto_point_prompt",
+    "sam2_heuristic_auto_box_prompt",
+    "sam2_heuristic_auto_box_point_prompt",
+    "sam2_heuristic_auto_box_point_neg_prompt",
 )
 
 
@@ -206,4 +293,12 @@ def build_baseline_registry(config: AppConfig) -> Dict[str, BenchmarkMethodProto
         "sam2_pretrained_point_prompt": PretrainedPromptedSAM2(adapter, prompt_mode=InferenceMode.POINT),
         "sam2_pretrained_box_point_prompt": PretrainedPromptedSAM2(adapter, prompt_mode=InferenceMode.BOX_POINT),
         "sam2_no_prompt_auto_mask": NoPromptAutoMaskSAM2(adapter),
+        "sam2_heuristic_auto_point_prompt": HeuristicAutoPromptedSAM2(adapter, prompt_mode=InferenceMode.POINT),
+        "sam2_heuristic_auto_box_prompt": HeuristicAutoPromptedSAM2(adapter, prompt_mode=InferenceMode.BOX),
+        "sam2_heuristic_auto_box_point_prompt": HeuristicAutoPromptedSAM2(adapter, prompt_mode=InferenceMode.BOX_POINT),
+        "sam2_heuristic_auto_box_point_neg_prompt": HeuristicAutoPromptedSAM2(
+            adapter,
+            prompt_mode=InferenceMode.BOX_POINT,
+            use_negative_ring=True,
+        ),
     }
