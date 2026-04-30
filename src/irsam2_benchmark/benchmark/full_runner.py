@@ -300,6 +300,8 @@ def _build_app_config(
     method_id: str,
     artifact_root: Path,
     smoke_test: bool,
+    show_progress: bool,
+    progress_backend: str,
     source_config_path: Path,
     source_config_sha256: str,
 ) -> Dict[str, Any]:
@@ -312,6 +314,9 @@ def _build_app_config(
     runtime = _runtime_config(base_matrix.get("runtime_defaults", {}), suite_config, suite_entry, checkpoint, paths, smoke_test)
     runtime["artifact_root"] = str(artifact_root)
     runtime["output_name"] = f"{suite_entry['experiment_id']}/{dataset_id}/{method_id}"
+    runtime["show_progress"] = bool(show_progress)
+    runtime["progress_backend"] = progress_backend if show_progress else "none"
+    runtime["progress_position"] = 1
     evaluation = _deep_merge(base_matrix["evaluation_defaults"], method_entry.get("evaluation", {}))
     return {
         "model": _model_config(checkpoint, paths),
@@ -473,6 +478,48 @@ def _run_subprocess(command: List[str], env: Dict[str, str], log_path: Path, *, 
             sys.stderr.write(text)
             sys.stderr.flush()
         return subprocess.CompletedProcess(command, process.wait())
+
+
+def _make_run_progress(*, total: int, enabled: bool) -> Any | None:
+    if not enabled or total <= 0:
+        return None
+    try:
+        from tqdm import tqdm
+    except Exception:
+        return None
+    return tqdm(total=total, unit="run", desc="runs", dynamic_ncols=True, leave=True, position=0, file=sys.stderr)
+
+
+def _set_run_progress(progress: Any | None, *, prefix: str, counts: Dict[str, int]) -> None:
+    if progress is None:
+        return
+    progress.set_description_str(prefix)
+    progress.set_postfix(
+        completed=counts.get("completed", 0),
+        skipped=counts.get("skipped", 0),
+        failed=counts.get("failed", 0),
+        dry_run=counts.get("dry_run", 0),
+    )
+
+
+def _advance_run_progress(progress: Any | None, *, status: str, counts: Dict[str, int]) -> None:
+    if progress is None:
+        return
+    if status == "completed":
+        counts["completed"] = counts.get("completed", 0) + 1
+    elif status == "skipped_existing":
+        counts["skipped"] = counts.get("skipped", 0) + 1
+    elif status == "dry_run":
+        counts["dry_run"] = counts.get("dry_run", 0) + 1
+    else:
+        counts["failed"] = counts.get("failed", 0) + 1
+    progress.set_postfix(
+        completed=counts.get("completed", 0),
+        skipped=counts.get("skipped", 0),
+        failed=counts.get("failed", 0),
+        dry_run=counts.get("dry_run", 0),
+    )
+    progress.update(1)
 
 
 def _status_record(
@@ -701,6 +748,13 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument("--no-analysis", action="store_true")
     parser.add_argument("--stop-on-error", action="store_true")
     parser.add_argument("--stream-logs", action="store_true", help="Mirror child process logs to stderr while still writing per-run log files.")
+    parser.add_argument("--no-progress", action="store_true", help="Disable run-level and per-run progress bars.")
+    parser.add_argument(
+        "--progress-backend",
+        choices=("auto", "tqdm", "line", "none"),
+        default="tqdm",
+        help="Progress backend written into generated single-run configs. Default: tqdm.",
+    )
     args = parser.parse_args(argv)
 
     config_path = _resolve_optional_project_path(args.config) or _default_config_from_env()
@@ -815,6 +869,8 @@ def main(argv: List[str] | None = None) -> int:
                         method_id=method_id,
                         artifact_root=artifact_root,
                         smoke_test=args.smoke_test,
+                        show_progress=not args.no_progress,
+                        progress_backend=args.progress_backend,
                         source_config_path=source_config_path,
                         source_config_sha256=str(config_sources["config_sha256"]),
                     )
@@ -828,12 +884,15 @@ def main(argv: List[str] | None = None) -> int:
         raise RuntimeError("No runnable benchmark combinations were generated.")
 
     print(f"[plan] runs={len(run_plan)} artifact_root={manifest_dir}", flush=True)
+    run_progress = _make_run_progress(total=len(run_plan), enabled=not args.no_progress)
+    run_progress_counts: Dict[str, int] = {"completed": 0, "skipped": 0, "failed": 0, "dry_run": 0}
 
     for index, (suite_key, _, checkpoint, dataset_id, method_id, output_dir, config_path, config_sha256, command, log_path) in enumerate(run_plan, start=1):
         prefix = (
             f"[{index}/{len(run_plan)}] suite={suite_key} ckpt={checkpoint['alias']} "
             f"model={checkpoint['model_id']} dataset={dataset_id} mode={method_id}"
         )
+        _set_run_progress(run_progress, prefix=prefix, counts=run_progress_counts)
         if not args.rerun and _run_is_complete(output_dir):
             # resume 模式默认跳过完整 run；--rerun 会强制覆盖重跑。
             print(f"{prefix} skipped_existing", flush=True)
@@ -852,6 +911,7 @@ def main(argv: List[str] | None = None) -> int:
                 )
             )
             _write_run_outputs(manifest_dir, records, failures, run_id)
+            _advance_run_progress(run_progress, status="skipped_existing", counts=run_progress_counts)
             continue
         if args.dry_run:
             print(f"{prefix} dry_run", flush=True)
@@ -870,9 +930,10 @@ def main(argv: List[str] | None = None) -> int:
                     log_path=log_path,
                 )
             )
+            _advance_run_progress(run_progress, status="dry_run", counts=run_progress_counts)
             continue
         print(f"{prefix} running", flush=True)
-        run_kwargs = {"stream_logs": True} if args.stream_logs else {}
+        run_kwargs = {"stream_logs": True} if (args.stream_logs or not args.no_progress) else {}
         result = _run_subprocess(command, env, log_path, **run_kwargs)
         if result.returncode == 0:
             validation = validate_run_artifacts(output_dir)
@@ -892,6 +953,7 @@ def main(argv: List[str] | None = None) -> int:
                         returncode=result.returncode,
                     )
                 )
+                _advance_run_progress(run_progress, status="completed", counts=run_progress_counts)
             else:
                 failure = _status_record(
                     status="failed_invalid_artifacts",
@@ -913,6 +975,7 @@ def main(argv: List[str] | None = None) -> int:
                 failures.append(failure)
                 print(f"{prefix} failed invalid_artifacts", flush=True)
                 _write_run_outputs(manifest_dir, records, failures, run_id)
+                _advance_run_progress(run_progress, status="failed_invalid_artifacts", counts=run_progress_counts)
                 if args.stop_on_error:
                     break
         else:
@@ -935,9 +998,12 @@ def main(argv: List[str] | None = None) -> int:
             failures.append(failure)
             print(f"{prefix} failed returncode={result.returncode}", flush=True)
             _write_run_outputs(manifest_dir, records, failures, run_id)
+            _advance_run_progress(run_progress, status="failed", counts=run_progress_counts)
             if args.stop_on_error:
                 break
         _write_run_outputs(manifest_dir, records, failures, run_id)
+    if run_progress is not None:
+        run_progress.close()
 
     if args.dry_run:
         for item in analysis_records:

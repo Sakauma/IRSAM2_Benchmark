@@ -63,22 +63,28 @@ def _progress_bar(
     total: int,
     unit: str,
 ) -> Any | None:
-    # 进度条只依赖 runtime.show_progress；测试环境或无 tqdm 环境会静默退化为无进度条。
+    # progress_backend=auto 保持旧行为；full benchmark 会强制 tqdm 以支持双层动态进度条。
     runtime = getattr(config, "runtime", None)
     if not bool(getattr(runtime, "show_progress", False)) or total <= 0:
         return None
-    try:
-        from tqdm import tqdm
-    except Exception:
+    backend = str(getattr(runtime, "progress_backend", "auto")).strip().lower()
+    if backend in {"none", "off", "false", "0"}:
         return None
+    if backend not in {"auto", "tqdm", "line"}:
+        backend = "auto"
     dataset_id = getattr(getattr(config, "dataset", None), "dataset_id", "dataset")
     method_name = str(error_context.get("baseline_name") or getattr(method, "name", method.__class__.__name__))
     seed = error_context.get("seed")
     seed_label = f" seed={seed}" if seed is not None else ""
     desc = f"{dataset_id} {method_name}{seed_label} {inference_mode.value}"
     mininterval = float(getattr(runtime, "progress_update_interval_s", 1.0))
-    if not sys.stderr.isatty():
+    if backend == "line" or (backend == "auto" and not sys.stderr.isatty()):
         return _LineProgress(desc=desc, total=total, unit=unit, mininterval=mininterval)
+    try:
+        from tqdm import tqdm
+    except Exception:
+        return None
+    position = int(getattr(runtime, "progress_position", 0))
     return tqdm(
         total=total,
         unit=unit,
@@ -86,6 +92,7 @@ def _progress_bar(
         dynamic_ncols=True,
         leave=True,
         mininterval=mininterval,
+        position=position,
         file=sys.stderr,
     )
 

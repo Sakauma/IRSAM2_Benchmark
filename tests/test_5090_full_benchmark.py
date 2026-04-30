@@ -73,6 +73,28 @@ def _write_rbgt_voc_safe_config(path: Path, artifact_root: Path) -> None:
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
 
+class FakeRunProgress:
+    def __init__(self):
+        self.descriptions = []
+        self.postfixes = []
+        self.updates = 0
+        self.closed = False
+        self.desc = "runs"
+
+    def set_description_str(self, text):
+        self.desc = text
+        self.descriptions.append(text)
+
+    def set_postfix(self, **kwargs):
+        self.postfixes.append(dict(kwargs))
+
+    def update(self, n):
+        self.updates += n
+
+    def close(self):
+        self.closed = True
+
+
 class Full5090BenchmarkTests(unittest.TestCase):
     def test_run_subprocess_streams_output_and_writes_log(self):
         runner = _load_runner()
@@ -98,7 +120,7 @@ class Full5090BenchmarkTests(unittest.TestCase):
             config_path = root / "server_benchmark_full.local.yaml"
             _write_full_config(config_path, root / "artifacts")
             output = io.StringIO()
-            with redirect_stdout(output):
+            with patch.object(runner._full_runner, "_make_run_progress", return_value=None), redirect_stdout(output):
                 self.assertEqual(
                     runner.main(
                         [
@@ -137,6 +159,9 @@ class Full5090BenchmarkTests(unittest.TestCase):
             self.assertEqual(config["runtime"]["seeds"], [42])
             self.assertEqual(config["runtime"]["image_batch_size"], 1)
             self.assertEqual(config["runtime"]["auto_mask_points_per_batch"], 256)
+            self.assertTrue(config["runtime"]["show_progress"])
+            self.assertEqual(config["runtime"]["progress_backend"], "tqdm")
+            self.assertEqual(config["runtime"]["progress_position"], 1)
             self.assertEqual(config["runtime"]["reference_results_root"], str(root / "reference_results"))
             self.assertIn("/paper_5090/runs/mask/tiny", config["runtime"]["artifact_root"])
             self.assertIn("/paper_5090/logs/mask/tiny", manifest["records"][0]["log_path"])
@@ -145,6 +170,72 @@ class Full5090BenchmarkTests(unittest.TestCase):
             self.assertEqual(config["fingerprints"]["source_config_sha256"], manifest["config_sha256"])
             self.assertEqual(manifest["config_mode"], "complete")
             self.assertEqual(manifest["config"], str(config_path.resolve()))
+
+    def test_dry_run_advances_outer_run_progress(self):
+        runner = _load_runner()
+        progress = FakeRunProgress()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "server_benchmark_full.local.yaml"
+            _write_full_config(config_path, root / "artifacts")
+
+            with patch.object(runner._full_runner, "_make_run_progress", return_value=progress):
+                self.assertEqual(
+                    runner.main(
+                        [
+                            "--config",
+                            str(config_path),
+                            "--suites",
+                            "mask",
+                            "--checkpoints",
+                            "tiny",
+                            "--modes",
+                            "box",
+                            "--dry-run",
+                            "--python-bin",
+                            "python",
+                        ]
+                    ),
+                    0,
+                )
+
+        self.assertEqual(progress.updates, 4)
+        self.assertTrue(progress.closed)
+        self.assertTrue(any("nuaa_sirst" in item for item in progress.descriptions))
+        self.assertEqual(progress.postfixes[-1]["dry_run"], 4)
+
+    def test_no_progress_disables_generated_single_run_progress(self):
+        runner = _load_runner()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "server_benchmark_full.local.yaml"
+            _write_full_config(config_path, root / "artifacts")
+            self.assertEqual(
+                runner.main(
+                    [
+                        "--config",
+                        str(config_path),
+                        "--suites",
+                        "mask",
+                        "--checkpoints",
+                        "tiny",
+                        "--modes",
+                        "box",
+                        "--dry-run",
+                        "--no-progress",
+                        "--python-bin",
+                        "python",
+                    ]
+                ),
+                0,
+            )
+
+            manifest = json.loads((root / "artifacts" / "paper_5090" / "benchmark_manifest_latest.json").read_text(encoding="utf-8"))
+            first_config = Path(manifest["records"][0]["config_path"])
+            config = yaml.safe_load(first_config.read_text(encoding="utf-8"))
+            self.assertFalse(config["runtime"]["show_progress"])
+            self.assertEqual(config["runtime"]["progress_backend"], "none")
+            self.assertEqual(config["runtime"]["progress_position"], 1)
 
     def test_rbgt_voc_safe_example_generates_single_large_run(self):
         runner = _load_runner()
@@ -159,6 +250,7 @@ class Full5090BenchmarkTests(unittest.TestCase):
                         str(config_path),
                         "--dry-run",
                         "--no-analysis",
+                        "--no-progress",
                         "--python-bin",
                         "python",
                     ]
@@ -193,11 +285,12 @@ class Full5090BenchmarkTests(unittest.TestCase):
                         "--checkpoints",
                         "tiny",
                         "--modes",
-                        "box",
-                        "--dry-run",
-                        "--smoke-test",
-                    ]
-                ),
+                            "box",
+                            "--dry-run",
+                            "--smoke-test",
+                            "--no-progress",
+                        ]
+                    ),
                 0,
             )
             manifest_path = root / "artifacts" / "paper_5090_smoke" / "benchmark_manifest_latest.json"
@@ -239,6 +332,7 @@ class Full5090BenchmarkTests(unittest.TestCase):
                         "box",
                         "--dry-run",
                         "--no-analysis",
+                        "--no-progress",
                     ]
                 ),
                 0,
@@ -332,8 +426,8 @@ class Full5090BenchmarkTests(unittest.TestCase):
             config_path = root / "server_benchmark_full.local.yaml"
             _write_full_config(config_path, root / "artifacts")
 
-            def fake_run_subprocess(command, env, log_path):
-                del command, env
+            def fake_run_subprocess(command, env, log_path, *, stream_logs=False):
+                del command, env, stream_logs
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 log_path.write_text("first line\nlast failure line\n", encoding="utf-8")
                 return CompletedProcess(args=[], returncode=7)
@@ -352,6 +446,7 @@ class Full5090BenchmarkTests(unittest.TestCase):
                             "box",
                             "--no-analysis",
                             "--stop-on-error",
+                            "--no-progress",
                         ]
                     ),
                     1,
@@ -369,8 +464,8 @@ class Full5090BenchmarkTests(unittest.TestCase):
             config_path = root / "server_benchmark_full.local.yaml"
             _write_full_config(config_path, root / "artifacts")
 
-            def fake_run_subprocess(command, env, log_path):
-                del command, env
+            def fake_run_subprocess(command, env, log_path, *, stream_logs=False):
+                del command, env, stream_logs
                 log_path.parent.mkdir(parents=True, exist_ok=True)
                 log_path.write_text("process returned zero\n", encoding="utf-8")
                 return CompletedProcess(args=[], returncode=0)
@@ -389,6 +484,7 @@ class Full5090BenchmarkTests(unittest.TestCase):
                             "box",
                             "--no-analysis",
                             "--stop-on-error",
+                            "--no-progress",
                         ]
                     ),
                     1,

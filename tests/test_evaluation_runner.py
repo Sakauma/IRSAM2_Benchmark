@@ -60,7 +60,16 @@ class DummyConfig:
 
 
 class LoggingConfig:
-    def __init__(self, output_dir: Path, *, image_batch_size: int = 1, reuse_image_embedding: bool = False, show_progress: bool = False):
+    def __init__(
+        self,
+        output_dir: Path,
+        *,
+        image_batch_size: int = 1,
+        reuse_image_embedding: bool = False,
+        show_progress: bool = False,
+        progress_backend: str = "auto",
+        progress_position: int = 0,
+    ):
         self.output_dir = output_dir
         self.config_path = output_dir / "config.yaml"
         self.dataset = type("Dataset", (), {"modality": "ir", "dataset_id": "dummy_dataset"})()
@@ -73,6 +82,8 @@ class LoggingConfig:
                 "reuse_image_embedding": reuse_image_embedding,
                 "batch_oom_fallback": True,
                 "show_progress": show_progress,
+                "progress_backend": progress_backend,
+                "progress_position": progress_position,
                 "progress_update_interval_s": 0.0,
             },
         )()
@@ -288,6 +299,44 @@ class EvaluationRunnerTests(unittest.TestCase):
         progress_text = stderr.getvalue()
         self.assertIn("dummy_dataset", progress_text)
         self.assertIn("2/2", progress_text)
+
+    def test_evaluate_method_can_force_tqdm_progress_for_piped_stderr(self):
+        mask = box_to_area([0, 0, 4, 4], 4, 4)
+        samples = [
+            make_sample(sample_id=f"frame_{idx}__inst_0", frame_id=f"frame_{idx}", mask_array=mask)
+            for idx in range(2)
+        ]
+
+        class DummyBatchMethod:
+            def predict_samples(self, batch):
+                return {
+                    sample.sample_id: {"mask": np.ones((4, 4), dtype=np.float32), "prompt": None}
+                    for sample in batch
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = LoggingConfig(
+                Path(temp_dir) / "out",
+                image_batch_size=1,
+                show_progress=True,
+                progress_backend="tqdm",
+                progress_position=1,
+            )
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                _, rows = evaluate_method(
+                    method=DummyBatchMethod(),
+                    samples=samples,
+                    config=config,
+                    track_name="track_a_mask_prompt",
+                    inference_mode=InferenceMode.BOX,
+                )
+
+        self.assertEqual(len(rows), 2)
+        progress_text = stderr.getvalue()
+        self.assertIn("dummy_dataset", progress_text)
+        self.assertIn("2/2", progress_text)
+        self.assertNotIn("[progress]", progress_text)
 
     def test_evaluate_method_logs_batch_prediction_key_mismatch_and_skips_samples(self):
         mask = box_to_area([0, 0, 4, 4], 4, 4)

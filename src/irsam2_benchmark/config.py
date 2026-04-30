@@ -75,6 +75,8 @@ class RuntimeConfig:
     batch_oom_fallback: bool = True
     max_failure_rate: float = 0.05
     show_progress: bool = True
+    progress_backend: str = "auto"
+    progress_position: int = 0
     progress_update_interval_s: float = 1.0
 
 

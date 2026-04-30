@@ -46,6 +46,8 @@ runtime_defaults:
   batch_oom_fallback: true
   max_failure_rate: 0.05
   show_progress: true
+  progress_backend: "auto"
+  progress_position: 0
   progress_update_interval_s: 1.0
 
 runtime:
