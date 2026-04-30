@@ -1,4 +1,6 @@
 # SAM2-IR-QD M1: learned IR auto prompt training + E2 evaluation.
+# Default mode is no-RBGT training. RBGT-Tiny remains configured below for
+# later weak-supervision experiments, but it is not used by this training run.
 # Recommended server launch:
 #   tmux new -s irsam2_auto_prompt
 #   PYTHONPATH=src python scripts/run_4090x4_auto_prompt.py \
@@ -6,11 +8,7 @@
 #     --stop-on-error \
 #     --preflight-mode fast \
 #     --train-gpu-cache-datasets nuaa_sirst,nudt_sirst,irstd_1k \
-#     --train-light-cache-datasets rbgt_tiny_ir_box \
 #     --train-cache-dtype float16 \
-#     --train-rbgt-samples-per-epoch 8192 \
-#     --train-rbgt-batch-size auto \
-#     --train-rbgt-batch-size-max 1024 \
 #     --train-batch-size 128 \
 #     --train-num-workers 4 \
 #     --train-prefetch-factor 4 \
@@ -19,17 +17,17 @@
 #     --train-profile-interval 200
 
 benchmark:
-  suite_name: "server_auto_prompt_4090x4"
-  artifact_subdir: "sam2_ir_qd_m1_auto_prompt"
+  suite_name: "server_auto_prompt_4090x4_no_rbgt"
+  artifact_subdir: "sam2_ir_qd_m1_auto_prompt_no_rbgt"
 
 auto_prompt:
-  experiment_id: "sam2_ir_qd_m1_auto_prompt_v1"
-  artifact_subdir: "sam2_ir_qd_m1_auto_prompt"
+  experiment_id: "sam2_ir_qd_m1_auto_prompt_no_rbgt_v1"
+  artifact_subdir: "sam2_ir_qd_m1_auto_prompt_no_rbgt"
   train_gpu: "0"
   eval_gpus: ["1", "6", "7", "0"]
-  train_datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "rbgt_tiny_ir_box"]
+  train_datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k"]
   gpu_cache_datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k"]
-  light_cache_datasets: ["rbgt_tiny_ir_box"]
+  light_cache_datasets: []
   eval_suites: ["auto_prompt"]
   checkpoint_name: "checkpoint.pt"
   top_k: 5
@@ -48,9 +46,6 @@ auto_prompt:
     max_samples: 0
     num_workers: 0
     cache_dtype: "float16"
-    light_cache_samples_per_epoch: 8192
-    light_cache_batch_size: "auto"
-    light_cache_batch_size_max: 1024
     show_progress: true
     progress_backend: "tqdm"
     progress_update_interval_s: 1.0
@@ -97,7 +92,7 @@ model_defaults:
 runtime_defaults:
   artifact_root: "artifacts"
   reference_results_root: "reference_results"
-  output_name: "sam2_ir_qd_m1_auto_prompt/default"
+  output_name: "sam2_ir_qd_m1_auto_prompt_no_rbgt/default"
   device: "cuda"
   num_workers: 0
   smoke_test: false
