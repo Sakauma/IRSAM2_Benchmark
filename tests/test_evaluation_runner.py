@@ -9,7 +9,7 @@ import numpy as np
 
 from irsam2_benchmark.core.interfaces import InferenceMode
 from irsam2_benchmark.data.sample import Sample
-from irsam2_benchmark.evaluation.runner import align_mask_to_sample, build_segmentation_row, box_to_area, evaluate_method
+from irsam2_benchmark.evaluation.runner import align_mask_to_sample, build_segmentation_row, box_to_area, evaluate_method, outside_box_leakage
 
 
 def make_sample(
@@ -114,6 +114,16 @@ class EvaluationRunnerTests(unittest.TestCase):
         self.assertEqual(row["supervision_type"], "mask")
         self.assertIn("BoundaryF1Exact", row)
         self.assertIn("BoundaryF1Tol1", row)
+        self.assertEqual(row["OBL"], 1.0)
+
+    def test_outside_box_leakage_measures_predicted_foreground_outside_box(self):
+        pred_mask = box_to_area([0, 0, 4, 2], 4, 4)
+
+        leakage = outside_box_leakage(pred_mask, [0, 0, 2, 2])
+
+        self.assertAlmostEqual(leakage, 0.5)
+        self.assertEqual(outside_box_leakage(np.zeros((4, 4), dtype=np.float32), [0, 0, 2, 2]), 0.0)
+        self.assertEqual(outside_box_leakage(pred_mask, None), 0.0)
 
     def test_bbox_only_row_does_not_emit_mask_metrics(self):
         pred_mask = box_to_area([0, 0, 2, 2], 4, 4)
@@ -131,7 +141,13 @@ class EvaluationRunnerTests(unittest.TestCase):
             pred_mask,
             np.zeros((4, 4), dtype=np.float32),
             elapsed_ms=1.0,
-            prompt={"box": [0, 0, 2, 2], "point": [1, 1]},
+            prompt={
+                "box": [0, 0, 2, 2],
+                "point": [1, 1],
+                "candidate_score": 0.8,
+                "prompt_confidence": 0.7,
+                "negative_point_count": 4,
+            },
         )
 
         self.assertEqual(row["supervision_type"], "bbox")
@@ -140,8 +156,12 @@ class EvaluationRunnerTests(unittest.TestCase):
         self.assertNotIn("Dice", row)
         self.assertNotIn("BoundaryF1", row)
         self.assertNotIn("TargetRecallIoU25", row)
+        self.assertEqual(row["OBL"], 0.0)
         self.assertEqual(row["PromptBoxBBoxIoU"], 1.0)
         self.assertEqual(row["PromptPointInBBox"], 1.0)
+        self.assertEqual(row["PromptCandidateScore"], 0.8)
+        self.assertEqual(row["PromptConfidence"], 0.7)
+        self.assertEqual(row["PromptNegativePointCount"], 4)
 
     def test_pred_mask_alignment_records_resize_metadata(self):
         gt_mask = box_to_area([0, 0, 4, 4], 4, 4)

@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 from .cases import select_cases, write_case_outputs
 from .collector import collect_runs, flatten_rows
+from .diagnostics import diagnostic_metric_rows
 from .io import output_pair, read_yaml, write_json
 from .reports import write_reports
 from .stats import run_paired_tests
@@ -79,6 +80,7 @@ def run_analysis(analysis_path: str | Path, *, dry_run: bool = False) -> Dict[st
     table_outputs.update(output_pair(tables_dir, "multimodal_size_table", multimodal_size_table(rows, metrics)))
     table_outputs.update(output_pair(tables_dir, "auto_mask_table", _filter_methods(rows, {"sam2_no_prompt_auto_mask"}, metrics)))
     table_outputs.update(output_pair(tables_dir, "bucket_table", bucket_table(rows, metrics)))
+    table_outputs.update(output_pair(tables_dir, "diagnostic_metrics", diagnostic_metric_rows(rows, analysis_config)))
 
     significance_rows = run_paired_tests(rows, analysis_config)
     table_outputs.update(output_pair(tables_dir, "significance_tests", significance_rows))
@@ -101,4 +103,3 @@ def _filter_methods(rows: list[Dict[str, Any]], methods: set[str], metrics: list
     from .tables import summarize_by
 
     return summarize_by([row for row in rows if row.get("method") in methods], ["dataset", "method", "eval_unit"], metrics)
-

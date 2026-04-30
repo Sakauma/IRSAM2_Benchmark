@@ -5,6 +5,7 @@
 ## 保留文件
 
 - `server_benchmark_full.example.yaml`：完整配置模板。它同时定义路径、模型、方法、数据集、seed、batch、suite 和分析参数。
+- `server_auto_prompt_4090x4.example.yaml`：SAM2-IR-QD M1 自动 prompt 训练和 E2 评估模板，默认使用 GPU `0,1,6,7`。
 
 ## 本地文件
 
@@ -12,6 +13,7 @@
 
 ```bash
 cp configs/server_benchmark_full.example.yaml configs/server_benchmark_full.local.yaml
+cp configs/server_auto_prompt_4090x4.example.yaml configs/server_auto_prompt_4090x4.local.yaml
 ```
 
 `configs/*.local.yaml` 是机器私有配置，被 `.gitignore` 排除，不应提交。
@@ -32,5 +34,13 @@ python scripts/run_5090_full_benchmark.py \
   --suites mask \
   --checkpoints tiny \
   --modes box \
+  --smoke-test
+```
+
+自动 prompt 服务器任务使用：
+
+```bash
+python scripts/run_4090x4_auto_prompt.py \
+  --config configs/server_auto_prompt_4090x4.local.yaml \
   --smoke-test
 ```

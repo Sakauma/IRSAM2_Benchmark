@@ -1,0 +1,37 @@
+experiment_id: auto_prompt_v1_smoke
+output_root: artifacts/auto_prompt
+
+# Each entry should be an existing benchmark dataset config.
+# The trainer reuses the configured dataset adapter and trains from bbox_tight/bbox_loose.
+dataset_configs:
+  - configs/server_benchmark_full.example.yaml
+
+train:
+  device: cuda
+  seed: 42
+  epochs: 20
+  batch_size: 1
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  box_loss_weight: 0.1
+  max_long_side: 512
+  max_samples: 0
+  num_workers: 0
+  heatmap_sample_limit: 8
+
+model:
+  input_channels: 3
+  hidden_channels: 16
+  min_box_side: 2.0
+  negative_ring_offset: 4.0
+  use_local_contrast: true
+  use_top_hat: true
+
+target:
+  gaussian_sigma: 2.0
+  positive_radius: 1
+  hard_negative_weight: 2.0
+  hard_negative_percentile: 95.0
+
+heatmaps:
+  sample_limit: 8

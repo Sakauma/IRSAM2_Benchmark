@@ -18,7 +18,8 @@ from ..data.prompt_synthesis import (
     clamp_box_xyxy,
 )
 from ..data.sample import Sample
-from ..models import SAM2ModelAdapter, load_image_rgb
+from ..models import LEARNED_IR_AUTO_PROMPT_PROTOCOL, SAM2ModelAdapter, load_auto_prompt_model, load_image_rgb, predict_learned_auto_prompt_from_path
+from ..evaluation.heatmaps import write_heatmap_artifact
 
 
 def box_to_mask(box: list[float], height: int, width: int) -> np.ndarray:
@@ -76,6 +77,29 @@ def _resolve_prediction_root(config: AppConfig, raw_root: str) -> Path:
         if candidate.exists():
             return candidate.resolve()
     return candidates[0].resolve()
+
+
+def _resolve_existing_path(config: AppConfig, raw_path: str) -> Path:
+    path = Path(raw_path).expanduser()
+    if path.is_absolute():
+        return path
+    candidates = [
+        Path.cwd() / path,
+        config.config_path.parent / path,
+        config.root / path,
+        config.root.parent / path,
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+    return candidates[0].resolve()
+
+
+def _resolve_output_path(config: AppConfig, raw_path: str) -> Path:
+    path = Path(raw_path).expanduser()
+    if path.is_absolute():
+        return path
+    return (config.root / path).resolve()
 
 
 class ExternalPredictionMaskBaseline(BaseMethod):
@@ -416,6 +440,175 @@ class HeuristicAutoPromptedSAM2(BaseMethod):
         }
 
 
+class LearnedAutoPromptedSAM2(BaseMethod):
+    name = "LearnedAutoPromptedSAM2"
+    family = "sam2"
+
+    def __init__(
+        self,
+        adapter: SAM2ModelAdapter,
+        config: AppConfig,
+        prompt_mode: InferenceMode,
+        *,
+        use_negative_ring: bool = False,
+    ):
+        self.adapter = adapter
+        self.config = config
+        self.inference_mode = prompt_mode
+        self.use_negative_ring = use_negative_ring
+        self.device = str(config.method.get("prompt_device") or getattr(config.runtime, "device", "cpu"))
+        self.min_box_side = float(config.method.get("prompt_min_box_side", 2.0))
+        self.negative_ring_offset = float(config.method.get("prompt_negative_ring_offset", 4.0))
+        self.top_k = int(config.method.get("prompt_top_k", 1))
+        self.point_budget = int(config.method.get("prompt_point_budget", 1))
+        self.response_threshold = float(config.method.get("prompt_response_threshold", 0.0))
+        self.nms_radius = int(config.method.get("prompt_nms_radius", 4))
+        self.use_local_contrast = bool(config.method.get("prompt_use_local_contrast", True))
+        self.use_top_hat = bool(config.method.get("prompt_use_top_hat", True))
+        heatmap_config = config.method.get("heatmaps", {})
+        heatmap_config = heatmap_config if isinstance(heatmap_config, dict) else {}
+        self._heatmap_enabled = bool(heatmap_config.get("enabled", False))
+        self._heatmap_limit = max(0, int(heatmap_config.get("sample_limit", 0)))
+        self._heatmap_sample_ids = {str(item) for item in heatmap_config.get("sample_ids", [])}
+        raw_heatmap_root = heatmap_config.get("root")
+        fallback_heatmap_root = getattr(config, "output_dir", config.root) / "heatmaps"
+        self._heatmap_root = _resolve_output_path(config, str(raw_heatmap_root)) if raw_heatmap_root else fallback_heatmap_root / "heatmaps"
+        self._heatmap_experiment_id = str(heatmap_config.get("experiment_id") or getattr(config.runtime, "output_name", "learned_auto_prompt"))
+        self._heatmap_dataset_id = str(heatmap_config.get("dataset_id") or getattr(getattr(config, "dataset", None), "dataset_id", "dataset"))
+        self._saved_heatmaps = 0
+        raw_checkpoint = (
+            config.method.get("prompt_checkpoint")
+            or config.method.get("auto_prompt_checkpoint")
+            or config.method.get("learned_auto_prompt_checkpoint")
+        )
+        self._configuration_error: str | None = None
+        self._checkpoint_path = Path()
+        if not raw_checkpoint:
+            self._configuration_error = (
+                "learned auto prompt baselines require method.prompt_checkpoint "
+                "or method.auto_prompt_checkpoint."
+            )
+        else:
+            self._checkpoint_path = _resolve_existing_path(config, str(raw_checkpoint))
+            if not self._checkpoint_path.exists():
+                self._configuration_error = f"learned auto prompt checkpoint not found: {self._checkpoint_path}"
+        self._prompt_model: Any | None = None
+        self._checkpoint_metadata: Dict[str, Any] = {}
+
+    def _ensure_prompt_model(self):
+        if self._configuration_error:
+            raise ValueError(self._configuration_error)
+        if self._prompt_model is None:
+            self._prompt_model, self._checkpoint_metadata = load_auto_prompt_model(self._checkpoint_path, device=self.device)
+        return self._prompt_model
+
+    def _auto_prompt(self, sample: Sample) -> Dict[str, Any]:
+        model = self._ensure_prompt_model()
+        auto_prompt = predict_learned_auto_prompt_from_path(
+            model=model,
+            image_path=sample.image_path,
+            device=self.device,
+            negative_ring=self.use_negative_ring,
+            min_box_side=self.min_box_side,
+            negative_ring_offset=self.negative_ring_offset,
+            top_k=self.top_k,
+            point_budget=self.point_budget,
+            response_threshold=self.response_threshold,
+            nms_radius=self.nms_radius,
+            use_local_contrast=self.use_local_contrast,
+            use_top_hat=self.use_top_hat,
+        )
+        heatmap_paths = self._maybe_write_heatmap(sample, auto_prompt)
+        prompt = {
+            **auto_prompt.metadata,
+            "protocol": LEARNED_IR_AUTO_PROMPT_PROTOCOL,
+            "box_variant": "learned",
+            "point_rule": "argmax_learned_objectness",
+            "box_rule": "learned_local_box_size",
+            "checkpoint_path": str(self._checkpoint_path),
+            "checkpoint_protocol": self._checkpoint_metadata.get("protocol", LEARNED_IR_AUTO_PROMPT_PROTOCOL),
+            "objectness_map_id": heatmap_paths.get("raw", ""),
+            "objectness_heatmap_overlay": heatmap_paths.get("overlay", ""),
+        }
+        return prompt
+
+    def _maybe_write_heatmap(self, sample: Sample, auto_prompt) -> dict[str, str]:
+        if not self._heatmap_enabled:
+            return {}
+        selected = sample.sample_id in self._heatmap_sample_ids or sample.frame_id in self._heatmap_sample_ids
+        if not selected:
+            if self._heatmap_limit <= 0 or self._saved_heatmaps >= self._heatmap_limit:
+                return {}
+        paths = write_heatmap_artifact(
+            root=self._heatmap_root,
+            experiment_id=self._heatmap_experiment_id,
+            dataset=self._heatmap_dataset_id,
+            sample_id=sample.sample_id,
+            stage="learned_auto_prompt_objectness",
+            heatmap=auto_prompt.objectness,
+            image=sample.image_path,
+            meta={
+                "model": self.name,
+                "checkpoint_path": str(self._checkpoint_path),
+                "prompt_mode": self.inference_mode.value,
+                "point": auto_prompt.point,
+                "box": auto_prompt.box,
+                "candidate_score": auto_prompt.metadata.get("candidate_score"),
+            },
+        )
+        self._saved_heatmaps += 1
+        return paths
+
+    def _predict_kwargs_and_prompt(self, sample: Sample) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        prompt = self._auto_prompt(sample)
+        kwargs: Dict[str, Any] = {"multimask_output": self.inference_mode == InferenceMode.MULTI_MASK}
+        if self.inference_mode == InferenceMode.POINT:
+            kwargs["points"] = np.array(prompt["points"], dtype=np.float32)
+            kwargs["point_labels"] = np.array(prompt["point_labels"], dtype=np.int32)
+        elif self.inference_mode == InferenceMode.BOX:
+            kwargs["box"] = prompt["box"]
+        elif self.inference_mode == InferenceMode.BOX_POINT:
+            kwargs["box"] = prompt["box"]
+            kwargs["points"] = np.array(prompt["points"], dtype=np.float32)
+            kwargs["point_labels"] = np.array(prompt["point_labels"], dtype=np.int32)
+        else:
+            raise ValueError(f"Unsupported learned auto prompt mode: {self.inference_mode.value}")
+        return kwargs, prompt
+
+    def _prediction_from_result(self, result: Dict[str, Any], prompt: Dict[str, Any]) -> Dict[str, Any]:
+        masks = result["masks"]
+        scores = result["scores"]
+        best_idx = int(np.argmax(scores))
+        return {"mask": masks[best_idx].astype(np.float32), "score": float(scores[best_idx]), "prompt": prompt}
+
+    def predict_sample(self, sample: Sample) -> Dict[str, Any]:
+        image_rgb = load_image_rgb(sample.image_path)
+        kwargs, prompt = self._predict_kwargs_and_prompt(sample)
+        result = self.adapter.predict_image(image_rgb, **kwargs)
+        return self._prediction_from_result(result, prompt)
+
+    def predict_samples(self, samples: List[Sample]) -> Dict[str, Dict[str, Any]]:
+        if not samples:
+            return {}
+        images = [load_image_rgb(sample.image_path) for sample in samples]
+        kwargs_and_prompts = [self._predict_kwargs_and_prompt(sample) for sample in samples]
+        kwargs_list = [item[0] for item in kwargs_and_prompts]
+        prompts = [item[1] for item in kwargs_and_prompts]
+        results = self.adapter.predict_images(
+            images,
+            boxes=[kwargs.get("box") for kwargs in kwargs_list],
+            points=[kwargs.get("points") for kwargs in kwargs_list],
+            point_labels=[kwargs.get("point_labels") for kwargs in kwargs_list],
+            multimask_output=self.inference_mode == InferenceMode.MULTI_MASK,
+        )
+        if len(results) != len(samples):
+            raise RuntimeError(f"Batch prediction returned {len(results)} results for {len(samples)} samples.")
+        return {
+            sample.sample_id: self._prediction_from_result(result, prompt)
+            for sample, result, prompt in zip(samples, results, prompts)
+        }
+
+
 CANONICAL_BASELINE_NAMES = (
     "bbox_rect",
     "external_prediction_mask",
@@ -428,6 +621,10 @@ CANONICAL_BASELINE_NAMES = (
     "sam2_heuristic_auto_box_prompt",
     "sam2_heuristic_auto_box_point_prompt",
     "sam2_heuristic_auto_box_point_neg_prompt",
+    "sam2_learned_auto_point_prompt",
+    "sam2_learned_auto_box_prompt",
+    "sam2_learned_auto_box_point_prompt",
+    "sam2_learned_auto_box_point_neg_prompt",
 )
 
 
@@ -446,6 +643,15 @@ def build_baseline_registry(config: AppConfig) -> Dict[str, BenchmarkMethodProto
         "sam2_heuristic_auto_box_point_prompt": HeuristicAutoPromptedSAM2(adapter, prompt_mode=InferenceMode.BOX_POINT),
         "sam2_heuristic_auto_box_point_neg_prompt": HeuristicAutoPromptedSAM2(
             adapter,
+            prompt_mode=InferenceMode.BOX_POINT,
+            use_negative_ring=True,
+        ),
+        "sam2_learned_auto_point_prompt": LearnedAutoPromptedSAM2(adapter, config, prompt_mode=InferenceMode.POINT),
+        "sam2_learned_auto_box_prompt": LearnedAutoPromptedSAM2(adapter, config, prompt_mode=InferenceMode.BOX),
+        "sam2_learned_auto_box_point_prompt": LearnedAutoPromptedSAM2(adapter, config, prompt_mode=InferenceMode.BOX_POINT),
+        "sam2_learned_auto_box_point_neg_prompt": LearnedAutoPromptedSAM2(
+            adapter,
+            config,
             prompt_mode=InferenceMode.BOX_POINT,
             use_negative_ring=True,
         ),

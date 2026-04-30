@@ -262,6 +262,24 @@ def _prediction_latency_ms(pred: Dict[str, Any], fallback_ms: float) -> float:
         return fallback_ms
 
 
+def outside_box_leakage(pred_mask: np.ndarray, box: list[float] | None) -> float:
+    # OBL measures how much predicted foreground leaks outside the annotation box.
+    pred = np.asarray(pred_mask, dtype=np.float32) > 0.5
+    pred_area = float(pred.sum())
+    if pred_area <= 0.0 or box is None:
+        return 0.0
+    h, w = pred.shape
+    x1, y1, x2, y2 = [int(round(value)) for value in box[:4]]
+    x1 = max(0, min(w, x1))
+    y1 = max(0, min(h, y1))
+    x2 = max(x1, min(w, x2))
+    y2 = max(y1, min(h, y2))
+    inside = np.zeros_like(pred, dtype=bool)
+    inside[y1:y2, x1:x2] = True
+    outside_pixels = float(np.logical_and(pred, ~inside).sum())
+    return outside_pixels / max(pred_area, 1e-8)
+
+
 def _predict_batch_with_fallback(
     method,
     batch: List[Sample],
@@ -562,6 +580,21 @@ def build_segmentation_row(
             "PromptLooseBoxMinSide": prompt.get("loose_box_min_side"),
             "PromptLooseBoxMaxSideMultiplier": prompt.get("loose_box_max_side_multiplier"),
             "PromptPointRule": prompt.get("point_rule", "unknown"),
+            "PromptCandidateScore": prompt.get("candidate_score"),
+            "PromptConfidence": prompt.get("prompt_confidence"),
+            "PromptNegativePointCount": prompt.get("negative_point_count"),
+            "PromptBoxWidth": prompt.get("box_width"),
+            "PromptBoxHeight": prompt.get("box_height"),
+            "PromptCheckpointPath": prompt.get("checkpoint_path"),
+            "PromptCandidateRank": prompt.get("candidate_rank"),
+            "PromptCandidateCount": prompt.get("candidate_count"),
+            "PromptCandidateTopK": prompt.get("candidate_top_k"),
+            "PromptCandidateNmsRadius": prompt.get("candidate_nms_radius"),
+            "PromptPositivePointCount": prompt.get("positive_point_count"),
+            "PromptFallback": prompt.get("fallback"),
+            "PromptResponseThreshold": prompt.get("response_threshold"),
+            "PromptObjectnessMapId": prompt.get("objectness_map_id"),
+            "PromptObjectnessHeatmapOverlay": prompt.get("objectness_heatmap_overlay"),
         }
     elif item.metadata.get("prompt_generation"):
         prompt_generation = item.metadata["prompt_generation"]
@@ -590,6 +623,7 @@ def build_segmentation_row(
         "annotation_protocol_flag": item.annotation_protocol_flag,
         "LatencyMs": elapsed_ms,
         "BBoxIoU": bbox_iou(pred_box, gt_box),
+        "OBL": outside_box_leakage(pred_mask, gt_box),
         "PredAreaRatio": pred_area / float(height * width),
         "PredAreaPixels": pred_area,
         **(mask_alignment or {}),

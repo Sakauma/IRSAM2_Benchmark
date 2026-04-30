@@ -1,6 +1,6 @@
 # 脚本索引
 
-当前只保留两个脚本入口。
+当前保留三个主要脚本入口。
 
 ## `run_5090_full_benchmark.py`
 
@@ -46,6 +46,30 @@ python scripts/analyze_paper_results.py \
 ```
 
 分析配置必须显式传入 `--analysis`。矩阵脚本会为每个需要分析的 suite/checkpoint 自动生成该文件。
+
+## `run_4090x4_auto_prompt.py`
+
+SAM2-IR-QD M1 自动 prompt runner。它先训练 learned IR auto prompt，再用 4 张 4090 并行跑 E2 自动 prompt 评估。
+
+```bash
+python scripts/run_4090x4_auto_prompt.py \
+  --config configs/server_auto_prompt_4090x4.local.yaml \
+  --dry-run
+```
+
+```bash
+python scripts/run_4090x4_auto_prompt.py \
+  --config configs/server_auto_prompt_4090x4.local.yaml \
+  --smoke-test \
+  --stop-on-error
+```
+
+正式运行建议放在 tmux 中：
+
+```bash
+python scripts/run_4090x4_auto_prompt.py \
+  --config configs/server_auto_prompt_4090x4.local.yaml
+```
 
 ## 运行日志
 

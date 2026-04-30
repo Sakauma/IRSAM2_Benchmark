@@ -413,6 +413,7 @@ def _analysis_config(
             )
         ),
         "case_selection": case_selection,
+        "diagnostics": _deep_merge(analysis_defaults.get("diagnostics", {}), suite_entry.get("diagnostics", {})),
         "statistics": statistics,
     }
 
