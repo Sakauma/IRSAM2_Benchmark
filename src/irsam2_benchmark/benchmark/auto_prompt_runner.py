@@ -26,6 +26,11 @@ PROJECT_ROOT = fr.PROJECT_ROOT
 TRAIN_AUTO_PROMPT_PY = PROJECT_ROOT / "scripts" / "train_auto_prompt.py"
 DEFAULT_AUTO_PROMPT_CONFIG = PROJECT_ROOT / "configs" / "server_auto_prompt_4090x4.local.yaml"
 DEFAULT_AUTO_PROMPT_EXAMPLE_CONFIG = PROJECT_ROOT / "configs" / "server_auto_prompt_4090x4.example.yaml"
+PREFLIGHT_MODES = ("fast", "full", "off")
+DEFAULT_PREFLIGHT_SAMPLE_LIMIT = 256
+DEFAULT_PREFLIGHT_IMAGE_LIMIT = 256
+HEAVY_PREFLIGHT_SAMPLE_LIMIT = 64
+HEAVY_PREFLIGHT_IMAGE_LIMIT = 64
 
 DEFAULT_LEARNED_METHODS: Dict[str, Dict[str, Any]] = {
     "sam2_learned_auto_point": {
@@ -320,7 +325,74 @@ def _command_for_train(train_config_path: Path, python_bin: str) -> list[str]:
     return [python_bin, str(TRAIN_AUTO_PROMPT_PY), "--config", str(train_config_path)]
 
 
-def _preflight_config_paths(config_paths: list[Path], *, role: str) -> list[dict[str, Any]]:
+def _is_heavy_preflight_dataset(*, dataset_id: str, config_path: Path) -> bool:
+    tokens = f"{dataset_id} {config_path.stem}".lower().replace("-", "_")
+    return "rbgt" in tokens and "tiny" in tokens
+
+
+def _preflight_limits(*, app_config: Any, config_path: Path, mode: str) -> tuple[int, int, bool]:
+    if mode != "fast":
+        return 0, 0, False
+    if _is_heavy_preflight_dataset(dataset_id=app_config.dataset.dataset_id, config_path=config_path):
+        return HEAVY_PREFLIGHT_SAMPLE_LIMIT, HEAVY_PREFLIGHT_IMAGE_LIMIT, True
+    return DEFAULT_PREFLIGHT_SAMPLE_LIMIT, DEFAULT_PREFLIGHT_IMAGE_LIMIT, True
+
+
+def _limited_preflight_config(app_config: Any, *, sample_limit: int, image_limit: int) -> Any:
+    if sample_limit <= 0 and image_limit <= 0:
+        return app_config
+    preflight_config = copy.deepcopy(app_config)
+    preflight_config.runtime.max_samples = sample_limit
+    preflight_config.runtime.max_images = image_limit
+    return preflight_config
+
+
+def _skipped_preflight_report(app_config: Any, *, role: str, config_path: Path, mode: str) -> dict[str, Any]:
+    return {
+        "valid": True,
+        "skipped": True,
+        "errors": [],
+        "warnings": [],
+        "warning_count": 0,
+        "size_mismatch_warning_count": 0,
+        "warning_examples": [],
+        "dataset_id": app_config.dataset.dataset_id,
+        "root": str(app_config.dataset_root),
+        "sample_count": 0,
+        "image_count": 0,
+        "role": role,
+        "config_path": str(config_path),
+        "mode": mode,
+        "sample_limit": 0,
+        "image_limit": 0,
+        "is_limited": False,
+    }
+
+
+def _preflight_exception_report(*, role: str, config_path: Path, mode: str, exc: Exception) -> dict[str, Any]:
+    skipped = mode == "off"
+    return {
+        "valid": skipped,
+        "skipped": skipped,
+        "errors": [] if skipped else [f"Dataset preflight failed for config {config_path}: {exc}"],
+        "warnings": [f"Dataset preflight skipped before config load: {exc}"] if skipped else [],
+        "warning_count": 1 if skipped else 0,
+        "size_mismatch_warning_count": 0,
+        "warning_examples": [f"Dataset preflight skipped before config load: {exc}"] if skipped else [],
+        "dataset_id": "",
+        "root": "",
+        "sample_count": 0,
+        "image_count": 0,
+        "role": role,
+        "config_path": str(config_path),
+        "mode": mode,
+        "sample_limit": 0,
+        "image_limit": 0,
+        "is_limited": False,
+    }
+
+
+def _preflight_config_paths(config_paths: list[Path], *, role: str, mode: str) -> list[dict[str, Any]]:
     reports: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for config_path in config_paths:
@@ -330,29 +402,46 @@ def _preflight_config_paths(config_paths: list[Path], *, role: str) -> list[dict
             if key in seen:
                 continue
             seen.add(key)
-            report = preflight_dataset(app_config)
+            if mode == "off":
+                report = _skipped_preflight_report(app_config, role=role, config_path=config_path, mode=mode)
+                print(
+                    f"[preflight] skip role={role} dataset={report['dataset_id']} mode=off root={report['root']}",
+                    flush=True,
+                )
+                reports.append(report)
+                continue
+            sample_limit, image_limit, is_limited = _preflight_limits(app_config=app_config, config_path=config_path, mode=mode)
+            print(
+                f"[preflight] start role={role} dataset={app_config.dataset.dataset_id} mode={mode} "
+                f"max_samples={sample_limit} max_images={image_limit}",
+                flush=True,
+            )
+            report = preflight_dataset(
+                _limited_preflight_config(app_config, sample_limit=sample_limit, image_limit=image_limit)
+            )
             report["dataset_id"] = app_config.dataset.dataset_id
             report["root"] = str(app_config.dataset_root)
+            report["mode"] = mode
+            report["sample_limit"] = sample_limit
+            report["image_limit"] = image_limit
+            report["is_limited"] = is_limited
+            print(
+                f"[preflight] done role={role} dataset={report['dataset_id']} valid={report.get('valid')} "
+                f"samples={report.get('sample_count', 0)} warnings={report.get('warning_count', 0)} "
+                f"size_mismatch={report.get('size_mismatch_warning_count', 0)}",
+                flush=True,
+            )
         except Exception as exc:
-            report = {
-                "valid": False,
-                "errors": [f"Dataset preflight failed for config {config_path}: {exc}"],
-                "warnings": [],
-                "warning_count": 0,
-                "size_mismatch_warning_count": 0,
-                "warning_examples": [],
-                "dataset_id": "",
-                "root": "",
-                "sample_count": 0,
-            }
+            report = _preflight_exception_report(role=role, config_path=config_path, mode=mode, exc=exc)
         report["role"] = role
         report["config_path"] = str(config_path)
         reports.append(report)
     return reports
 
 
-def _preflight_section(reports: list[dict[str, Any]]) -> dict[str, Any]:
+def _preflight_section(reports: list[dict[str, Any]], *, mode: str) -> dict[str, Any]:
     return {
+        "mode": mode,
         "dataset_count": len(reports),
         "valid_count": len([item for item in reports if item.get("valid")]),
         "invalid_count": len([item for item in reports if not item.get("valid")]),
@@ -363,15 +452,16 @@ def _preflight_section(reports: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _dataset_preflight_summary(*, train_config_path: Path, run_plan: list[tuple[Any, ...]]) -> dict[str, Any]:
+def _dataset_preflight_summary(*, train_config_path: Path, run_plan: list[tuple[Any, ...]], mode: str) -> dict[str, Any]:
     train_payload = _load_yaml(train_config_path)
     train_config_paths = [Path(item) for item in train_payload.get("dataset_configs", [])]
     eval_config_paths = [Path(item[5]) for item in run_plan]
-    train_reports = _preflight_config_paths(train_config_paths, role="train")
-    eval_reports = _preflight_config_paths(eval_config_paths, role="eval")
-    train_summary = _preflight_section(train_reports)
-    eval_summary = _preflight_section(eval_reports)
+    train_reports = _preflight_config_paths(train_config_paths, role="train", mode=mode)
+    eval_reports = _preflight_config_paths(eval_config_paths, role="eval", mode=mode)
+    train_summary = _preflight_section(train_reports, mode=mode)
+    eval_summary = _preflight_section(eval_reports, mode=mode)
     overall = {
+        "mode": mode,
         "valid": train_summary["invalid_count"] == 0 and eval_summary["invalid_count"] == 0,
         "dataset_count": train_summary["dataset_count"] + eval_summary["dataset_count"],
         "invalid_count": train_summary["invalid_count"] + eval_summary["invalid_count"],
@@ -379,7 +469,7 @@ def _dataset_preflight_summary(*, train_config_path: Path, run_plan: list[tuple[
         "warning_count": train_summary["warning_count"] + eval_summary["warning_count"],
         "size_mismatch_warning_count": train_summary["size_mismatch_warning_count"] + eval_summary["size_mismatch_warning_count"],
     }
-    return {"overall": overall, "train": train_summary, "eval": eval_summary}
+    return {"mode": mode, "overall": overall, "train": train_summary, "eval": eval_summary}
 
 
 def _write_dataset_preflight_summary(manifest_dir: Path, summary: dict[str, Any]) -> Path:
@@ -393,7 +483,7 @@ def _print_dataset_preflight_summary(summary: dict[str, Any]) -> None:
     for role in ("train", "eval"):
         section = summary[role]
         print(
-            f"[preflight] {role} datasets={section['dataset_count']} valid={section['valid_count']} "
+            f"[preflight] {role} mode={section['mode']} datasets={section['dataset_count']} valid={section['valid_count']} "
             f"warnings={section['warning_count']} size_mismatch={section['size_mismatch_warning_count']}",
             flush=True,
         )
@@ -703,6 +793,12 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument("--stream-logs", action="store_true", help="Mirror child process logs to stderr while still writing log files.")
     parser.add_argument("--no-progress", action="store_true")
     parser.add_argument("--progress-backend", choices=("auto", "tqdm", "line", "none"), default="tqdm")
+    parser.add_argument(
+        "--preflight-mode",
+        choices=PREFLIGHT_MODES,
+        default="fast",
+        help="Dataset preflight mode. fast checks bounded samples/images, full scans all data, off records a skipped summary.",
+    )
     args = parser.parse_args(argv)
 
     config_path = (args.config if args.config is not None else _default_config()).resolve()
@@ -776,7 +872,7 @@ def main(argv: List[str] | None = None) -> int:
         smoke_test=args.smoke_test,
         python_bin=args.python_bin,
     )
-    preflight_summary = _dataset_preflight_summary(train_config_path=train_config_path, run_plan=run_plan)
+    preflight_summary = _dataset_preflight_summary(train_config_path=train_config_path, run_plan=run_plan, mode=args.preflight_mode)
     preflight_path = _write_dataset_preflight_summary(manifest_dir, preflight_summary)
     dataset_preflight = {"path": str(preflight_path), "summary": preflight_summary}
     _print_dataset_preflight_summary(preflight_summary)

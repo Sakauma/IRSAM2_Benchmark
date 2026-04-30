@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import yaml
@@ -125,8 +126,13 @@ class AutoPromptRunnerTests(unittest.TestCase):
             preflight_path = Path(manifest["dataset_preflight"]["path"])
             self.assertTrue(preflight_path.exists())
             self.assertTrue(manifest["dataset_preflight"]["summary"]["overall"]["valid"])
+            self.assertEqual(manifest["dataset_preflight"]["summary"]["mode"], "fast")
             self.assertEqual(manifest["dataset_preflight"]["summary"]["train"]["dataset_count"], 1)
             self.assertEqual(manifest["dataset_preflight"]["summary"]["eval"]["dataset_count"], 1)
+            train_report = manifest["dataset_preflight"]["summary"]["train"]["reports"][0]
+            self.assertEqual(train_report["sample_limit"], 256)
+            self.assertEqual(train_report["image_limit"], 256)
+            self.assertTrue(train_report["is_limited"])
 
             train_config = yaml.safe_load(Path(manifest["train"]["config_path"]).read_text(encoding="utf-8"))
             self.assertEqual(len(train_config["dataset_configs"]), 1)
@@ -176,6 +182,163 @@ class AutoPromptRunnerTests(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertFalse(manifest["dataset_preflight"]["summary"]["overall"]["valid"])
             self.assertEqual(manifest["failures"][0]["status"], "dataset_preflight_failed")
+
+    def test_preflight_mode_off_skips_dataset_validation(self):
+        runner = _load_runner()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "server_auto_prompt_4090x4.local.yaml"
+            _write_auto_prompt_config(config_path, root / "artifacts", write_samples=False)
+            output = io.StringIO()
+            progress_output = io.StringIO()
+
+            with redirect_stdout(output), redirect_stderr(progress_output):
+                self.assertEqual(
+                    runner.main(
+                        [
+                            "--config",
+                            str(config_path),
+                            "--suites",
+                            "auto_prompt",
+                            "--checkpoints",
+                            "large",
+                            "--modes",
+                            "learned_box",
+                            "--dry-run",
+                            "--no-analysis",
+                            "--python-bin",
+                            "python",
+                            "--preflight-mode",
+                            "off",
+                        ]
+                    ),
+                    0,
+                )
+
+            text = output.getvalue()
+            self.assertIn("[preflight] skip", text)
+            self.assertIn("[train] dry_run", text)
+            manifest_path = root / "artifacts" / "sam2_ir_qd_m1_auto_prompt" / "benchmark_manifest_latest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            summary = manifest["dataset_preflight"]["summary"]
+            self.assertEqual(summary["mode"], "off")
+            self.assertTrue(summary["overall"]["valid"])
+            self.assertTrue(summary["train"]["reports"][0]["skipped"])
+            self.assertFalse(summary["train"]["reports"][0]["is_limited"])
+
+    def test_fast_preflight_limits_rbgt_tiny_more_aggressively(self):
+        runner = _load_runner()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "server_auto_prompt_4090x4.local.yaml"
+            _write_auto_prompt_config(config_path, root / "artifacts", write_samples=False)
+            payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            payload["auto_prompt"]["train_datasets"] = ["rbgt_tiny_ir_box"]
+            payload["suites"]["auto_prompt"]["datasets"] = ["rbgt_tiny_ir_box"]
+            config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+            preflight_limits = []
+
+            def fake_preflight(config):
+                preflight_limits.append((config.dataset.dataset_id, config.runtime.max_samples, config.runtime.max_images))
+                return {
+                    "valid": True,
+                    "errors": [],
+                    "warnings": [],
+                    "warning_count": 0,
+                    "size_mismatch_warning_count": 0,
+                    "warning_examples": [],
+                    "sample_count": config.runtime.max_samples,
+                    "image_count": config.runtime.max_images,
+                }
+
+            with patch.object(auto_prompt_runner, "preflight_dataset", side_effect=fake_preflight):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    self.assertEqual(
+                        runner.main(
+                            [
+                                "--config",
+                                str(config_path),
+                                "--suites",
+                                "auto_prompt",
+                                "--checkpoints",
+                                "large",
+                                "--modes",
+                                "heuristic_box",
+                                "--dry-run",
+                                "--no-analysis",
+                                "--python-bin",
+                                "python",
+                            ]
+                        ),
+                        0,
+                    )
+
+            self.assertTrue(preflight_limits)
+            self.assertTrue(all(item == ("RBGT-Tiny", 64, 64) for item in preflight_limits))
+            manifest_path = root / "artifacts" / "sam2_ir_qd_m1_auto_prompt" / "benchmark_manifest_latest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            train_report = manifest["dataset_preflight"]["summary"]["train"]["reports"][0]
+            self.assertEqual(train_report["sample_limit"], 64)
+            self.assertEqual(train_report["image_limit"], 64)
+            self.assertTrue(train_report["is_limited"])
+
+    def test_full_preflight_does_not_limit_rbgt_tiny(self):
+        runner = _load_runner()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "server_auto_prompt_4090x4.local.yaml"
+            _write_auto_prompt_config(config_path, root / "artifacts", write_samples=False)
+            payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            payload["auto_prompt"]["train_datasets"] = ["rbgt_tiny_ir_box"]
+            payload["suites"]["auto_prompt"]["datasets"] = ["rbgt_tiny_ir_box"]
+            config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+            preflight_limits = []
+
+            def fake_preflight(config):
+                preflight_limits.append((config.dataset.dataset_id, config.runtime.max_samples, config.runtime.max_images))
+                return {
+                    "valid": True,
+                    "errors": [],
+                    "warnings": [],
+                    "warning_count": 0,
+                    "size_mismatch_warning_count": 0,
+                    "warning_examples": [],
+                    "sample_count": 1,
+                    "image_count": 1,
+                }
+
+            with patch.object(auto_prompt_runner, "preflight_dataset", side_effect=fake_preflight):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    self.assertEqual(
+                        runner.main(
+                            [
+                                "--config",
+                                str(config_path),
+                                "--suites",
+                                "auto_prompt",
+                                "--checkpoints",
+                                "large",
+                                "--modes",
+                                "heuristic_box",
+                                "--dry-run",
+                                "--no-analysis",
+                                "--python-bin",
+                                "python",
+                                "--preflight-mode",
+                                "full",
+                            ]
+                        ),
+                        0,
+                    )
+
+            self.assertTrue(preflight_limits)
+            self.assertTrue(all(item == ("RBGT-Tiny", 0, 0) for item in preflight_limits))
+            manifest_path = root / "artifacts" / "sam2_ir_qd_m1_auto_prompt" / "benchmark_manifest_latest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            train_report = manifest["dataset_preflight"]["summary"]["train"]["reports"][0]
+            self.assertEqual(train_report["sample_limit"], 0)
+            self.assertEqual(train_report["image_limit"], 0)
+            self.assertFalse(train_report["is_limited"])
 
     def test_eval_progress_keeps_fixed_description_and_reports_queue(self):
         progress = FakeProgress()
