@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import copy
+import os
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -185,6 +187,8 @@ def _write_training_configs(
     auto_config: Dict[str, Any],
     generated_dir: Path,
     output_root: Path,
+    show_progress: bool,
+    progress_backend: str,
 ) -> tuple[Path, Path]:
     dataset_config_dir = generated_dir / "training_dataset_configs"
     checkpoints = suite_config.get("checkpoints", [])
@@ -204,11 +208,12 @@ def _write_training_configs(
         fr._write_yaml(dataset_config_path, dataset_payload)
         dataset_config_paths.append(str(dataset_config_path))
 
+    train_settings = copy.deepcopy(auto_config.get("train", {}))
     train_payload = {
         "experiment_id": auto_config["experiment_id"],
         "output_root": str(output_root),
         "dataset_configs": dataset_config_paths,
-        "train": copy.deepcopy(auto_config.get("train", {})),
+        "train": train_settings,
         "model": copy.deepcopy(auto_config.get("model", {})),
         "target": copy.deepcopy(auto_config.get("target", {})),
         "heatmaps": copy.deepcopy(auto_config.get("heatmaps", {})),
@@ -217,6 +222,10 @@ def _write_training_configs(
     }
     if raw.get("auto_prompt_training"):
         train_payload = fr._deep_merge(train_payload, copy.deepcopy(raw["auto_prompt_training"]))
+    train_payload.setdefault("train", {})
+    train_payload["train"]["show_progress"] = bool(show_progress)
+    train_payload["train"]["progress_backend"] = progress_backend if show_progress else "none"
+    train_payload["train"].setdefault("progress_update_interval_s", 1.0)
     train_config_path = generated_dir / "auto_prompt_train.yaml"
     fr._write_yaml(train_config_path, train_payload)
     return train_config_path, output_root / str(auto_config["experiment_id"]) / str(auto_config["checkpoint_name"])
@@ -228,21 +237,80 @@ def _env_for_gpu(paths: Dict[str, Any], gpu: str) -> Dict[str, str]:
     return env
 
 
-def _run_logged(command: list[str], *, env: Dict[str, str], log_path: Path) -> subprocess.CompletedProcess[str]:
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("w", encoding="utf-8") as handle:
-        handle.write(f"$ {' '.join(command)}\n\n")
+def _run_logged(command: list[str], *, env: Dict[str, str], log_path: Path, stream_logs: bool = False) -> subprocess.CompletedProcess[str]:
+    return fr._run_subprocess(command, env, log_path, stream_logs=stream_logs)
+
+
+def _tee_process_output(process: subprocess.Popen[bytes], handle: Any) -> None:
+    if process.stdout is None:
+        return
+    while True:
+        chunk = os.read(process.stdout.fileno(), 4096)
+        if not chunk:
+            break
+        text = chunk.decode("utf-8", errors="replace")
+        handle.write(text)
         handle.flush()
-        return subprocess.run(command, cwd=PROJECT_ROOT, env=env, check=False, text=True, stdout=handle, stderr=subprocess.STDOUT)
+        sys.stderr.write(text)
+        sys.stderr.flush()
 
 
-def _start_logged(command: list[str], *, env: Dict[str, str], log_path: Path) -> tuple[subprocess.Popen[str], Any]:
+def _start_logged(command: list[str], *, env: Dict[str, str], log_path: Path, stream_logs: bool = False) -> tuple[subprocess.Popen[Any], Any, threading.Thread | None]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     handle = log_path.open("w", encoding="utf-8")
     handle.write(f"$ {' '.join(command)}\n\n")
     handle.flush()
-    process = subprocess.Popen(command, cwd=PROJECT_ROOT, env=env, text=True, stdout=handle, stderr=subprocess.STDOUT)
-    return process, handle
+    if not stream_logs:
+        process = subprocess.Popen(command, cwd=PROJECT_ROOT, env=env, text=True, stdout=handle, stderr=subprocess.STDOUT)
+        return process, handle, None
+    process = subprocess.Popen(command, cwd=PROJECT_ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    thread = threading.Thread(target=_tee_process_output, args=(process, handle), daemon=True)
+    thread.start()
+    return process, handle, thread
+
+
+def _make_eval_progress(*, total: int, enabled: bool) -> Any | None:
+    if not enabled or total <= 0:
+        return None
+    try:
+        from tqdm import tqdm
+    except Exception:
+        return None
+    return tqdm(total=total, unit="run", desc="eval runs", dynamic_ncols=True, leave=True, position=0, file=sys.stderr)
+
+
+def _set_eval_progress(progress: Any | None, *, prefix: str, counts: Dict[str, int], active: int) -> None:
+    if progress is None:
+        return
+    progress.set_description_str(prefix)
+    progress.set_postfix(
+        completed=counts.get("completed", 0),
+        skipped=counts.get("skipped", 0),
+        failed=counts.get("failed", 0),
+        dry_run=counts.get("dry_run", 0),
+        active=active,
+    )
+
+
+def _advance_eval_progress(progress: Any | None, *, status: str, counts: Dict[str, int], active: int) -> None:
+    if progress is None:
+        return
+    if status == "completed":
+        counts["completed"] = counts.get("completed", 0) + 1
+    elif status == "skipped_existing":
+        counts["skipped"] = counts.get("skipped", 0) + 1
+    elif status == "dry_run":
+        counts["dry_run"] = counts.get("dry_run", 0) + 1
+    else:
+        counts["failed"] = counts.get("failed", 0) + 1
+    progress.set_postfix(
+        completed=counts.get("completed", 0),
+        skipped=counts.get("skipped", 0),
+        failed=counts.get("failed", 0),
+        dry_run=counts.get("dry_run", 0),
+        active=active,
+    )
+    progress.update(1)
 
 
 def _command_for_train(train_config_path: Path, python_bin: str) -> list[str]:
@@ -364,6 +432,8 @@ def _run_eval_plan(
     dry_run: bool,
     rerun: bool,
     stop_on_error: bool,
+    show_progress: bool,
+    stream_logs: bool,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     records: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
@@ -372,11 +442,14 @@ def _run_eval_plan(
     free_gpus = list(eval_gpus)
     total = len(queue)
     completed_slots = 0
+    progress = _make_eval_progress(total=total, enabled=show_progress)
+    progress_counts: Dict[str, int] = {"completed": 0, "skipped": 0, "failed": 0, "dry_run": 0}
     while queue or active:
         while queue and free_gpus and not (stop_on_error and failures):
             suite_key, checkpoint, dataset_id, method_id, output_dir, config_path, config_sha256, command, log_path = queue.pop(0)
             gpu = free_gpus.pop(0)
             prefix = f"[{completed_slots + len(active) + 1}/{total}] gpu={gpu} suite={suite_key} ckpt={checkpoint['alias']} dataset={dataset_id} mode={method_id}"
+            _set_eval_progress(progress, prefix=prefix, counts=progress_counts, active=len(active))
             if not rerun and fr._run_is_complete(output_dir):
                 print(f"{prefix} skipped_existing", flush=True)
                 records.append(
@@ -396,6 +469,7 @@ def _run_eval_plan(
                 completed_slots += 1
                 free_gpus.append(gpu)
                 fr._write_run_outputs(manifest_dir, records, failures, run_id)
+                _advance_eval_progress(progress, status="skipped_existing", counts=progress_counts, active=len(active))
                 continue
             if dry_run:
                 print(f"{prefix} dry_run CUDA_VISIBLE_DEVICES={gpu} {' '.join(command)}", flush=True)
@@ -415,13 +489,15 @@ def _run_eval_plan(
                 )
                 completed_slots += 1
                 free_gpus.append(gpu)
+                _advance_eval_progress(progress, status="dry_run", counts=progress_counts, active=len(active))
                 continue
             print(f"{prefix} running", flush=True)
-            process, handle = _start_logged(command, env=_env_for_gpu(paths, gpu), log_path=log_path)
+            process, handle, thread = _start_logged(command, env=_env_for_gpu(paths, gpu), log_path=log_path, stream_logs=stream_logs)
             active.append(
                 {
                     "process": process,
                     "handle": handle,
+                    "thread": thread,
                     "gpu": gpu,
                     "prefix": prefix,
                     "suite_key": suite_key,
@@ -442,6 +518,8 @@ def _run_eval_plan(
             returncode = process.poll()
             if returncode is None:
                 continue
+            if item["thread"] is not None:
+                item["thread"].join(timeout=5.0)
             item["handle"].close()
             active.remove(item)
             free_gpus.append(str(item["gpu"]))
@@ -463,6 +541,7 @@ def _run_eval_plan(
                         returncode=returncode,
                     )
                 )
+                _advance_eval_progress(progress, status="completed", counts=progress_counts, active=len(active))
             else:
                 validation = validate_run_artifacts(item["output_dir"]) if returncode == 0 else {"errors": []}
                 status = "failed_invalid_artifacts" if returncode == 0 else "failed"
@@ -485,14 +564,25 @@ def _run_eval_plan(
                 )
                 records.append(failure)
                 failures.append(failure)
+                _advance_eval_progress(progress, status=status, counts=progress_counts, active=len(active))
             fr._write_run_outputs(manifest_dir, records, failures, run_id)
         if stop_on_error and failures:
             for item in active:
                 item["process"].terminate()
+                try:
+                    item["process"].wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    item["process"].kill()
+                    item["process"].wait(timeout=5.0)
+                if item["thread"] is not None:
+                    item["thread"].join(timeout=5.0)
                 item["handle"].close()
             break
         if active:
+            _set_eval_progress(progress, prefix=f"[{completed_slots}/{total}] waiting", counts=progress_counts, active=len(active))
             time.sleep(1.0)
+    if progress is not None:
+        progress.close()
     fr._write_run_outputs(manifest_dir, records, failures, run_id)
     return records, failures
 
@@ -511,6 +601,7 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument("--skip-train", action="store_true")
     parser.add_argument("--no-analysis", action="store_true")
     parser.add_argument("--stop-on-error", action="store_true")
+    parser.add_argument("--stream-logs", action="store_true", help="Mirror child process logs to stderr while still writing log files.")
     parser.add_argument("--no-progress", action="store_true")
     parser.add_argument("--progress-backend", choices=("auto", "tqdm", "line", "none"), default="tqdm")
     args = parser.parse_args(argv)
@@ -537,6 +628,8 @@ def main(argv: List[str] | None = None) -> int:
         auto_config=auto_config,
         generated_dir=generated_dir,
         output_root=output_root,
+        show_progress=not args.no_progress,
+        progress_backend=args.progress_backend,
     )
     _inject_learned_prompt_config(
         base_matrix=base_matrix,
@@ -580,7 +673,12 @@ def main(argv: List[str] | None = None) -> int:
         train_record["status"] = "skipped_existing"
         print("[train] skipped_existing", flush=True)
     else:
-        result = _run_logged(train_command, env=_env_for_gpu(paths, str(auto_config.get("train_gpu", "0"))), log_path=train_log)
+        result = _run_logged(
+            train_command,
+            env=_env_for_gpu(paths, str(auto_config.get("train_gpu", "0"))),
+            log_path=train_log,
+            stream_logs=args.stream_logs or not args.no_progress,
+        )
         train_record["returncode"] = result.returncode
         train_record["status"] = "completed" if result.returncode == 0 and auto_checkpoint_path.exists() else "failed"
         if train_record["status"] != "completed":
@@ -625,6 +723,8 @@ def main(argv: List[str] | None = None) -> int:
         dry_run=args.dry_run,
         rerun=args.rerun,
         stop_on_error=args.stop_on_error,
+        show_progress=not args.no_progress,
+        stream_logs=args.stream_logs,
     )
 
     if not args.dry_run and not args.no_analysis and not failures:
@@ -632,7 +732,7 @@ def main(argv: List[str] | None = None) -> int:
             command = fr._analysis_command(Path(item["analysis_config"]), args.python_bin)
             log_path = Path(item["log_path"])
             print(f"[analysis] suite={item['suite']} ckpt={item['checkpoint']} running", flush=True)
-            result = _run_logged(command, env=fr._build_env(paths), log_path=log_path)
+            result = _run_logged(command, env=fr._build_env(paths), log_path=log_path, stream_logs=args.stream_logs)
             item["returncode"] = result.returncode
             item["status"] = "completed" if result.returncode == 0 else "failed"
             if result.returncode != 0:

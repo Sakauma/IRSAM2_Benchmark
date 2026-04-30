@@ -1,6 +1,8 @@
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 import numpy as np
@@ -89,6 +91,7 @@ class AutoPromptTrainingTests(unittest.TestCase):
                             "learning_rate": 0.001,
                             "max_long_side": 16,
                             "max_samples": 2,
+                            "show_progress": False,
                         },
                         "model": {"hidden_channels": 4},
                         "target": {"gaussian_sigma": 1.0, "positive_radius": 1},
@@ -108,6 +111,45 @@ class AutoPromptTrainingTests(unittest.TestCase):
             self.assertIn("final_loss", saved)
             self.assertEqual(len(saved["heatmaps"]), 2)
             self.assertTrue(Path(saved["heatmaps"][0]["overlay"]).exists())
+
+    def test_train_auto_prompt_reports_line_progress_when_enabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dataset_config = _write_dataset(root)
+            train_config = root / "auto_prompt.yaml"
+            train_config.write_text(
+                yaml.safe_dump(
+                    {
+                        "experiment_id": "unit_progress",
+                        "output_root": str(root / "outputs"),
+                        "dataset_configs": [str(dataset_config)],
+                        "train": {
+                            "device": "cpu",
+                            "epochs": 1,
+                            "batch_size": 1,
+                            "learning_rate": 0.001,
+                            "max_long_side": 16,
+                            "max_samples": 2,
+                            "show_progress": True,
+                            "progress_backend": "line",
+                            "progress_update_interval_s": 0.0,
+                        },
+                        "model": {"hidden_channels": 4},
+                        "target": {"gaussian_sigma": 1.0, "positive_radius": 1},
+                        "heatmaps": {"sample_limit": 0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                summary = train_auto_prompt_from_config(train_config)
+
+            progress_text = stderr.getvalue()
+            self.assertIn("[train-progress] auto-prompt epoch 1/1", progress_text)
+            self.assertIn("2/2 batch", progress_text)
+            self.assertEqual(summary["final_loss"], summary["history"][-1]["loss"])
 
 
 if __name__ == "__main__":

@@ -17,6 +17,9 @@ train:
   max_long_side: 512
   max_samples: 0
   num_workers: 0
+  show_progress: true
+  progress_backend: tqdm
+  progress_update_interval_s: 1.0
   heatmap_sample_limit: 8
 
 model:

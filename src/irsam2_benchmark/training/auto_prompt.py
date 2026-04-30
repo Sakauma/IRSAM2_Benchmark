@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import random
+import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -200,6 +202,77 @@ def _build_dataset_class():
     return AutoPromptDataset
 
 
+class _LineProgress:
+    def __init__(self, *, desc: str, total: int, unit: str, mininterval: float) -> None:
+        self.desc = desc
+        self.total = total
+        self.unit = unit
+        self.mininterval = max(0.0, float(mininterval))
+        self.count = 0
+        self.started_at = time.perf_counter()
+        self.last_print_at = 0.0
+        self.postfix: dict[str, str] = {}
+        self._print(force=True)
+
+    def set_postfix(self, **kwargs: Any) -> None:
+        self.postfix = {key: str(value) for key, value in kwargs.items()}
+
+    def update(self, n: int) -> None:
+        self.count += int(n)
+        self._print(force=self.count >= self.total)
+
+    def close(self) -> None:
+        self._print(force=True)
+
+    def _print(self, *, force: bool) -> None:
+        now = time.perf_counter()
+        if not force and now - self.last_print_at < self.mininterval:
+            return
+        elapsed = max(0.0, now - self.started_at)
+        rate = self.count / elapsed if elapsed > 0 else 0.0
+        postfix = " ".join(f"{key}={value}" for key, value in self.postfix.items())
+        postfix_text = f" {postfix}" if postfix else ""
+        print(
+            f"[train-progress] {self.desc} {self.count}/{self.total} {self.unit} "
+            f"elapsed={elapsed:.1f}s rate={rate:.2f}/{self.unit}{postfix_text}",
+            file=sys.stderr,
+            flush=True,
+        )
+        self.last_print_at = now
+
+
+def _training_progress_bar(
+    *,
+    desc: str,
+    total: int,
+    enabled: bool,
+    backend: str,
+    mininterval: float,
+) -> Any | None:
+    if not enabled or total <= 0:
+        return None
+    backend = str(backend).strip().lower()
+    if backend in {"none", "off", "false", "0"}:
+        return None
+    if backend not in {"auto", "tqdm", "line"}:
+        backend = "auto"
+    if backend == "line" or (backend == "auto" and not sys.stderr.isatty()):
+        return _LineProgress(desc=desc, total=total, unit="batch", mininterval=mininterval)
+    try:
+        from tqdm import tqdm
+    except Exception:
+        return None
+    return tqdm(
+        total=total,
+        unit="batch",
+        desc=desc,
+        dynamic_ncols=True,
+        leave=True,
+        mininterval=max(0.0, float(mininterval)),
+        file=sys.stderr,
+    )
+
+
 def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
     torch, F, DataLoader, _ = _require_torch()
     config_path = Path(config_path).resolve()
@@ -245,6 +318,9 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
         weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
     )
     epochs = max(1, int(train_cfg.get("epochs", 1)))
+    show_progress = bool(train_cfg.get("show_progress", True))
+    progress_backend = str(train_cfg.get("progress_backend", "auto"))
+    progress_mininterval = float(train_cfg.get("progress_update_interval_s", 1.0))
     history: list[dict[str, float]] = []
     for epoch in range(epochs):
         model.train()
@@ -252,26 +328,48 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
         objectness_sum = 0.0
         box_sum = 0.0
         batch_count = 0
-        for batch in loader:
-            image = batch["image"].to(device=device, dtype=torch.float32)
-            objectness = batch["objectness"].to(device=device, dtype=torch.float32)
-            objectness_weight = batch["objectness_weight"].to(device=device, dtype=torch.float32)
-            box_size = batch["box_size"].to(device=device, dtype=torch.float32)
-            box_weight = batch["box_weight"].to(device=device, dtype=torch.float32)
-            outputs = model(image)
-            objectness_loss = F.binary_cross_entropy_with_logits(outputs["objectness_logits"], objectness, weight=objectness_weight)
-            raw_box_loss = F.smooth_l1_loss(outputs["box_size"], box_size, reduction="none")
-            weighted_box_loss = raw_box_loss * box_weight
-            box_loss = weighted_box_loss.sum() / box_weight.sum().clamp_min(1.0)
-            loss = objectness_loss + float(train_cfg.get("box_loss_weight", 0.1)) * box_loss
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+        progress = _training_progress_bar(
+            desc=f"auto-prompt epoch {epoch + 1}/{epochs}",
+            total=len(loader),
+            enabled=show_progress,
+            backend=progress_backend,
+            mininterval=progress_mininterval,
+        )
+        try:
+            for batch in loader:
+                image = batch["image"].to(device=device, dtype=torch.float32)
+                objectness = batch["objectness"].to(device=device, dtype=torch.float32)
+                objectness_weight = batch["objectness_weight"].to(device=device, dtype=torch.float32)
+                box_size = batch["box_size"].to(device=device, dtype=torch.float32)
+                box_weight = batch["box_weight"].to(device=device, dtype=torch.float32)
+                outputs = model(image)
+                objectness_loss = F.binary_cross_entropy_with_logits(outputs["objectness_logits"], objectness, weight=objectness_weight)
+                raw_box_loss = F.smooth_l1_loss(outputs["box_size"], box_size, reduction="none")
+                weighted_box_loss = raw_box_loss * box_weight
+                box_loss = weighted_box_loss.sum() / box_weight.sum().clamp_min(1.0)
+                loss = objectness_loss + float(train_cfg.get("box_loss_weight", 0.1)) * box_loss
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
 
-            loss_sum += float(loss.detach().cpu())
-            objectness_sum += float(objectness_loss.detach().cpu())
-            box_sum += float(box_loss.detach().cpu())
-            batch_count += 1
+                loss_value = float(loss.detach().cpu())
+                objectness_value = float(objectness_loss.detach().cpu())
+                box_value = float(box_loss.detach().cpu())
+                loss_sum += loss_value
+                objectness_sum += objectness_value
+                box_sum += box_value
+                batch_count += 1
+                if progress is not None:
+                    progress.set_postfix(
+                        loss=f"{loss_value:.4f}",
+                        objectness=f"{objectness_value:.4f}",
+                        box=f"{box_value:.4f}",
+                        lr=f"{optimizer.param_groups[0]['lr']:.2e}",
+                    )
+                    progress.update(1)
+        finally:
+            if progress is not None:
+                progress.close()
         denom = max(1, batch_count)
         history.append(
             {

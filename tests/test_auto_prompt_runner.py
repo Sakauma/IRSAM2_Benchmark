@@ -1,12 +1,16 @@
 import importlib.util
 import io
 import json
+import os
+import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import yaml
+
+from irsam2_benchmark.benchmark import auto_prompt_runner
 
 
 def _load_runner():
@@ -52,8 +56,9 @@ class AutoPromptRunnerTests(unittest.TestCase):
             config_path = root / "server_auto_prompt_4090x4.local.yaml"
             _write_auto_prompt_config(config_path, root / "artifacts")
             output = io.StringIO()
+            progress_output = io.StringIO()
 
-            with redirect_stdout(output):
+            with redirect_stdout(output), redirect_stderr(progress_output):
                 self.assertEqual(
                     runner.main(
                         [
@@ -85,10 +90,28 @@ class AutoPromptRunnerTests(unittest.TestCase):
 
             train_config = yaml.safe_load(Path(manifest["train"]["config_path"]).read_text(encoding="utf-8"))
             self.assertEqual(len(train_config["dataset_configs"]), 4)
+            self.assertTrue(train_config["train"]["show_progress"])
+            self.assertEqual(train_config["train"]["progress_backend"], "tqdm")
             first_run_config = yaml.safe_load(Path(manifest["records"][0]["config_path"]).read_text(encoding="utf-8"))
             self.assertEqual(first_run_config["method"]["prompt_checkpoint"], manifest["train"]["checkpoint_path"])
             self.assertEqual(first_run_config["method"]["prompt_top_k"], 5)
             self.assertTrue(first_run_config["method"]["heatmaps"]["enabled"])
+
+    def test_run_logged_streams_output_and_writes_log(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "stream.log"
+            command = [sys.executable, "-c", "import sys; print('stdout-ok'); print('stderr-ok', file=sys.stderr)"]
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                result = auto_prompt_runner._run_logged(command, env=os.environ.copy(), log_path=log_path, stream_logs=True)
+
+            self.assertEqual(result.returncode, 0)
+            log_text = log_path.read_text(encoding="utf-8")
+            self.assertIn("stdout-ok", log_text)
+            self.assertIn("stderr-ok", log_text)
+            self.assertIn("stdout-ok", stderr.getvalue())
+            self.assertIn("stderr-ok", stderr.getvalue())
 
 
 if __name__ == "__main__":

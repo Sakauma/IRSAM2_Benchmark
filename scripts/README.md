@@ -71,6 +71,8 @@ python scripts/run_4090x4_auto_prompt.py \
   --config configs/server_auto_prompt_4090x4.local.yaml
 ```
 
+默认会显示 auto-prompt 训练进度条和 E2 run 级进度条。需要把并行子进程的详细 sample 级日志也转发到终端时，加 `--stream-logs`；4 卡同时评估时该输出会比较密集。
+
 ## 运行日志
 
 需要把控制台输出保存为日志时：
