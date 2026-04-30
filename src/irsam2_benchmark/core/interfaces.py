@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Protocol
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Protocol
 
 if TYPE_CHECKING:
     from ..config import AppConfig
@@ -98,4 +98,7 @@ class DatasetAdapterProtocol(Protocol):
         ...
 
     def load(self, config: "AppConfig") -> Any:
+        ...
+
+    def iter_samples(self, config: "AppConfig") -> Iterable["Sample"]:
         ...

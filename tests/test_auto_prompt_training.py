@@ -4,11 +4,14 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import yaml
 from PIL import Image
 
+import irsam2_benchmark.training.auto_prompt as auto_prompt_module
+from irsam2_benchmark.data.sample import Sample
 from irsam2_benchmark.training import train_auto_prompt_from_config
 
 
@@ -150,6 +153,74 @@ class AutoPromptTrainingTests(unittest.TestCase):
             self.assertIn("[train-progress] auto-prompt epoch 1/1", progress_text)
             self.assertIn("2/2 batch", progress_text)
             self.assertEqual(summary["final_loss"], summary["history"][-1]["loss"])
+
+    def test_streaming_training_does_not_preconsume_full_adapter(self):
+        class FakeStreamingAdapter:
+            adapter_name = "fake_stream"
+            notes = ""
+
+            def __init__(self, image_path: Path) -> None:
+                self.image_path = image_path
+                self.yielded = 0
+
+            def iter_samples(self, config):
+                for index in range(100):
+                    self.yielded += 1
+                    yield Sample(
+                        image_path=self.image_path,
+                        sample_id=f"sample_{index}",
+                        frame_id=f"frame_{index}",
+                        sequence_id="seq",
+                        frame_index=index,
+                        temporal_key=f"frame_{index}",
+                        width=16,
+                        height=16,
+                        category="target",
+                        target_scale="small",
+                        device_source="synthetic",
+                        annotation_protocol_flag="bbox",
+                        supervision_type="bbox",
+                        bbox_tight=[6.0, 6.0, 8.0, 8.0],
+                        bbox_loose=[5.0, 5.0, 9.0, 9.0],
+                        point_prompt=[7.0, 7.0],
+                    )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dataset_config = _write_dataset(root)
+            image_path = root / "data" / "images" / "0.png"
+            train_config = root / "auto_prompt_stream.yaml"
+            train_config.write_text(
+                yaml.safe_dump(
+                    {
+                        "experiment_id": "unit_stream",
+                        "output_root": str(root / "outputs"),
+                        "dataset_configs": [str(dataset_config)],
+                        "train": {
+                            "device": "cpu",
+                            "epochs": 1,
+                            "batch_size": 1,
+                            "learning_rate": 0.001,
+                            "max_long_side": 16,
+                            "max_steps_per_epoch": 1,
+                            "shuffle_buffer_size": 0,
+                            "show_progress": False,
+                        },
+                        "model": {"hidden_channels": 4},
+                        "target": {"gaussian_sigma": 1.0, "positive_radius": 1},
+                        "heatmaps": {"sample_limit": 0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fake_adapter = FakeStreamingAdapter(image_path)
+
+            with patch.object(auto_prompt_module, "build_dataset_adapter", return_value=fake_adapter):
+                summary = train_auto_prompt_from_config(train_config)
+
+            self.assertEqual(fake_adapter.yielded, 1)
+            self.assertEqual(summary["sample_count"], 1)
+            self.assertEqual(summary["trained_sample_events"], 1)
 
 
 if __name__ == "__main__":

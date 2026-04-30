@@ -6,7 +6,7 @@ import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Iterator
 
 import numpy as np
 import yaml
@@ -73,6 +73,81 @@ def _load_training_samples(config_path: Path, *, max_samples: int = 0) -> tuple[
                 clipped_counts[f"supervision:{sample.supervision_type}"] = clipped_counts.get(f"supervision:{sample.supervision_type}", 0) + 1
             return clipped, {**counts, **{f"used_{key}": value for key, value in clipped_counts.items()}}
     return samples, counts
+
+
+def _iter_training_samples(config_path: Path) -> Iterator[Sample]:
+    raw = _read_yaml(config_path)
+    dataset_configs = raw.get("dataset_configs", [])
+    if not isinstance(dataset_configs, list) or not dataset_configs:
+        raise ValueError("auto prompt training config requires a non-empty dataset_configs list.")
+
+    for item in dataset_configs:
+        dataset_config = _resolve_path(config_path.parent, str(item))
+        app_config = load_app_config(dataset_config)
+        adapter = build_dataset_adapter(app_config)
+        started_at = time.perf_counter()
+        print(
+            f"[train-load] stream_start dataset={app_config.dataset.dataset_id} "
+            f"adapter={adapter.adapter_name} max_samples={app_config.runtime.max_samples} "
+            f"max_images={app_config.runtime.max_images}",
+            file=sys.stderr,
+            flush=True,
+        )
+        loaded_count = 0
+        usable_count = 0
+        first_usable_reported = False
+        for sample in adapter.iter_samples(app_config):
+            loaded_count += 1
+            if sample.bbox_tight is None and sample.bbox_loose is None:
+                continue
+            usable_count += 1
+            sample.metadata.setdefault("dataset_id", app_config.dataset.dataset_id)
+            if not first_usable_reported:
+                elapsed = time.perf_counter() - started_at
+                print(
+                    f"[train-load] first_sample dataset={app_config.dataset.dataset_id} "
+                    f"elapsed={elapsed:.1f}s sample_id={sample.sample_id}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                first_usable_reported = True
+            yield sample
+        elapsed = time.perf_counter() - started_at
+        print(
+            f"[train-load] stream_done dataset={app_config.dataset.dataset_id} "
+            f"loaded={loaded_count} usable={usable_count} elapsed={elapsed:.1f}s",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _shuffle_buffer(samples: Iterable[Sample], *, buffer_size: int, rng: random.Random) -> Iterator[Sample]:
+    if buffer_size <= 1:
+        yield from samples
+        return
+    buffer: list[Sample] = []
+    for sample in samples:
+        if len(buffer) < buffer_size:
+            buffer.append(sample)
+            continue
+        index = rng.randrange(len(buffer))
+        yield buffer[index]
+        buffer[index] = sample
+    while buffer:
+        index = rng.randrange(len(buffer))
+        yield buffer.pop(index)
+
+
+def _limit_samples(samples: Iterable[Sample], *, limit: int) -> Iterator[Sample]:
+    if limit <= 0:
+        yield from samples
+        return
+    iterator = iter(samples)
+    for _ in range(limit):
+        try:
+            yield next(iterator)
+        except StopIteration:
+            return
 
 
 def _load_resized_gray_and_box(sample: Sample, max_long_side: int) -> tuple[np.ndarray, list[float]]:
@@ -151,6 +226,9 @@ def _collate_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "box_size": torch.from_numpy(np.stack([pad(item["box_size"], 2) for item in batch])),
         "box_weight": torch.from_numpy(np.stack([pad(item["box_weight"], 1) for item in batch])),
         "sample_ids": [item["sample_id"] for item in batch],
+        "dataset_ids": [item["dataset_id"] for item in batch],
+        "supervision_types": [item["supervision_type"] for item in batch],
+        "samples": [item["sample"] for item in batch],
     }
 
 
@@ -197,13 +275,87 @@ def _build_dataset_class():
                 "box_size": box_size,
                 "box_weight": box_weight,
                 "sample_id": sample.sample_id,
+                "dataset_id": str(sample.metadata.get("dataset_id", "unknown")),
+                "supervision_type": sample.supervision_type,
+                "sample": sample,
             }
 
     return AutoPromptDataset
 
 
+def _build_streaming_dataset_class():
+    torch, _, _, _ = _require_torch()
+    IterableDataset = torch.utils.data.IterableDataset
+
+    class StreamingAutoPromptDataset(IterableDataset):
+        def __init__(
+            self,
+            *,
+            config_path: Path,
+            max_long_side: int,
+            target_config: dict[str, Any],
+            model_config: AutoPromptModelConfig,
+            shuffle_buffer_size: int,
+            max_samples: int,
+            seed: int,
+        ) -> None:
+            super().__init__()
+            self.config_path = config_path
+            self.max_long_side = int(max_long_side)
+            self.target_config = target_config
+            self.model_config = model_config
+            self.shuffle_buffer_size = max(0, int(shuffle_buffer_size))
+            self.max_samples = max(0, int(max_samples))
+            self.seed = int(seed)
+            self.iteration = 0
+
+        def _sample_to_item(self, sample: Sample) -> dict[str, Any]:
+            gray, box = _load_resized_gray_and_box(sample, self.max_long_side)
+            image = ir_prior_stack(gray, use_local_contrast=self.model_config.use_local_contrast, use_top_hat=self.model_config.use_top_hat)
+            prior_score = np.maximum.reduce(image)
+            objectness, box_size, box_weight, objectness_weight = _target_from_box(
+                box=box,
+                height=int(image.shape[1]),
+                width=int(image.shape[2]),
+                gaussian_sigma=float(self.target_config.get("gaussian_sigma", 2.0)),
+                positive_radius=int(self.target_config.get("positive_radius", 1)),
+                min_box_side=float(self.model_config.min_box_side),
+                hard_negative_weight=float(self.target_config.get("hard_negative_weight", 1.0)),
+                hard_negative_percentile=float(self.target_config.get("hard_negative_percentile", 95.0)),
+                prior_score=prior_score,
+            )
+            return {
+                "image": image,
+                "objectness": objectness,
+                "objectness_weight": objectness_weight,
+                "box_size": box_size,
+                "box_weight": box_weight,
+                "sample_id": sample.sample_id,
+                "dataset_id": str(sample.metadata.get("dataset_id", "unknown")),
+                "supervision_type": sample.supervision_type,
+                "sample": sample,
+            }
+
+        def __iter__(self) -> Iterator[dict[str, Any]]:
+            worker_info = torch.utils.data.get_worker_info()
+            iteration = self.iteration
+            self.iteration += 1
+            rng = random.Random(self.seed + iteration)
+            sample_iterable = _shuffle_buffer(
+                _limit_samples(_iter_training_samples(self.config_path), limit=self.max_samples),
+                buffer_size=self.shuffle_buffer_size,
+                rng=rng,
+            )
+            for index, sample in enumerate(sample_iterable):
+                if worker_info is not None and index % worker_info.num_workers != worker_info.id:
+                    continue
+                yield self._sample_to_item(sample)
+
+    return StreamingAutoPromptDataset
+
+
 class _LineProgress:
-    def __init__(self, *, desc: str, total: int, unit: str, mininterval: float) -> None:
+    def __init__(self, *, desc: str, total: int | None, unit: str, mininterval: float) -> None:
         self.desc = desc
         self.total = total
         self.unit = unit
@@ -219,7 +371,7 @@ class _LineProgress:
 
     def update(self, n: int) -> None:
         self.count += int(n)
-        self._print(force=self.count >= self.total)
+        self._print(force=self.total is not None and self.count >= self.total)
 
     def close(self) -> None:
         self._print(force=True)
@@ -232,8 +384,9 @@ class _LineProgress:
         rate = self.count / elapsed if elapsed > 0 else 0.0
         postfix = " ".join(f"{key}={value}" for key, value in self.postfix.items())
         postfix_text = f" {postfix}" if postfix else ""
+        total_text = str(self.total) if self.total is not None else "?"
         print(
-            f"[train-progress] {self.desc} {self.count}/{self.total} {self.unit} "
+            f"[train-progress] {self.desc} {self.count}/{total_text} {self.unit} "
             f"elapsed={elapsed:.1f}s rate={rate:.2f}/{self.unit}{postfix_text}",
             file=sys.stderr,
             flush=True,
@@ -244,12 +397,14 @@ class _LineProgress:
 def _training_progress_bar(
     *,
     desc: str,
-    total: int,
+    total: int | None,
     enabled: bool,
     backend: str,
     mininterval: float,
 ) -> Any | None:
-    if not enabled or total <= 0:
+    if not enabled:
+        return None
+    if total is not None and total <= 0:
         return None
     backend = str(backend).strip().lower()
     if backend in {"none", "off", "false", "0"}:
@@ -281,32 +436,33 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
     target_cfg = dict(raw.get("target", {}))
     model_cfg = AutoPromptModelConfig(**dict(raw.get("model", {})))
     max_samples = int(train_cfg.get("max_samples", 0))
+    max_steps_per_epoch = max(0, int(train_cfg.get("max_steps_per_epoch", 0)))
     seed = int(train_cfg.get("seed", 42))
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-
-    samples, sample_counts = _load_training_samples(config_path, max_samples=max_samples)
-    if not samples:
-        raise RuntimeError("No samples with bbox_tight/bbox_loose were found for auto prompt training.")
-    random.shuffle(samples)
 
     requested_device = str(train_cfg.get("device", "cuda"))
     device = requested_device
     if requested_device.startswith("cuda") and not torch.cuda.is_available():
         device = "cpu"
 
-    dataset_cls = _build_dataset_class()
+    batch_size = max(1, int(train_cfg.get("batch_size", 1)))
+    heatmap_limit = int(raw.get("heatmaps", {}).get("sample_limit", train_cfg.get("heatmap_sample_limit", 8))) if isinstance(raw.get("heatmaps", {}), dict) else 8
+    dataset_cls = _build_streaming_dataset_class()
     dataset = dataset_cls(
-        samples,
+        config_path=config_path,
         max_long_side=int(train_cfg.get("max_long_side", 512)),
         target_config=target_cfg,
         model_config=model_cfg,
+        shuffle_buffer_size=int(train_cfg.get("shuffle_buffer_size", 4096)),
+        max_samples=max_samples,
+        seed=seed,
     )
     loader = DataLoader(
         dataset,
-        batch_size=max(1, int(train_cfg.get("batch_size", 1))),
-        shuffle=True,
+        batch_size=batch_size,
+        shuffle=False,
         num_workers=max(0, int(train_cfg.get("num_workers", 0))),
         collate_fn=_collate_batch,
     )
@@ -322,21 +478,36 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
     progress_backend = str(train_cfg.get("progress_backend", "auto"))
     progress_mininterval = float(train_cfg.get("progress_update_interval_s", 1.0))
     history: list[dict[str, float]] = []
+    first_epoch_sample_counts: dict[str, int] = {}
+    first_epoch_sample_count = 0
+    trained_sample_events = 0
+    heatmap_samples: list[Sample] = []
     for epoch in range(epochs):
         model.train()
         loss_sum = 0.0
         objectness_sum = 0.0
         box_sum = 0.0
         batch_count = 0
+        epoch_sample_count = 0
+        progress_total = max_steps_per_epoch if max_steps_per_epoch > 0 else None
+        if progress_total is None and max_samples > 0:
+            progress_total = (max_samples + batch_size - 1) // batch_size
         progress = _training_progress_bar(
             desc=f"auto-prompt epoch {epoch + 1}/{epochs}",
-            total=len(loader),
+            total=progress_total,
             enabled=show_progress,
             backend=progress_backend,
             mininterval=progress_mininterval,
         )
         try:
-            for batch in loader:
+            loader_iter = iter(loader)
+            while True:
+                if max_steps_per_epoch > 0 and batch_count >= max_steps_per_epoch:
+                    break
+                try:
+                    batch = next(loader_iter)
+                except StopIteration:
+                    break
                 image = batch["image"].to(device=device, dtype=torch.float32)
                 objectness = batch["objectness"].to(device=device, dtype=torch.float32)
                 objectness_weight = batch["objectness_weight"].to(device=device, dtype=torch.float32)
@@ -359,6 +530,18 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
                 objectness_sum += objectness_value
                 box_sum += box_value
                 batch_count += 1
+                batch_sample_count = len(batch["sample_ids"])
+                epoch_sample_count += batch_sample_count
+                trained_sample_events += batch_sample_count
+                if epoch == 0:
+                    for dataset_id in batch["dataset_ids"]:
+                        first_epoch_sample_counts[f"dataset:{dataset_id}"] = first_epoch_sample_counts.get(f"dataset:{dataset_id}", 0) + 1
+                    for supervision_type in batch["supervision_types"]:
+                        key = f"supervision:{supervision_type}"
+                        first_epoch_sample_counts[key] = first_epoch_sample_counts.get(key, 0) + 1
+                if len(heatmap_samples) < heatmap_limit:
+                    needed = heatmap_limit - len(heatmap_samples)
+                    heatmap_samples.extend(batch["samples"][:needed])
                 if progress is not None:
                     progress.set_postfix(
                         loss=f"{loss_value:.4f}",
@@ -370,6 +553,15 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
         finally:
             if progress is not None:
                 progress.close()
+        if batch_count <= 0:
+            raise RuntimeError("No samples with bbox_tight/bbox_loose were found for auto prompt training.")
+        if epoch == 0:
+            first_epoch_sample_count = epoch_sample_count
+            print(
+                f"[train-load] total usable={first_epoch_sample_count} batches={batch_count}",
+                file=sys.stderr,
+                flush=True,
+            )
         denom = max(1, batch_count)
         history.append(
             {
@@ -388,8 +580,9 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
     metadata = {
         "experiment_id": experiment_id,
         "config_path": str(config_path),
-        "sample_count": len(samples),
-        "sample_counts": sample_counts,
+        "sample_count": first_epoch_sample_count,
+        "sample_counts": first_epoch_sample_counts,
+        "trained_sample_events": trained_sample_events,
         "requested_device": requested_device,
         "device": device,
         "target": target_cfg,
@@ -399,11 +592,11 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
     heatmap_outputs = _write_training_heatmaps(
         output_dir=output_dir,
         model=model,
-        samples=samples,
+        samples=heatmap_samples,
         model_config=model_cfg,
         train_config=train_cfg,
         device=device,
-        limit=int(raw.get("heatmaps", {}).get("sample_limit", train_cfg.get("heatmap_sample_limit", 8))) if isinstance(raw.get("heatmaps", {}), dict) else 8,
+        limit=heatmap_limit,
         experiment_id=experiment_id,
     )
     summary = {

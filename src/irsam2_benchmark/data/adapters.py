@@ -6,7 +6,7 @@ import warnings
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence
 
 import numpy as np
 from PIL import Image
@@ -75,6 +75,9 @@ class DatasetAdapter:
     def load_samples(self, config: AppConfig) -> List[Sample]:
         raise NotImplementedError
 
+    def iter_samples(self, config: AppConfig) -> Iterable[Sample]:
+        yield from self.load_samples(config)
+
 
 def _dataset_root(config: AppConfig) -> Path:
     return config.dataset_root
@@ -113,6 +116,24 @@ def _polygon_to_mask(points: Sequence[float], height: int, width: int) -> np.nda
 def _sorted_files(root: Path, extensions: Sequence[str]) -> List[Path]:
     lower = {ext.lower() for ext in extensions}
     return sorted([path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in lower])
+
+
+def _iter_files_depth_first(root: Path, *, suffix: str) -> Iterator[Path]:
+    stack = [root]
+    suffix = suffix.lower()
+    while stack:
+        current = stack.pop()
+        try:
+            entries = sorted(current.iterdir(), key=lambda item: item.name)
+        except OSError:
+            continue
+        directories: list[Path] = []
+        for entry in entries:
+            if entry.is_dir():
+                directories.append(entry)
+            elif entry.is_file() and entry.suffix.lower() == suffix:
+                yield entry
+        stack.extend(reversed(directories))
 
 
 def _image_index_by_stem(root: Path, extensions: Sequence[str]) -> Dict[str, Path]:
@@ -492,7 +513,7 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
         except OSError:
             return False
 
-    def _voc_image_path(self, image_root: Path, xml_root: ET.Element, ann_path: Path) -> Path:
+    def _voc_image_path(self, image_root: Path, xml_root: ET.Element, ann_path: Path, *, image_root_is_ir_only_layout: bool) -> Path:
         path_text = _xml_text(xml_root, "path")
         if path_text:
             path = Path(path_text)
@@ -507,9 +528,19 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
                 image_root,
                 filename,
                 ann_path,
-                image_root_is_ir_only_layout=self._image_root_is_ir_only_layout(image_root),
+                image_root_is_ir_only_layout=image_root_is_ir_only_layout,
             )
         return image_root / ann_path.with_suffix("").name
+
+    def _voc_image_size(self, xml_root: ET.Element, image_path: Path) -> tuple[int, int]:
+        width_text = _xml_text(xml_root, "size/width")
+        height_text = _xml_text(xml_root, "size/height")
+        if width_text and height_text:
+            try:
+                return int(float(width_text)), int(float(height_text))
+            except ValueError:
+                pass
+        return _image_size(image_path)
 
     def _voc_frame_id(self, image_path: Path, image_root: Path, xml_root: ET.Element) -> str:
         path_text = _xml_text(xml_root, "path")
@@ -562,23 +593,31 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
             }
         return None
 
-    def _load_voc_samples(self, config: AppConfig, ann_dir: Path, image_root: Path) -> List[Sample]:
-        samples: List[Sample] = []
+    def _iter_voc_annotation_files(self, ann_dir: Path) -> Iterator[Path]:
+        yield from _iter_files_depth_first(ann_dir, suffix=".xml")
+
+    def _iter_voc_samples(self, config: AppConfig, ann_dir: Path, image_root: Path) -> Iterator[Sample]:
+        sample_count = 0
         seen_images: set[str] = set()
         use_segmentation = _mask_mode_requests_segmentation(config.dataset.mask_mode)
-        for ann_path in sorted(ann_dir.rglob("*.xml")):
+        image_root_is_ir_only_layout = self._image_root_is_ir_only_layout(image_root)
+        for ann_path in self._iter_voc_annotation_files(ann_dir):
             xml_root = ET.parse(ann_path).getroot()
-            image_path = self._voc_image_path(image_root, xml_root, ann_path)
+            image_path = self._voc_image_path(
+                image_root,
+                xml_root,
+                ann_path,
+                image_root_is_ir_only_layout=image_root_is_ir_only_layout,
+            )
             if not image_path.exists():
                 continue
             frame_id = self._voc_frame_id(image_path, image_root, xml_root)
             if not self._image_file_is_ir_branch(frame_id) and not self._annotation_file_is_ir_specific(ann_path):
                 continue
             if _limit_reached(config.runtime.max_images, len(seen_images)) and frame_id not in seen_images:
-                return samples
+                return
             seen_images.add(frame_id)
-            width = int(_xml_float(xml_root, "size/width", float(_image_size(image_path)[0])))
-            height = int(_xml_float(xml_root, "size/height", float(_image_size(image_path)[1])))
+            width, height = self._voc_image_size(xml_root, image_path)
             sequence_id = _relative_sequence_id(image_path, image_root)
             frame_index = _infer_frame_index(image_path)
             device_source = _infer_device_source(image_path, image_root)
@@ -597,54 +636,54 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
                 segmentation_source = self._voc_segmentation_source(obj, width, height) if use_segmentation else None
                 if segmentation_source is not None:
                     metadata[MASK_SOURCE_KEY] = segmentation_source
-                    samples.append(
-                        Sample(
-                            image_path=image_path,
-                            sample_id=f"{sample_id}::{category}::voc_coco_segmentation",
-                            frame_id=frame_id,
-                            sequence_id=sequence_id,
-                            frame_index=frame_index,
-                            temporal_key=frame_id,
-                            track_id=track_id,
-                            width=width,
-                            height=height,
-                            category=category,
-                            target_scale=_target_scale_from_area(area),
-                            device_source=device_source,
-                            annotation_protocol_flag="voc_coco_segmentation",
-                            supervision_type="mask",
-                            bbox_tight=tight,
-                            bbox_loose=loose,
-                            point_prompt=point,
-                            metadata=metadata,
-                        )
+                    sample = Sample(
+                        image_path=image_path,
+                        sample_id=f"{sample_id}::{category}::voc_coco_segmentation",
+                        frame_id=frame_id,
+                        sequence_id=sequence_id,
+                        frame_index=frame_index,
+                        temporal_key=frame_id,
+                        track_id=track_id,
+                        width=width,
+                        height=height,
+                        category=category,
+                        target_scale=_target_scale_from_area(area),
+                        device_source=device_source,
+                        annotation_protocol_flag="voc_coco_segmentation",
+                        supervision_type="mask",
+                        bbox_tight=tight,
+                        bbox_loose=loose,
+                        point_prompt=point,
+                        metadata=metadata,
                     )
                 else:
-                    samples.append(
-                        Sample(
-                            image_path=image_path,
-                            sample_id=f"{sample_id}::{category}::voc_bbox_only",
-                            frame_id=frame_id,
-                            sequence_id=sequence_id,
-                            frame_index=frame_index,
-                            temporal_key=frame_id,
-                            track_id=track_id,
-                            width=width,
-                            height=height,
-                            category=category,
-                            target_scale=_target_scale_from_area(area),
-                            device_source=device_source,
-                            annotation_protocol_flag="voc_bbox_only",
-                            supervision_type="bbox",
-                            bbox_tight=tight,
-                            bbox_loose=loose,
-                            point_prompt=point,
-                            metadata=metadata,
-                        )
+                    sample = Sample(
+                        image_path=image_path,
+                        sample_id=f"{sample_id}::{category}::voc_bbox_only",
+                        frame_id=frame_id,
+                        sequence_id=sequence_id,
+                        frame_index=frame_index,
+                        temporal_key=frame_id,
+                        track_id=track_id,
+                        width=width,
+                        height=height,
+                        category=category,
+                        target_scale=_target_scale_from_area(area),
+                        device_source=device_source,
+                        annotation_protocol_flag="voc_bbox_only",
+                        supervision_type="bbox",
+                        bbox_tight=tight,
+                        bbox_loose=loose,
+                        point_prompt=point,
+                        metadata=metadata,
                     )
-                if _limit_reached(config.runtime.max_samples, len(samples)):
-                    return samples
-        return samples
+                yield sample
+                sample_count += 1
+                if _limit_reached(config.runtime.max_samples, sample_count):
+                    return
+
+    def _load_voc_samples(self, config: AppConfig, ann_dir: Path, image_root: Path) -> List[Sample]:
+        return list(self._iter_voc_samples(config, ann_dir, image_root))
 
     def load_samples(self, config: AppConfig) -> List[Sample]:
         root = _dataset_root(config)
@@ -736,6 +775,15 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
                 if _limit_reached(config.runtime.max_samples, len(samples)):
                     return samples
         return samples
+
+    def iter_samples(self, config: AppConfig) -> Iterable[Sample]:
+        root = _dataset_root(config)
+        ann_dir = root / (config.dataset.annotations_dir or "annotations_coco")
+        image_root = self._resolve_image_root(root, config.dataset.images_dir)
+        if self._use_voc_annotations(ann_dir):
+            yield from self._iter_voc_samples(config, ann_dir, image_root)
+            return
+        yield from self.load_samples(config)
 
 
 class GenericImageMaskAdapter(DatasetAdapter):
