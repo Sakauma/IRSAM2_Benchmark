@@ -118,6 +118,30 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(report["area_pixels"]["min"], 8.0)
             self.assertEqual(report["missing_bbox_count"], 0)
             self.assertEqual(report["missing_point_count"], 0)
+            self.assertEqual(report["warning_count"], 0)
+            self.assertEqual(report["size_mismatch_warning_count"], 0)
+
+    def test_preflight_dataset_reports_size_mismatch_warning_summary(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            images = root / "images"
+            masks = root / "masks"
+            images.mkdir()
+            masks.mkdir()
+            image = np.zeros((4, 4), dtype=np.uint8)
+            mask = np.zeros((8, 8), dtype=np.uint8)
+            mask[2:6, 2:6] = 255
+            Image.fromarray(image).save(images / "sample.png")
+            Image.fromarray(mask).save(masks / "sample.png")
+            config = load_app_config(_write_config(root))
+
+            report = preflight_dataset(config)
+
+            self.assertFalse(report["valid"])
+            self.assertEqual(report["sample_count"], 0)
+            self.assertEqual(report["warning_count"], 1)
+            self.assertEqual(report["size_mismatch_warning_count"], 1)
+            self.assertIn("Skipping image/mask size mismatch", report["warning_examples"][0])
 
     def test_validate_run_artifacts_accepts_minimal_complete_run(self):
         with tempfile.TemporaryDirectory() as temp_dir:

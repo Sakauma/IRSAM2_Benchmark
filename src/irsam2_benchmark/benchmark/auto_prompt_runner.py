@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import json
 import os
 import subprocess
 import sys
@@ -16,8 +17,9 @@ from typing import Any, Dict, List
 import yaml
 
 from . import full_runner as fr
+from ..config import load_app_config
 from ..core.fingerprints import sha256_file
-from ..validation import validate_run_artifacts
+from ..validation import preflight_dataset, validate_run_artifacts
 
 
 PROJECT_ROOT = fr.PROJECT_ROOT
@@ -316,6 +318,101 @@ def _advance_eval_progress(progress: Any | None, *, status: str, counts: Dict[st
 
 def _command_for_train(train_config_path: Path, python_bin: str) -> list[str]:
     return [python_bin, str(TRAIN_AUTO_PROMPT_PY), "--config", str(train_config_path)]
+
+
+def _preflight_config_paths(config_paths: list[Path], *, role: str) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for config_path in config_paths:
+        try:
+            app_config = load_app_config(config_path)
+            key = (app_config.dataset.dataset_id, str(app_config.dataset_root))
+            if key in seen:
+                continue
+            seen.add(key)
+            report = preflight_dataset(app_config)
+            report["dataset_id"] = app_config.dataset.dataset_id
+            report["root"] = str(app_config.dataset_root)
+        except Exception as exc:
+            report = {
+                "valid": False,
+                "errors": [f"Dataset preflight failed for config {config_path}: {exc}"],
+                "warnings": [],
+                "warning_count": 0,
+                "size_mismatch_warning_count": 0,
+                "warning_examples": [],
+                "dataset_id": "",
+                "root": "",
+                "sample_count": 0,
+            }
+        report["role"] = role
+        report["config_path"] = str(config_path)
+        reports.append(report)
+    return reports
+
+
+def _preflight_section(reports: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "dataset_count": len(reports),
+        "valid_count": len([item for item in reports if item.get("valid")]),
+        "invalid_count": len([item for item in reports if not item.get("valid")]),
+        "sample_count": sum(int(item.get("sample_count", 0)) for item in reports),
+        "warning_count": sum(int(item.get("warning_count", 0)) for item in reports),
+        "size_mismatch_warning_count": sum(int(item.get("size_mismatch_warning_count", 0)) for item in reports),
+        "reports": reports,
+    }
+
+
+def _dataset_preflight_summary(*, train_config_path: Path, run_plan: list[tuple[Any, ...]]) -> dict[str, Any]:
+    train_payload = _load_yaml(train_config_path)
+    train_config_paths = [Path(item) for item in train_payload.get("dataset_configs", [])]
+    eval_config_paths = [Path(item[5]) for item in run_plan]
+    train_reports = _preflight_config_paths(train_config_paths, role="train")
+    eval_reports = _preflight_config_paths(eval_config_paths, role="eval")
+    train_summary = _preflight_section(train_reports)
+    eval_summary = _preflight_section(eval_reports)
+    overall = {
+        "valid": train_summary["invalid_count"] == 0 and eval_summary["invalid_count"] == 0,
+        "dataset_count": train_summary["dataset_count"] + eval_summary["dataset_count"],
+        "invalid_count": train_summary["invalid_count"] + eval_summary["invalid_count"],
+        "sample_count": train_summary["sample_count"] + eval_summary["sample_count"],
+        "warning_count": train_summary["warning_count"] + eval_summary["warning_count"],
+        "size_mismatch_warning_count": train_summary["size_mismatch_warning_count"] + eval_summary["size_mismatch_warning_count"],
+    }
+    return {"overall": overall, "train": train_summary, "eval": eval_summary}
+
+
+def _write_dataset_preflight_summary(manifest_dir: Path, summary: dict[str, Any]) -> Path:
+    path = manifest_dir / "dataset_preflight_summary.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _print_dataset_preflight_summary(summary: dict[str, Any]) -> None:
+    for role in ("train", "eval"):
+        section = summary[role]
+        print(
+            f"[preflight] {role} datasets={section['dataset_count']} valid={section['valid_count']} "
+            f"warnings={section['warning_count']} size_mismatch={section['size_mismatch_warning_count']}",
+            flush=True,
+        )
+
+
+def _preflight_failure_record(summary: dict[str, Any], path: Path) -> dict[str, Any]:
+    errors: list[str] = []
+    for role in ("train", "eval"):
+        for report in summary[role]["reports"]:
+            if not report.get("valid"):
+                dataset = report.get("dataset_id") or report.get("config_path", "")
+                report_errors = report.get("errors", [])
+                errors.append(f"{role}:{dataset}: {'; '.join(str(item) for item in report_errors)}")
+    return {
+        "status": "dataset_preflight_failed",
+        "message": "One or more datasets failed preflight validation.",
+        "preflight_path": str(path),
+        "errors": errors,
+    }
 
 
 def _build_run_plan(
@@ -663,6 +760,50 @@ def main(argv: List[str] | None = None) -> int:
         "command": " ".join(train_command),
         "gpu": str(auto_config.get("train_gpu", "0")),
     }
+    run_plan, analysis_records = _build_run_plan(
+        base_matrix=base_matrix,
+        suite_config=suite_config,
+        paths=paths,
+        config_dir=generated_dir / "run_configs",
+        matrix_dir=generated_dir / "matrices",
+        analysis_config_dir=generated_dir / "analysis_configs",
+        analysis_root=manifest_dir / "analysis",
+        source_config_path=config_path,
+        source_config_sha256=str(config_sources["config_sha256"]),
+        selected_suites=selected_suites,
+        selected_checkpoints=selected_checkpoints,
+        selected_modes=selected_modes,
+        smoke_test=args.smoke_test,
+        python_bin=args.python_bin,
+    )
+    preflight_summary = _dataset_preflight_summary(train_config_path=train_config_path, run_plan=run_plan)
+    preflight_path = _write_dataset_preflight_summary(manifest_dir, preflight_summary)
+    dataset_preflight = {"path": str(preflight_path), "summary": preflight_summary}
+    _print_dataset_preflight_summary(preflight_summary)
+    if not preflight_summary["overall"]["valid"]:
+        failure = _preflight_failure_record(preflight_summary, preflight_path)
+        manifest = {
+            "created_at": created_at,
+            "run_id": run_id,
+            "project_root": str(PROJECT_ROOT),
+            "config": str(config_path),
+            "config_sha256": config_sources["config_sha256"],
+            "artifact_root": str(manifest_dir),
+            "dry_run": args.dry_run,
+            "smoke_test": args.smoke_test,
+            "train": train_record,
+            "dataset_preflight": dataset_preflight,
+            "run_count": len(run_plan),
+            "completed_count": 0,
+            "skipped_existing_count": 0,
+            "failed_count": 1,
+            "records": [],
+            "analysis": analysis_records,
+            "failures": [failure],
+        }
+        fr._write_final_manifest(manifest_dir, manifest)
+        print(f"[preflight] failed path={preflight_path}", flush=True)
+        return 1
 
     print(f"[train] checkpoint={auto_checkpoint_path}", flush=True)
     if args.dry_run:
@@ -691,28 +832,13 @@ def main(argv: List[str] | None = None) -> int:
                 "config": str(config_path),
                 "artifact_root": str(manifest_dir),
                 "train": train_record,
+                "dataset_preflight": dataset_preflight,
                 "records": [],
                 "failures": [train_record],
             }
             fr._write_final_manifest(manifest_dir, manifest)
             return 1
 
-    run_plan, analysis_records = _build_run_plan(
-        base_matrix=base_matrix,
-        suite_config=suite_config,
-        paths=paths,
-        config_dir=generated_dir / "run_configs",
-        matrix_dir=generated_dir / "matrices",
-        analysis_config_dir=generated_dir / "analysis_configs",
-        analysis_root=manifest_dir / "analysis",
-        source_config_path=config_path,
-        source_config_sha256=str(config_sources["config_sha256"]),
-        selected_suites=selected_suites,
-        selected_checkpoints=selected_checkpoints,
-        selected_modes=selected_modes,
-        smoke_test=args.smoke_test,
-        python_bin=args.python_bin,
-    )
     print(f"[plan] eval_runs={len(run_plan)} artifact_root={manifest_dir}", flush=True)
     records, failures = _run_eval_plan(
         run_plan=run_plan,
@@ -756,6 +882,7 @@ def main(argv: List[str] | None = None) -> int:
         "dry_run": args.dry_run,
         "smoke_test": args.smoke_test,
         "train": train_record,
+        "dataset_preflight": dataset_preflight,
         "run_count": len(run_plan),
         "completed_count": len([item for item in records if item["status"] == "completed"]),
         "skipped_existing_count": len([item for item in records if item["status"] == "skipped_existing"]),

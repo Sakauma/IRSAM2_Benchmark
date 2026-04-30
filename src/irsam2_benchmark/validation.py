@@ -59,6 +59,13 @@ def _sample_mask_area(sample: Sample) -> float | None:
     return float(np.asarray(mask).astype(bool).sum())
 
 
+def _add_warning_summary(report: Dict[str, Any], warning_messages: List[str]) -> Dict[str, Any]:
+    report["warning_count"] = len(warning_messages)
+    report["size_mismatch_warning_count"] = len([item for item in warning_messages if "image/mask size mismatch" in item])
+    report["warning_examples"] = warning_messages[:5]
+    return report
+
+
 def _multimodal_polygon_anomalies(root: Path) -> Dict[str, Any]:
     label_dir = root / "label"
     report = {
@@ -119,13 +126,16 @@ def preflight_dataset(config: AppConfig) -> Dict[str, Any]:
         "missing_mask_count": 0,
         "missing_bbox_count": 0,
         "missing_point_count": 0,
+        "warning_count": 0,
+        "size_mismatch_warning_count": 0,
+        "warning_examples": [],
         "area_pixels": _area_summary([]),
         "multimodal_polygon_anomalies": _multimodal_polygon_anomalies(root),
     }
 
     if not root.exists():
         errors.append(f"Dataset root does not exist: {root}")
-        return report
+        return _add_warning_summary(report, warning_messages)
 
     try:
         adapter = build_dataset_adapter(config)
@@ -135,7 +145,7 @@ def preflight_dataset(config: AppConfig) -> Dict[str, Any]:
         warning_messages.extend(str(item.message) for item in caught)
     except Exception as exc:
         errors.append(f"Dataset load failed: {exc}")
-        return report
+        return _add_warning_summary(report, warning_messages)
 
     samples = loaded.samples
     areas: List[float] = []
@@ -181,7 +191,7 @@ def preflight_dataset(config: AppConfig) -> Dict[str, Any]:
             "area_pixels": _area_summary(areas),
         }
     )
-    return report
+    return _add_warning_summary(report, warning_messages)
 
 
 def _read_json(path: Path, errors: List[str]) -> Any:
