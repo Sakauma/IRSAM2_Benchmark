@@ -279,20 +279,20 @@ def _make_eval_progress(*, total: int, enabled: bool) -> Any | None:
     return tqdm(total=total, unit="run", desc="eval runs", dynamic_ncols=True, leave=True, position=0, file=sys.stderr)
 
 
-def _set_eval_progress(progress: Any | None, *, prefix: str, counts: Dict[str, int], active: int) -> None:
+def _set_eval_progress(progress: Any | None, *, counts: Dict[str, int], active: int, queued: int) -> None:
     if progress is None:
         return
-    progress.set_description_str(prefix)
     progress.set_postfix(
         completed=counts.get("completed", 0),
         skipped=counts.get("skipped", 0),
         failed=counts.get("failed", 0),
         dry_run=counts.get("dry_run", 0),
         active=active,
+        queued=queued,
     )
 
 
-def _advance_eval_progress(progress: Any | None, *, status: str, counts: Dict[str, int], active: int) -> None:
+def _advance_eval_progress(progress: Any | None, *, status: str, counts: Dict[str, int], active: int, queued: int) -> None:
     if progress is None:
         return
     if status == "completed":
@@ -309,6 +309,7 @@ def _advance_eval_progress(progress: Any | None, *, status: str, counts: Dict[st
         failed=counts.get("failed", 0),
         dry_run=counts.get("dry_run", 0),
         active=active,
+        queued=queued,
     )
     progress.update(1)
 
@@ -332,8 +333,6 @@ def _build_run_plan(
     selected_checkpoints: set[str] | None,
     selected_modes: set[str] | None,
     smoke_test: bool,
-    show_progress: bool,
-    progress_backend: str,
     python_bin: str,
 ) -> tuple[list[tuple[Any, ...]], list[dict[str, Any]]]:
     checkpoints = fr._select_by_alias(suite_config.get("checkpoints", []), selected_checkpoints, "alias")
@@ -398,8 +397,8 @@ def _build_run_plan(
                         method_id=method_id,
                         artifact_root=artifact_root,
                         smoke_test=smoke_test,
-                        show_progress=show_progress,
-                        progress_backend=progress_backend,
+                        show_progress=False,
+                        progress_backend="none",
                         source_config_path=source_config_path,
                         source_config_sha256=source_config_sha256,
                     )
@@ -449,9 +448,10 @@ def _run_eval_plan(
             suite_key, checkpoint, dataset_id, method_id, output_dir, config_path, config_sha256, command, log_path = queue.pop(0)
             gpu = free_gpus.pop(0)
             prefix = f"[{completed_slots + len(active) + 1}/{total}] gpu={gpu} suite={suite_key} ckpt={checkpoint['alias']} dataset={dataset_id} mode={method_id}"
-            _set_eval_progress(progress, prefix=prefix, counts=progress_counts, active=len(active))
+            _set_eval_progress(progress, counts=progress_counts, active=len(active), queued=len(queue))
             if not rerun and fr._run_is_complete(output_dir):
-                print(f"{prefix} skipped_existing", flush=True)
+                if progress is None:
+                    print(f"{prefix} skipped_existing", flush=True)
                 records.append(
                     fr._status_record(
                         status="skipped_existing",
@@ -469,7 +469,7 @@ def _run_eval_plan(
                 completed_slots += 1
                 free_gpus.append(gpu)
                 fr._write_run_outputs(manifest_dir, records, failures, run_id)
-                _advance_eval_progress(progress, status="skipped_existing", counts=progress_counts, active=len(active))
+                _advance_eval_progress(progress, status="skipped_existing", counts=progress_counts, active=len(active), queued=len(queue))
                 continue
             if dry_run:
                 print(f"{prefix} dry_run CUDA_VISIBLE_DEVICES={gpu} {' '.join(command)}", flush=True)
@@ -489,9 +489,10 @@ def _run_eval_plan(
                 )
                 completed_slots += 1
                 free_gpus.append(gpu)
-                _advance_eval_progress(progress, status="dry_run", counts=progress_counts, active=len(active))
+                _advance_eval_progress(progress, status="dry_run", counts=progress_counts, active=len(active), queued=len(queue))
                 continue
-            print(f"{prefix} running", flush=True)
+            if progress is None:
+                print(f"{prefix} running", flush=True)
             process, handle, thread = _start_logged(command, env=_env_for_gpu(paths, gpu), log_path=log_path, stream_logs=stream_logs)
             active.append(
                 {
@@ -525,7 +526,8 @@ def _run_eval_plan(
             free_gpus.append(str(item["gpu"]))
             completed_slots += 1
             if returncode == 0 and validate_run_artifacts(item["output_dir"])["valid"]:
-                print(f"{item['prefix']} completed", flush=True)
+                if progress is None:
+                    print(f"{item['prefix']} completed", flush=True)
                 records.append(
                     fr._status_record(
                         status="completed",
@@ -541,7 +543,7 @@ def _run_eval_plan(
                         returncode=returncode,
                     )
                 )
-                _advance_eval_progress(progress, status="completed", counts=progress_counts, active=len(active))
+                _advance_eval_progress(progress, status="completed", counts=progress_counts, active=len(active), queued=len(queue))
             else:
                 validation = validate_run_artifacts(item["output_dir"]) if returncode == 0 else {"errors": []}
                 status = "failed_invalid_artifacts" if returncode == 0 else "failed"
@@ -564,7 +566,7 @@ def _run_eval_plan(
                 )
                 records.append(failure)
                 failures.append(failure)
-                _advance_eval_progress(progress, status=status, counts=progress_counts, active=len(active))
+                _advance_eval_progress(progress, status=status, counts=progress_counts, active=len(active), queued=len(queue))
             fr._write_run_outputs(manifest_dir, records, failures, run_id)
         if stop_on_error and failures:
             for item in active:
@@ -579,7 +581,7 @@ def _run_eval_plan(
                 item["handle"].close()
             break
         if active:
-            _set_eval_progress(progress, prefix=f"[{completed_slots}/{total}] waiting", counts=progress_counts, active=len(active))
+            _set_eval_progress(progress, counts=progress_counts, active=len(active), queued=len(queue))
             time.sleep(1.0)
     if progress is not None:
         progress.close()
@@ -709,8 +711,6 @@ def main(argv: List[str] | None = None) -> int:
         selected_checkpoints=selected_checkpoints,
         selected_modes=selected_modes,
         smoke_test=args.smoke_test,
-        show_progress=not args.no_progress,
-        progress_backend=args.progress_backend,
         python_bin=args.python_bin,
     )
     print(f"[plan] eval_runs={len(run_plan)} artifact_root={manifest_dir}", flush=True)

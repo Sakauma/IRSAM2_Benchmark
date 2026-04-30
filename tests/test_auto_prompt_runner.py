@@ -13,6 +13,21 @@ import yaml
 from irsam2_benchmark.benchmark import auto_prompt_runner
 
 
+class FakeProgress:
+    def __init__(self):
+        self.postfixes = []
+        self.updates = 0
+
+    def set_description_str(self, value):
+        raise AssertionError(f"eval progress should keep a fixed description, got: {value}")
+
+    def set_postfix(self, **kwargs):
+        self.postfixes.append(kwargs)
+
+    def update(self, value):
+        self.updates += value
+
+
 def _load_runner():
     script_path = Path(__file__).resolve().parents[1] / "scripts" / "run_4090x4_auto_prompt.py"
     spec = importlib.util.spec_from_file_location("run_4090x4_auto_prompt_under_test", script_path)
@@ -80,8 +95,10 @@ class AutoPromptRunnerTests(unittest.TestCase):
                 )
 
             text = output.getvalue()
+            progress_text = progress_output.getvalue()
             self.assertIn("[train] dry_run CUDA_VISIBLE_DEVICES=0", text)
             self.assertIn("gpu=1", text)
+            self.assertNotIn("dataset=nuaa_sirst", progress_text)
             manifest_path = root / "artifacts" / "sam2_ir_qd_m1_auto_prompt" / "benchmark_manifest_latest.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["run_count"], 4)
@@ -96,6 +113,22 @@ class AutoPromptRunnerTests(unittest.TestCase):
             self.assertEqual(first_run_config["method"]["prompt_checkpoint"], manifest["train"]["checkpoint_path"])
             self.assertEqual(first_run_config["method"]["prompt_top_k"], 5)
             self.assertTrue(first_run_config["method"]["heatmaps"]["enabled"])
+            self.assertFalse(first_run_config["runtime"]["show_progress"])
+            self.assertEqual(first_run_config["runtime"]["progress_backend"], "none")
+
+    def test_eval_progress_keeps_fixed_description_and_reports_queue(self):
+        progress = FakeProgress()
+        counts = {"completed": 1, "skipped": 0, "failed": 0, "dry_run": 0}
+
+        auto_prompt_runner._set_eval_progress(progress, counts=counts, active=4, queued=5)
+        auto_prompt_runner._advance_eval_progress(progress, status="completed", counts=counts, active=3, queued=4)
+
+        self.assertEqual(progress.updates, 1)
+        self.assertEqual(progress.postfixes[0]["active"], 4)
+        self.assertEqual(progress.postfixes[0]["queued"], 5)
+        self.assertEqual(progress.postfixes[-1]["completed"], 2)
+        self.assertEqual(progress.postfixes[-1]["active"], 3)
+        self.assertEqual(progress.postfixes[-1]["queued"], 4)
 
     def test_run_logged_streams_output_and_writes_log(self):
         with tempfile.TemporaryDirectory() as temp_dir:
