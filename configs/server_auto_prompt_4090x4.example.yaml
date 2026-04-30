@@ -5,7 +5,13 @@
 #     --config configs/server_auto_prompt_4090x4.local.yaml \
 #     --stop-on-error \
 #     --preflight-mode fast \
-#     --train-batch-size 16 \
+#     --train-gpu-cache-datasets nuaa_sirst,nudt_sirst,irstd_1k \
+#     --train-light-cache-datasets rbgt_tiny_ir_box \
+#     --train-cache-dtype float16 \
+#     --train-rbgt-samples-per-epoch 8192 \
+#     --train-rbgt-batch-size auto \
+#     --train-rbgt-batch-size-max 1024 \
+#     --train-batch-size 128 \
 #     --train-num-workers 4 \
 #     --train-prefetch-factor 4 \
 #     --train-shuffle-buffer-size 512 \
@@ -22,6 +28,8 @@ auto_prompt:
   train_gpu: "0"
   eval_gpus: ["1", "6", "7", "0"]
   train_datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "rbgt_tiny_ir_box"]
+  gpu_cache_datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k"]
+  light_cache_datasets: ["rbgt_tiny_ir_box"]
   eval_suites: ["auto_prompt"]
   checkpoint_name: "checkpoint.pt"
   top_k: 5
@@ -32,13 +40,17 @@ auto_prompt:
     device: "cuda"
     seed: 42
     epochs: 20
-    batch_size: 1
+    batch_size: 128
     learning_rate: 0.0003
     weight_decay: 0.0001
     box_loss_weight: 0.1
     max_long_side: 512
     max_samples: 0
     num_workers: 0
+    cache_dtype: "float16"
+    light_cache_samples_per_epoch: 8192
+    light_cache_batch_size: "auto"
+    light_cache_batch_size_max: 1024
     show_progress: true
     progress_backend: "tqdm"
     progress_update_interval_s: 1.0
@@ -187,7 +199,7 @@ datasets:
       root: "datasets/RBGT-Tiny"
       modality: "ir"
       images_dir: "image"
-      annotations_dir: "annotations_coco"
+      annotations_dir: "annotations_voc"
       mask_mode: "auto"
       class_map: {}
 

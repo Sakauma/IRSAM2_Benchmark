@@ -346,6 +346,95 @@ class AutoPromptTrainingTests(unittest.TestCase):
             self.assertEqual(summary["sample_count"], 1)
             self.assertIn("[train-profile] epoch=1 batch=1", stderr.getvalue())
 
+    def test_torch_batch_prior_and_target_shapes(self):
+        torch, F, _, _ = auto_prompt_module._require_torch()
+        gray = torch.zeros((2, 1, 16, 16), dtype=torch.float32)
+        gray[0, :, 6:8, 6:8] = 255.0
+        gray[1, :, 4:7, 8:11] = 255.0
+        prior = auto_prompt_module._ir_prior_stack_batch(torch, F, gray)
+        boxes = torch.tensor([[6.0, 6.0, 8.0, 8.0], [8.0, 4.0, 11.0, 7.0]], dtype=torch.float32)
+
+        objectness, box_size, box_weight, objectness_weight = auto_prompt_module._target_from_box_batch(
+            torch,
+            boxes=boxes,
+            height=16,
+            width=16,
+            gaussian_sigma=1.0,
+            positive_radius=1,
+            min_box_side=2.0,
+            hard_negative_weight=2.0,
+            hard_negative_percentile=95.0,
+            prior_score=prior.max(dim=1).values,
+        )
+
+        self.assertEqual(tuple(prior.shape), (2, 3, 16, 16))
+        self.assertGreaterEqual(float(prior.min()), 0.0)
+        self.assertLessEqual(float(prior.max()), 1.0)
+        self.assertEqual(tuple(objectness.shape), (2, 1, 16, 16))
+        self.assertEqual(tuple(box_size.shape), (2, 2, 16, 16))
+        self.assertEqual(tuple(box_weight.shape), (2, 1, 16, 16))
+        self.assertEqual(tuple(objectness_weight.shape), (2, 1, 16, 16))
+        self.assertGreater(float(box_weight.sum()), 0.0)
+
+    def test_light_gray_cache_batch_generates_gpu_style_targets_on_cpu(self):
+        torch, F, _, _ = auto_prompt_module._require_torch()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dataset_config = _write_dataset(root)
+            train_config = root / "auto_prompt_light.yaml"
+            train_config.write_text(
+                yaml.safe_dump(
+                    {
+                        "experiment_id": "unit_light",
+                        "output_root": str(root / "outputs"),
+                        "light_cache_dataset_configs": [str(dataset_config)],
+                        "train": {"device": "cpu", "max_long_side": 16},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cache = auto_prompt_module._build_light_gray_cache(
+                config_path=train_config,
+                dataset_configs=[str(dataset_config)],
+                train_cfg={"max_long_side": 16},
+            )
+            self.assertIsNotNone(cache)
+            assert cache is not None
+            batch = auto_prompt_module._light_cache_batch(
+                cache,
+                [0, 1],
+                torch=torch,
+                F=F,
+                device="cpu",
+                target_cfg={"gaussian_sigma": 1.0, "positive_radius": 1},
+                model_cfg=auto_prompt_module.AutoPromptModelConfig(hidden_channels=4),
+            )
+
+        self.assertEqual(tuple(batch["image"].shape), (2, 3, 16, 16))
+        self.assertEqual(tuple(batch["objectness"].shape), (2, 1, 16, 16))
+        self.assertEqual(batch["source"], "light_cache")
+
+    def test_cached_training_requires_cuda_device(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dataset_config = _write_dataset(root)
+            train_config = root / "auto_prompt_gpu_cache.yaml"
+            train_config.write_text(
+                yaml.safe_dump(
+                    {
+                        "experiment_id": "unit_gpu_cache",
+                        "output_root": str(root / "outputs"),
+                        "gpu_cache_dataset_configs": [str(dataset_config)],
+                        "train": {"device": "cpu", "epochs": 1},
+                        "model": {"hidden_channels": 4},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "requires a CUDA training device"):
+                train_auto_prompt_from_config(train_config)
+
 
 if __name__ == "__main__":
     unittest.main()

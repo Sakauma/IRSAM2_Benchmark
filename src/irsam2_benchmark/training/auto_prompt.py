@@ -5,7 +5,7 @@ import random
 import sys
 import time
 from contextlib import nullcontext
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -91,12 +91,23 @@ def _bool_setting(value: Any, *, default: bool = False) -> bool:
     return default
 
 
-def _iter_training_samples(config_path: Path, *, shard_id: int = 0, num_shards: int = 1) -> Iterator[Sample]:
+def _training_dataset_paths(config_path: Path, *, key: str = "dataset_configs") -> list[str]:
     raw = _read_yaml(config_path)
-    dataset_configs = raw.get("dataset_configs", [])
+    dataset_configs = raw.get(key, [])
     if not isinstance(dataset_configs, list) or not dataset_configs:
-        raise ValueError("auto prompt training config requires a non-empty dataset_configs list.")
+        raise ValueError(f"auto prompt training config requires a non-empty {key} list.")
+    return [str(item) for item in dataset_configs]
 
+
+def _iter_training_samples(
+    config_path: Path,
+    *,
+    dataset_configs: list[str] | None = None,
+    shard_id: int = 0,
+    num_shards: int = 1,
+) -> Iterator[Sample]:
+    if dataset_configs is None:
+        dataset_configs = _training_dataset_paths(config_path)
     shard_text = f" shard={shard_id}/{num_shards}" if num_shards > 1 else ""
     for item in dataset_configs:
         dataset_config = _resolve_path(config_path.parent, str(item))
@@ -249,6 +260,156 @@ def _collate_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _sample_to_training_item(
+    sample: Sample,
+    *,
+    max_long_side: int,
+    target_config: dict[str, Any],
+    model_config: AutoPromptModelConfig,
+) -> dict[str, Any]:
+    gray, box = _load_resized_gray_and_box(sample, max_long_side)
+    image = ir_prior_stack(gray, use_local_contrast=model_config.use_local_contrast, use_top_hat=model_config.use_top_hat)
+    prior_score = np.maximum.reduce(image)
+    objectness, box_size, box_weight, objectness_weight = _target_from_box(
+        box=box,
+        height=int(image.shape[1]),
+        width=int(image.shape[2]),
+        gaussian_sigma=float(target_config.get("gaussian_sigma", 2.0)),
+        positive_radius=int(target_config.get("positive_radius", 1)),
+        min_box_side=float(model_config.min_box_side),
+        hard_negative_weight=float(target_config.get("hard_negative_weight", 1.0)),
+        hard_negative_percentile=float(target_config.get("hard_negative_percentile", 95.0)),
+        prior_score=prior_score,
+    )
+    return {
+        "image": image,
+        "objectness": objectness,
+        "objectness_weight": objectness_weight,
+        "box_size": box_size,
+        "box_weight": box_weight,
+        "sample_id": sample.sample_id,
+        "dataset_id": str(sample.metadata.get("dataset_id", "unknown")),
+        "supervision_type": sample.supervision_type,
+        "sample": sample,
+    }
+
+
+def _load_resized_gray_uint8_and_box(sample: Sample, max_long_side: int) -> tuple[np.ndarray, list[float]]:
+    gray, box = _load_resized_gray_and_box(sample, max_long_side)
+    return np.clip(gray, 0.0, 255.0).astype(np.uint8), box
+
+
+def _torch_normalize_maps(torch: Any, x: Any) -> Any:
+    flat = x.flatten(2)
+    min_v = flat.min(dim=2).values.view(x.shape[0], x.shape[1], 1, 1)
+    max_v = flat.max(dim=2).values.view(x.shape[0], x.shape[1], 1, 1)
+    return (x - min_v) / (max_v - min_v).clamp_min(1e-6)
+
+
+def _pad_for_pool(torch: Any, x: Any, radius: int) -> Any:
+    if radius <= 0:
+        return x
+    mode = "reflect" if x.shape[-2] > radius and x.shape[-1] > radius else "replicate"
+    return torch.nn.functional.pad(x, (radius, radius, radius, radius), mode=mode)
+
+
+def _avg_pool_reflect(torch: Any, F: Any, x: Any, radius: int) -> Any:
+    kernel = 2 * int(radius) + 1
+    return F.avg_pool2d(_pad_for_pool(torch, x, int(radius)), kernel_size=kernel, stride=1)
+
+
+def _min_pool_reflect(torch: Any, F: Any, x: Any, kernel: int) -> Any:
+    radius = int(kernel) // 2
+    return -F.max_pool2d(-_pad_for_pool(torch, x, radius), kernel_size=int(kernel), stride=1)
+
+
+def _max_pool_reflect(torch: Any, F: Any, x: Any, kernel: int) -> Any:
+    radius = int(kernel) // 2
+    return F.max_pool2d(_pad_for_pool(torch, x, radius), kernel_size=int(kernel), stride=1)
+
+
+def _ir_prior_stack_batch(torch: Any, F: Any, gray: Any, *, use_local_contrast: bool = True, use_top_hat: bool = True) -> Any:
+    arr = _torch_normalize_maps(torch, gray)
+    if use_local_contrast:
+        small_mean = _avg_pool_reflect(torch, F, arr, radius=2)
+        large_mean = _avg_pool_reflect(torch, F, arr, radius=8)
+        local_contrast = _torch_normalize_maps(torch, (small_mean - large_mean).clamp_min(0.0))
+    else:
+        local_contrast = torch.zeros_like(arr)
+    if use_top_hat:
+        hats = []
+        for kernel in (3, 5, 9):
+            opened = _max_pool_reflect(torch, F, _min_pool_reflect(torch, F, arr, kernel), kernel)
+            hats.append((arr - opened).clamp_min(0.0))
+        top_hat = _torch_normalize_maps(torch, torch.stack(hats, dim=0).max(dim=0).values)
+    else:
+        top_hat = torch.zeros_like(arr)
+    return torch.cat([arr, local_contrast, top_hat], dim=1).float()
+
+
+def _target_from_box_batch(
+    torch: Any,
+    *,
+    boxes: Any,
+    height: int,
+    width: int,
+    gaussian_sigma: float,
+    positive_radius: int,
+    min_box_side: float,
+    hard_negative_weight: float,
+    hard_negative_percentile: float,
+    prior_score: Any | None = None,
+) -> tuple[Any, Any, Any, Any]:
+    device = boxes.device
+    boxes = boxes.float()
+    x1 = boxes[:, 0].clamp(0.0, max(0.0, float(width - 1)))
+    y1 = boxes[:, 1].clamp(0.0, max(0.0, float(height - 1)))
+    x2 = boxes[:, 2].clamp(0.0, float(width))
+    y2 = boxes[:, 3].clamp(0.0, float(height))
+    cx = (0.5 * (x1 + x2)).clamp(0.0, max(0.0, float(width - 1)))
+    cy = (0.5 * (y1 + y2)).clamp(0.0, max(0.0, float(height - 1)))
+    yy, xx = torch.meshgrid(
+        torch.arange(height, device=device, dtype=torch.float32),
+        torch.arange(width, device=device, dtype=torch.float32),
+        indexing="ij",
+    )
+    xx = xx.unsqueeze(0)
+    yy = yy.unsqueeze(0)
+    dist2 = (xx - cx.view(-1, 1, 1)) ** 2 + (yy - cy.view(-1, 1, 1)) ** 2
+    if gaussian_sigma > 0.0:
+        objectness = torch.exp(-dist2 / (2.0 * float(gaussian_sigma) * float(gaussian_sigma)))
+    else:
+        objectness = torch.zeros_like(dist2)
+        objectness[
+            torch.arange(boxes.shape[0], device=device),
+            cy.round().long().clamp(0, height - 1),
+            cx.round().long().clamp(0, width - 1),
+        ] = 1.0
+    positive = (dist2 <= float(max(0, int(positive_radius))) ** 2).float()
+    empty_positive = positive.flatten(1).sum(dim=1) <= 0
+    if bool(empty_positive.any()):
+        positive[
+            torch.where(empty_positive)[0],
+            cy[empty_positive].round().long().clamp(0, height - 1),
+            cx[empty_positive].round().long().clamp(0, width - 1),
+        ] = 1.0
+    box_w = (x2 - x1).clamp_min(float(min_box_side)).view(-1, 1, 1)
+    box_h = (y2 - y1).clamp_min(float(min_box_side)).view(-1, 1, 1)
+    box_size = torch.stack([box_w.expand(-1, height, width), box_h.expand(-1, height, width)], dim=1)
+    objectness_weight = torch.ones((boxes.shape[0], height, width), device=device, dtype=torch.float32)
+    if hard_negative_weight > 1.0 and prior_score is not None:
+        inside = (
+            (xx >= x1.view(-1, 1, 1).round())
+            & (xx < x2.view(-1, 1, 1).round())
+            & (yy >= y1.view(-1, 1, 1).round())
+            & (yy < y2.view(-1, 1, 1).round())
+        )
+        q = min(max(float(hard_negative_percentile) / 100.0, 0.0), 1.0)
+        threshold = torch.quantile(prior_score.float().flatten(1), q=q, dim=1).view(-1, 1, 1)
+        objectness_weight[(~inside) & (prior_score.float() >= threshold)] = float(hard_negative_weight)
+    return objectness[:, None], box_size, positive[:, None], objectness_weight[:, None]
+
+
 def _build_dataset_class():
     _, _, _, Dataset = _require_torch()
 
@@ -271,31 +432,12 @@ def _build_dataset_class():
 
         def __getitem__(self, index: int) -> dict[str, Any]:
             sample = self.samples[index]
-            gray, box = _load_resized_gray_and_box(sample, self.max_long_side)
-            image = ir_prior_stack(gray, use_local_contrast=self.model_config.use_local_contrast, use_top_hat=self.model_config.use_top_hat)
-            prior_score = np.maximum.reduce(image)
-            objectness, box_size, box_weight, objectness_weight = _target_from_box(
-                box=box,
-                height=int(image.shape[1]),
-                width=int(image.shape[2]),
-                gaussian_sigma=float(self.target_config.get("gaussian_sigma", 2.0)),
-                positive_radius=int(self.target_config.get("positive_radius", 1)),
-                min_box_side=float(self.model_config.min_box_side),
-                hard_negative_weight=float(self.target_config.get("hard_negative_weight", 1.0)),
-                hard_negative_percentile=float(self.target_config.get("hard_negative_percentile", 95.0)),
-                prior_score=prior_score,
+            return _sample_to_training_item(
+                sample,
+                max_long_side=self.max_long_side,
+                target_config=self.target_config,
+                model_config=self.model_config,
             )
-            return {
-                "image": image,
-                "objectness": objectness,
-                "objectness_weight": objectness_weight,
-                "box_size": box_size,
-                "box_weight": box_weight,
-                "sample_id": sample.sample_id,
-                "dataset_id": str(sample.metadata.get("dataset_id", "unknown")),
-                "supervision_type": sample.supervision_type,
-                "sample": sample,
-            }
 
     return AutoPromptDataset
 
@@ -327,31 +469,12 @@ def _build_streaming_dataset_class():
             self.iteration = 0
 
         def _sample_to_item(self, sample: Sample) -> dict[str, Any]:
-            gray, box = _load_resized_gray_and_box(sample, self.max_long_side)
-            image = ir_prior_stack(gray, use_local_contrast=self.model_config.use_local_contrast, use_top_hat=self.model_config.use_top_hat)
-            prior_score = np.maximum.reduce(image)
-            objectness, box_size, box_weight, objectness_weight = _target_from_box(
-                box=box,
-                height=int(image.shape[1]),
-                width=int(image.shape[2]),
-                gaussian_sigma=float(self.target_config.get("gaussian_sigma", 2.0)),
-                positive_radius=int(self.target_config.get("positive_radius", 1)),
-                min_box_side=float(self.model_config.min_box_side),
-                hard_negative_weight=float(self.target_config.get("hard_negative_weight", 1.0)),
-                hard_negative_percentile=float(self.target_config.get("hard_negative_percentile", 95.0)),
-                prior_score=prior_score,
+            return _sample_to_training_item(
+                sample,
+                max_long_side=self.max_long_side,
+                target_config=self.target_config,
+                model_config=self.model_config,
             )
-            return {
-                "image": image,
-                "objectness": objectness,
-                "objectness_weight": objectness_weight,
-                "box_size": box_size,
-                "box_weight": box_weight,
-                "sample_id": sample.sample_id,
-                "dataset_id": str(sample.metadata.get("dataset_id", "unknown")),
-                "supervision_type": sample.supervision_type,
-                "sample": sample,
-            }
 
         def __iter__(self) -> Iterator[dict[str, Any]]:
             worker_info = torch.utils.data.get_worker_info()
@@ -468,6 +591,658 @@ def _autocast_context(torch: Any, *, enabled: bool) -> Any:
     return torch.cuda.amp.autocast(enabled=True)
 
 
+@dataclass
+class DenseGpuCache:
+    image: Any
+    objectness: Any
+    objectness_weight: Any
+    box_size: Any
+    box_weight: Any
+    sample_ids: list[str]
+    dataset_ids: list[str]
+    supervision_types: list[str]
+    samples: list[Sample]
+    cached_gb: float
+
+    def __len__(self) -> int:
+        return len(self.sample_ids)
+
+    def batch(self, indices: Any) -> dict[str, Any]:
+        index_list = [int(value) for value in indices.detach().cpu().tolist()]
+        return {
+            "image": self.image[indices],
+            "objectness": self.objectness[indices],
+            "objectness_weight": self.objectness_weight[indices],
+            "box_size": self.box_size[indices],
+            "box_weight": self.box_weight[indices],
+            "sample_ids": [self.sample_ids[index] for index in index_list],
+            "dataset_ids": [self.dataset_ids[index] for index in index_list],
+            "supervision_types": [self.supervision_types[index] for index in index_list],
+            "samples": [self.samples[index] for index in index_list],
+            "source": "gpu_cache",
+        }
+
+
+@dataclass
+class LightGrayCache:
+    grays: list[np.ndarray]
+    boxes: list[list[float]]
+    sample_ids: list[str]
+    dataset_ids: list[str]
+    supervision_types: list[str]
+    samples: list[Sample]
+    cached_gb: float
+
+    def __len__(self) -> int:
+        return len(self.sample_ids)
+
+
+def _torch_cache_dtype(torch: Any, name: str) -> Any:
+    text = str(name).strip().lower()
+    if text in {"fp16", "float16", "half"}:
+        return torch.float16
+    if text in {"bf16", "bfloat16"}:
+        return torch.bfloat16
+    return torch.float32
+
+
+def _tensor_gb(*tensors: Any) -> float:
+    total = 0
+    for tensor in tensors:
+        total += int(tensor.nelement()) * int(tensor.element_size())
+    return total / float(1024**3)
+
+
+def _ensure_cuda_cache_device(torch: Any, device: str) -> None:
+    if not str(device).startswith("cuda") or not torch.cuda.is_available():
+        raise RuntimeError("auto-prompt gpu/light cache requires a CUDA training device.")
+
+
+def _build_dense_gpu_cache(
+    *,
+    torch: Any,
+    config_path: Path,
+    dataset_configs: list[str],
+    train_cfg: dict[str, Any],
+    target_cfg: dict[str, Any],
+    model_cfg: AutoPromptModelConfig,
+    device: str,
+    cache_dtype: Any,
+) -> DenseGpuCache | None:
+    if not dataset_configs:
+        return None
+    _ensure_cuda_cache_device(torch, device)
+    max_samples = max(0, int(train_cfg.get("max_samples", 0)))
+    max_long_side = int(train_cfg.get("max_long_side", 512))
+    started_at = time.perf_counter()
+    items: list[dict[str, Any]] = []
+    for sample in _limit_samples(_iter_training_samples(config_path, dataset_configs=dataset_configs), limit=max_samples):
+        items.append(
+            _sample_to_training_item(sample, max_long_side=max_long_side, target_config=target_cfg, model_config=model_cfg)
+        )
+    if not items:
+        return None
+    max_h = max(int(item["image"].shape[1]) for item in items)
+    max_w = max(int(item["image"].shape[2]) for item in items)
+    image = torch.zeros((len(items), 3, max_h, max_w), device=device, dtype=cache_dtype)
+    objectness = torch.zeros((len(items), 1, max_h, max_w), device=device, dtype=cache_dtype)
+    objectness_weight = torch.zeros((len(items), 1, max_h, max_w), device=device, dtype=cache_dtype)
+    box_size = torch.zeros((len(items), 2, max_h, max_w), device=device, dtype=cache_dtype)
+    box_weight = torch.zeros((len(items), 1, max_h, max_w), device=device, dtype=cache_dtype)
+    for index, item in enumerate(items):
+        h, w = int(item["image"].shape[1]), int(item["image"].shape[2])
+        image[index, :, :h, :w] = torch.from_numpy(item["image"]).to(device=device, dtype=cache_dtype)
+        objectness[index, :, :h, :w] = torch.from_numpy(item["objectness"]).to(device=device, dtype=cache_dtype)
+        objectness_weight[index, :, :h, :w] = torch.from_numpy(item["objectness_weight"]).to(device=device, dtype=cache_dtype)
+        box_size[index, :, :h, :w] = torch.from_numpy(item["box_size"]).to(device=device, dtype=cache_dtype)
+        box_weight[index, :, :h, :w] = torch.from_numpy(item["box_weight"]).to(device=device, dtype=cache_dtype)
+    cached_gb = _tensor_gb(image, objectness, objectness_weight, box_size, box_weight)
+    elapsed = time.perf_counter() - started_at
+    dataset_counts: dict[str, int] = {}
+    for item in items:
+        key = str(item["dataset_id"])
+        dataset_counts[key] = dataset_counts.get(key, 0) + 1
+    print(
+        f"[cache-build] mode=dense_gpu samples={len(items)} shape={max_h}x{max_w} "
+        f"cached_gb={cached_gb:.2f} elapsed={elapsed:.1f}s datasets={dataset_counts}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return DenseGpuCache(
+        image=image,
+        objectness=objectness,
+        objectness_weight=objectness_weight,
+        box_size=box_size,
+        box_weight=box_weight,
+        sample_ids=[str(item["sample_id"]) for item in items],
+        dataset_ids=[str(item["dataset_id"]) for item in items],
+        supervision_types=[str(item["supervision_type"]) for item in items],
+        samples=[item["sample"] for item in items],
+        cached_gb=cached_gb,
+    )
+
+
+def _build_light_gray_cache(
+    *,
+    config_path: Path,
+    dataset_configs: list[str],
+    train_cfg: dict[str, Any],
+) -> LightGrayCache | None:
+    if not dataset_configs:
+        return None
+    max_long_side = int(train_cfg.get("max_long_side", 512))
+    max_samples = max(0, int(train_cfg.get("light_cache_max_samples", 0)))
+    started_at = time.perf_counter()
+    grays: list[np.ndarray] = []
+    boxes: list[list[float]] = []
+    sample_ids: list[str] = []
+    dataset_ids: list[str] = []
+    supervision_types: list[str] = []
+    samples: list[Sample] = []
+    for sample in _limit_samples(_iter_training_samples(config_path, dataset_configs=dataset_configs), limit=max_samples):
+        gray, box = _load_resized_gray_uint8_and_box(sample, max_long_side)
+        grays.append(gray)
+        boxes.append(box)
+        sample_ids.append(sample.sample_id)
+        dataset_ids.append(str(sample.metadata.get("dataset_id", "unknown")))
+        supervision_types.append(sample.supervision_type)
+        samples.append(sample)
+    if not grays:
+        return None
+    cached_gb = sum(int(gray.nbytes) for gray in grays) / float(1024**3)
+    elapsed = time.perf_counter() - started_at
+    dataset_counts: dict[str, int] = {}
+    for dataset_id in dataset_ids:
+        dataset_counts[dataset_id] = dataset_counts.get(dataset_id, 0) + 1
+    print(
+        f"[cache-build] mode=light_gray samples={len(grays)} cached_gb={cached_gb:.2f} "
+        f"elapsed={elapsed:.1f}s datasets={dataset_counts}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return LightGrayCache(
+        grays=grays,
+        boxes=boxes,
+        sample_ids=sample_ids,
+        dataset_ids=dataset_ids,
+        supervision_types=supervision_types,
+        samples=samples,
+        cached_gb=cached_gb,
+    )
+
+
+def _light_cache_batch(
+    cache: LightGrayCache,
+    indices: list[int],
+    *,
+    torch: Any,
+    F: Any,
+    device: str,
+    target_cfg: dict[str, Any],
+    model_cfg: AutoPromptModelConfig,
+) -> dict[str, Any]:
+    selected = [cache.grays[index] for index in indices]
+    max_h = max(int(gray.shape[0]) for gray in selected)
+    max_w = max(int(gray.shape[1]) for gray in selected)
+    if all(int(gray.shape[0]) == max_h and int(gray.shape[1]) == max_w for gray in selected):
+        gray_np = np.stack(selected).astype(np.float32, copy=False)[:, None]
+    else:
+        gray_np = np.zeros((len(indices), 1, max_h, max_w), dtype=np.float32)
+        for out_index, gray in enumerate(selected):
+            h, w = int(gray.shape[0]), int(gray.shape[1])
+            gray_np[out_index, 0, :h, :w] = gray.astype(np.float32)
+    boxes_np = np.zeros((len(indices), 4), dtype=np.float32)
+    for out_index, cache_index in enumerate(indices):
+        gray = selected[out_index]
+        h, w = int(gray.shape[0]), int(gray.shape[1])
+        boxes_np[out_index] = np.asarray(clamp_box_xyxy(cache.boxes[cache_index], width=w, height=h), dtype=np.float32)
+    gray_tensor = torch.from_numpy(gray_np).to(device=device, dtype=torch.float32, non_blocking=True)
+    boxes = torch.from_numpy(boxes_np).to(device=device, dtype=torch.float32, non_blocking=True)
+    image = _ir_prior_stack_batch(
+        torch,
+        F,
+        gray_tensor,
+        use_local_contrast=model_cfg.use_local_contrast,
+        use_top_hat=model_cfg.use_top_hat,
+    )
+    prior_score = image.max(dim=1).values
+    objectness, box_size, box_weight, objectness_weight = _target_from_box_batch(
+        torch,
+        boxes=boxes,
+        height=max_h,
+        width=max_w,
+        gaussian_sigma=float(target_cfg.get("gaussian_sigma", 2.0)),
+        positive_radius=int(target_cfg.get("positive_radius", 1)),
+        min_box_side=float(model_cfg.min_box_side),
+        hard_negative_weight=float(target_cfg.get("hard_negative_weight", 1.0)),
+        hard_negative_percentile=float(target_cfg.get("hard_negative_percentile", 95.0)),
+        prior_score=prior_score,
+    )
+    return {
+        "image": image,
+        "objectness": objectness,
+        "objectness_weight": objectness_weight,
+        "box_size": box_size,
+        "box_weight": box_weight,
+        "sample_ids": [cache.sample_ids[index] for index in indices],
+        "dataset_ids": [cache.dataset_ids[index] for index in indices],
+        "supervision_types": [cache.supervision_types[index] for index in indices],
+        "samples": [cache.samples[index] for index in indices],
+        "source": "light_cache",
+    }
+
+
+def _train_tensor_batch(
+    *,
+    torch: Any,
+    F: Any,
+    model: Any,
+    optimizer: Any,
+    scaler: Any | None,
+    batch: dict[str, Any],
+    train_cfg: dict[str, Any],
+    device: str,
+    non_blocking: bool,
+    use_amp: bool,
+    step_optimizer: bool = True,
+) -> tuple[float, float, float, float]:
+    step_started = time.perf_counter()
+    image = batch["image"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+    objectness = batch["objectness"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+    objectness_weight = batch["objectness_weight"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+    box_size = batch["box_size"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+    box_weight = batch["box_weight"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+    optimizer.zero_grad(set_to_none=True)
+    with _autocast_context(torch, enabled=use_amp):
+        outputs = model(image)
+        objectness_loss = F.binary_cross_entropy_with_logits(outputs["objectness_logits"], objectness, weight=objectness_weight)
+        raw_box_loss = F.smooth_l1_loss(outputs["box_size"], box_size, reduction="none")
+        weighted_box_loss = raw_box_loss * box_weight
+        box_loss = weighted_box_loss.sum() / box_weight.sum().clamp_min(1.0)
+        loss = objectness_loss + float(train_cfg.get("box_loss_weight", 0.1)) * box_loss
+    if scaler is not None:
+        scaler.scale(loss).backward()
+        if step_optimizer:
+            scaler.step(optimizer)
+            scaler.update()
+    else:
+        loss.backward()
+        if step_optimizer:
+            optimizer.step()
+    return (
+        float(loss.detach().cpu()),
+        float(objectness_loss.detach().cpu()),
+        float(box_loss.detach().cpu()),
+        (time.perf_counter() - step_started) * 1000.0,
+    )
+
+
+def _is_oom_error(exc: RuntimeError) -> bool:
+    text = str(exc).lower()
+    return "out of memory" in text or "cuda oom" in text
+
+
+def _autotune_light_batch_size(
+    *,
+    torch: Any,
+    F: Any,
+    model: Any,
+    optimizer: Any,
+    cache: LightGrayCache | None,
+    train_cfg: dict[str, Any],
+    target_cfg: dict[str, Any],
+    model_cfg: AutoPromptModelConfig,
+    device: str,
+    non_blocking: bool,
+    use_amp: bool,
+    requested: Any,
+    max_batch_size: int,
+) -> int:
+    if cache is None or len(cache) <= 0:
+        return 0
+    if str(requested).strip().lower() != "auto":
+        return max(1, int(requested))
+    if not str(device).startswith("cuda") or not torch.cuda.is_available():
+        return min(max(1, int(max_batch_size)), len(cache))
+    low, high, best = 1, min(max(1, int(max_batch_size)), len(cache)), 1
+    probe_indices = list(range(high))
+    while low <= high:
+        candidate = (low + high) // 2
+        try:
+            batch = _light_cache_batch(
+                cache,
+                probe_indices[:candidate],
+                torch=torch,
+                F=F,
+                device=device,
+                target_cfg=target_cfg,
+                model_cfg=model_cfg,
+            )
+            _train_tensor_batch(
+                torch=torch,
+                F=F,
+                model=model,
+                optimizer=optimizer,
+                scaler=None,
+                batch=batch,
+                train_cfg=train_cfg,
+                device=device,
+                non_blocking=non_blocking,
+                use_amp=use_amp,
+                step_optimizer=False,
+            )
+            optimizer.zero_grad(set_to_none=True)
+            best = candidate
+            low = candidate + 1
+        except RuntimeError as exc:
+            optimizer.zero_grad(set_to_none=True)
+            if _is_oom_error(exc):
+                torch.cuda.empty_cache()
+                high = candidate - 1
+                continue
+            raise
+    print(f"[batch-autotune] light_cache_batch_size={best} max_candidate={max_batch_size}", file=sys.stderr, flush=True)
+    return best
+
+
+def _sample_light_indices(cache_size: int, *, limit: int, rng: random.Random) -> list[int]:
+    if cache_size <= 0:
+        return []
+    if limit <= 0 or limit >= cache_size:
+        indices = list(range(cache_size))
+        rng.shuffle(indices)
+        return indices
+    return rng.sample(range(cache_size), limit)
+
+
+def _record_batch_counts(batch: dict[str, Any], counts: dict[str, int]) -> None:
+    for dataset_id in batch["dataset_ids"]:
+        counts[f"dataset:{dataset_id}"] = counts.get(f"dataset:{dataset_id}", 0) + 1
+    for supervision_type in batch["supervision_types"]:
+        key = f"supervision:{supervision_type}"
+        counts[key] = counts.get(key, 0) + 1
+
+
+def _finalize_auto_prompt_training(
+    *,
+    config_path: Path,
+    raw: dict[str, Any],
+    train_cfg: dict[str, Any],
+    target_cfg: dict[str, Any],
+    model_cfg: AutoPromptModelConfig,
+    model: Any,
+    requested_device: str,
+    device: str,
+    first_epoch_sample_count: int,
+    first_epoch_sample_counts: dict[str, int],
+    trained_sample_events: int,
+    heatmap_samples: list[Sample],
+    history: list[dict[str, float]],
+    extra_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    output_root = _resolve_path(config_path.parent, str(raw.get("output_root", "artifacts/auto_prompt")))
+    experiment_id = str(raw.get("experiment_id", "auto_prompt_v1"))
+    output_dir = output_root / experiment_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = output_dir / "checkpoint.pt"
+    metadata = {
+        "experiment_id": experiment_id,
+        "config_path": str(config_path),
+        "sample_count": first_epoch_sample_count,
+        "sample_counts": first_epoch_sample_counts,
+        "trained_sample_events": trained_sample_events,
+        "requested_device": requested_device,
+        "device": device,
+        "target": target_cfg,
+        "train": train_cfg,
+    }
+    if extra_metadata:
+        metadata.update(extra_metadata)
+    save_auto_prompt_checkpoint(checkpoint_path, model, config=model_cfg, metadata=metadata)
+    heatmap_limit = int(raw.get("heatmaps", {}).get("sample_limit", train_cfg.get("heatmap_sample_limit", 8))) if isinstance(raw.get("heatmaps", {}), dict) else 8
+    heatmap_outputs = _write_training_heatmaps(
+        output_dir=output_dir,
+        model=model,
+        samples=heatmap_samples,
+        model_config=model_cfg,
+        train_config=train_cfg,
+        device=device,
+        limit=heatmap_limit,
+        experiment_id=experiment_id,
+    )
+    summary = {
+        **metadata,
+        "output_dir": str(output_dir),
+        "checkpoint_path": str(checkpoint_path),
+        "model": asdict(model_cfg),
+        "history": history,
+        "final_loss": history[-1]["loss"],
+        "heatmaps": heatmap_outputs,
+    }
+    (output_dir / "train_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    return summary
+
+
+def _train_auto_prompt_cached_from_config(
+    *,
+    config_path: Path,
+    raw: dict[str, Any],
+    train_cfg: dict[str, Any],
+    target_cfg: dict[str, Any],
+    model_cfg: AutoPromptModelConfig,
+) -> dict[str, Any]:
+    torch, F, _, _ = _require_torch()
+    seed = int(train_cfg.get("seed", 42))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    requested_device = str(train_cfg.get("device", "cuda"))
+    device = requested_device
+    if requested_device.startswith("cuda") and not torch.cuda.is_available():
+        device = "cpu"
+    _ensure_cuda_cache_device(torch, device)
+
+    cache_dtype = _torch_cache_dtype(torch, str(train_cfg.get("cache_dtype", "float16")))
+    batch_size = max(1, int(train_cfg.get("batch_size", 1)))
+    light_requested_batch = train_cfg.get("light_cache_batch_size", train_cfg.get("stream_batch_size", "auto"))
+    light_batch_max = max(1, int(train_cfg.get("light_cache_batch_size_max", train_cfg.get("stream_batch_size_max", 1024))))
+    light_samples_per_epoch = max(0, int(train_cfg.get("light_cache_samples_per_epoch", train_cfg.get("stream_samples_per_epoch", 8192))))
+    non_blocking = _bool_setting(train_cfg.get("non_blocking"), default=True)
+    use_amp = _bool_setting(train_cfg.get("use_amp"), default=False) and str(device).startswith("cuda")
+    profile_interval_batches = max(0, int(train_cfg.get("profile_interval_batches", 0)))
+    max_steps_per_epoch = max(0, int(train_cfg.get("max_steps_per_epoch", 0)))
+
+    gpu_cache_configs = [str(item) for item in raw.get("gpu_cache_dataset_configs", [])]
+    light_cache_configs = [str(item) for item in raw.get("light_cache_dataset_configs", [])]
+    dense_cache = _build_dense_gpu_cache(
+        torch=torch,
+        config_path=config_path,
+        dataset_configs=gpu_cache_configs,
+        train_cfg=train_cfg,
+        target_cfg=target_cfg,
+        model_cfg=model_cfg,
+        device=device,
+        cache_dtype=cache_dtype,
+    )
+    light_cache = _build_light_gray_cache(config_path=config_path, dataset_configs=light_cache_configs, train_cfg=train_cfg)
+    if dense_cache is None and light_cache is None:
+        raise RuntimeError("No samples were found for auto prompt cached training.")
+
+    model = build_ir_prompt_net(model_cfg).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(train_cfg.get("learning_rate", 3e-4)),
+        weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
+    )
+    scaler = _cuda_grad_scaler(torch) if use_amp else None
+    light_batch_size = _autotune_light_batch_size(
+        torch=torch,
+        F=F,
+        model=model,
+        optimizer=optimizer,
+        cache=light_cache,
+        train_cfg=train_cfg,
+        target_cfg=target_cfg,
+        model_cfg=model_cfg,
+        device=device,
+        non_blocking=non_blocking,
+        use_amp=use_amp,
+        requested=light_requested_batch,
+        max_batch_size=light_batch_max,
+    )
+
+    epochs = max(1, int(train_cfg.get("epochs", 1)))
+    show_progress = bool(train_cfg.get("show_progress", True))
+    progress_backend = str(train_cfg.get("progress_backend", "auto"))
+    progress_mininterval = float(train_cfg.get("progress_update_interval_s", 1.0))
+    heatmap_limit = int(raw.get("heatmaps", {}).get("sample_limit", train_cfg.get("heatmap_sample_limit", 8))) if isinstance(raw.get("heatmaps", {}), dict) else 8
+    history: list[dict[str, float]] = []
+    first_epoch_sample_counts: dict[str, int] = {}
+    first_epoch_sample_count = 0
+    trained_sample_events = 0
+    heatmap_samples: list[Sample] = []
+    for epoch in range(epochs):
+        model.train()
+        loss_sum = 0.0
+        objectness_sum = 0.0
+        box_sum = 0.0
+        batch_count = 0
+        epoch_sample_count = 0
+        dense_batches = (len(dense_cache) + batch_size - 1) // batch_size if dense_cache is not None else 0
+        light_limit = min(light_samples_per_epoch, len(light_cache)) if light_cache is not None and light_samples_per_epoch > 0 else (len(light_cache) if light_cache else 0)
+        light_batches = (light_limit + max(1, light_batch_size) - 1) // max(1, light_batch_size) if light_cache is not None else 0
+        progress_total = max_steps_per_epoch if max_steps_per_epoch > 0 else dense_batches + light_batches
+        progress = _training_progress_bar(
+            desc=f"auto-prompt epoch {epoch + 1}/{epochs}",
+            total=progress_total,
+            enabled=show_progress,
+            backend=progress_backend,
+            mininterval=progress_mininterval,
+        )
+
+        def consume_batch(batch: dict[str, Any], *, source: str, data_wait_ms: float = 0.0) -> bool:
+            nonlocal loss_sum, objectness_sum, box_sum, batch_count, epoch_sample_count, trained_sample_events, heatmap_samples
+            if max_steps_per_epoch > 0 and batch_count >= max_steps_per_epoch:
+                return False
+            loss_value, objectness_value, box_value, step_ms = _train_tensor_batch(
+                torch=torch,
+                F=F,
+                model=model,
+                optimizer=optimizer,
+                scaler=scaler,
+                batch=batch,
+                train_cfg=train_cfg,
+                device=device,
+                non_blocking=non_blocking,
+                use_amp=use_amp,
+            )
+            batch_count += 1
+            batch_sample_count = len(batch["sample_ids"])
+            epoch_sample_count += batch_sample_count
+            trained_sample_events += batch_sample_count
+            loss_sum += loss_value
+            objectness_sum += objectness_value
+            box_sum += box_value
+            if epoch == 0:
+                _record_batch_counts(batch, first_epoch_sample_counts)
+            if len(heatmap_samples) < heatmap_limit:
+                needed = heatmap_limit - len(heatmap_samples)
+                heatmap_samples.extend(batch["samples"][:needed])
+            if profile_interval_batches > 0 and batch_count % profile_interval_batches == 0:
+                step_seconds = max(step_ms / 1000.0, 1e-9)
+                print(
+                    f"[train-profile] epoch={epoch + 1} batch={batch_count} source={source} "
+                    f"data_wait_ms={data_wait_ms:.1f} step_ms={step_ms:.1f} "
+                    f"samples_per_s={batch_sample_count / step_seconds:.2f} batch_size={batch_sample_count} amp={use_amp}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            if progress is not None:
+                progress.set_postfix(
+                    loss=f"{loss_value:.4f}",
+                    objectness=f"{objectness_value:.4f}",
+                    box=f"{box_value:.4f}",
+                    lr=f"{optimizer.param_groups[0]['lr']:.2e}",
+                    source=source,
+                )
+                progress.update(1)
+            return True
+
+        try:
+            if dense_cache is not None:
+                order = torch.randperm(len(dense_cache), device=device)
+                for start in range(0, len(dense_cache), batch_size):
+                    if not consume_batch(dense_cache.batch(order[start : start + batch_size]), source="gpu_cache"):
+                        break
+            if light_cache is not None and (max_steps_per_epoch <= 0 or batch_count < max_steps_per_epoch):
+                rng = random.Random(seed + epoch)
+                light_indices = _sample_light_indices(len(light_cache), limit=light_samples_per_epoch, rng=rng)
+                for start in range(0, len(light_indices), max(1, light_batch_size)):
+                    batch_indices = light_indices[start : start + max(1, light_batch_size)]
+                    data_started = time.perf_counter()
+                    batch = _light_cache_batch(
+                        light_cache,
+                        batch_indices,
+                        torch=torch,
+                        F=F,
+                        device=device,
+                        target_cfg=target_cfg,
+                        model_cfg=model_cfg,
+                    )
+                    data_wait_ms = (time.perf_counter() - data_started) * 1000.0
+                    if not consume_batch(batch, source="light_cache", data_wait_ms=data_wait_ms):
+                        break
+        finally:
+            if progress is not None:
+                progress.close()
+        if batch_count <= 0:
+            raise RuntimeError("No samples with bbox_tight/bbox_loose were found for auto prompt training.")
+        if epoch == 0:
+            first_epoch_sample_count = epoch_sample_count
+            print(
+                f"[train-mix] epoch=1 gpu_cache_batches={dense_batches} light_cache_batches={light_batches} "
+                f"usable={first_epoch_sample_count}",
+                file=sys.stderr,
+                flush=True,
+            )
+        denom = max(1, batch_count)
+        history.append(
+            {
+                "epoch": float(epoch + 1),
+                "loss": loss_sum / denom,
+                "objectness_loss": objectness_sum / denom,
+                "box_loss": box_sum / denom,
+            }
+        )
+
+    return _finalize_auto_prompt_training(
+        config_path=config_path,
+        raw=raw,
+        train_cfg=train_cfg,
+        target_cfg=target_cfg,
+        model_cfg=model_cfg,
+        model=model,
+        requested_device=requested_device,
+        device=device,
+        first_epoch_sample_count=first_epoch_sample_count,
+        first_epoch_sample_counts=first_epoch_sample_counts,
+        trained_sample_events=trained_sample_events,
+        heatmap_samples=heatmap_samples,
+        history=history,
+        extra_metadata={
+            "cache": {
+                "mode": "mixed_gpu_light",
+                "dense_gpu_samples": len(dense_cache) if dense_cache is not None else 0,
+                "dense_gpu_cached_gb": dense_cache.cached_gb if dense_cache is not None else 0.0,
+                "light_cache_samples": len(light_cache) if light_cache is not None else 0,
+                "light_cache_cached_gb": light_cache.cached_gb if light_cache is not None else 0.0,
+                "light_cache_batch_size": light_batch_size,
+                "light_cache_samples_per_epoch": light_samples_per_epoch,
+            }
+        },
+    )
+
+
 def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
     torch, F, DataLoader, _ = _require_torch()
     config_path = Path(config_path).resolve()
@@ -475,6 +1250,14 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
     train_cfg = dict(raw.get("train", {}))
     target_cfg = dict(raw.get("target", {}))
     model_cfg = AutoPromptModelConfig(**dict(raw.get("model", {})))
+    if raw.get("gpu_cache_dataset_configs") or raw.get("light_cache_dataset_configs"):
+        return _train_auto_prompt_cached_from_config(
+            config_path=config_path,
+            raw=raw,
+            train_cfg=train_cfg,
+            target_cfg=target_cfg,
+            model_cfg=model_cfg,
+        )
     max_samples = int(train_cfg.get("max_samples", 0))
     max_steps_per_epoch = max(0, int(train_cfg.get("max_steps_per_epoch", 0)))
     seed = int(train_cfg.get("seed", 42))

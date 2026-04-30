@@ -119,6 +119,16 @@ class AutoPromptRunnerTests(unittest.TestCase):
                             "--train-amp",
                             "--train-profile-interval",
                             "200",
+                            "--train-gpu-cache-datasets",
+                            "nuaa_sirst",
+                            "--train-cache-dtype",
+                            "float16",
+                            "--train-rbgt-samples-per-epoch",
+                            "8192",
+                            "--train-rbgt-batch-size",
+                            "auto",
+                            "--train-rbgt-batch-size-max",
+                            "1024",
                         ]
                     ),
                     0,
@@ -155,6 +165,11 @@ class AutoPromptRunnerTests(unittest.TestCase):
             self.assertEqual(train_config["train"]["shuffle_buffer_size"], 512)
             self.assertTrue(train_config["train"]["use_amp"])
             self.assertEqual(train_config["train"]["profile_interval_batches"], 200)
+            self.assertEqual(train_config["train"]["cache_dtype"], "float16")
+            self.assertEqual(train_config["train"]["light_cache_samples_per_epoch"], 8192)
+            self.assertEqual(train_config["train"]["light_cache_batch_size"], "auto")
+            self.assertEqual(train_config["train"]["light_cache_batch_size_max"], 1024)
+            self.assertEqual(train_config["gpu_cache_dataset_configs"], [train_config["dataset_configs"][0]])
             first_run_config = yaml.safe_load(Path(manifest["records"][0]["config_path"]).read_text(encoding="utf-8"))
             self.assertEqual(first_run_config["method"]["prompt_checkpoint"], manifest["train"]["checkpoint_path"])
             self.assertEqual(first_run_config["method"]["prompt_top_k"], 5)

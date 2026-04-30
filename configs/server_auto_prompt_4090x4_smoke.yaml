@@ -14,6 +14,8 @@ auto_prompt:
   train_gpu: "0"
   eval_gpus: ["1", "6", "7", "0"]
   train_datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k"]
+  gpu_cache_datasets: []
+  light_cache_datasets: []
   eval_suites: ["auto_prompt"]
   checkpoint_name: "checkpoint.pt"
   top_k: 5
@@ -179,7 +181,7 @@ datasets:
       root: "datasets/RBGT-Tiny"
       modality: "ir"
       images_dir: "image"
-      annotations_dir: "annotations_coco"
+      annotations_dir: "annotations_voc"
       mask_mode: "auto"
       class_map: {}
 

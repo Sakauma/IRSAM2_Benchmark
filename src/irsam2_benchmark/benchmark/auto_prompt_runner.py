@@ -125,12 +125,20 @@ def _apply_train_cli_overrides(auto_config: Dict[str, Any], args: argparse.Names
         "prefetch_factor": args.train_prefetch_factor,
         "shuffle_buffer_size": args.train_shuffle_buffer_size,
         "profile_interval_batches": args.train_profile_interval,
+        "cache_dtype": args.train_cache_dtype,
+        "light_cache_samples_per_epoch": args.train_rbgt_samples_per_epoch,
+        "light_cache_batch_size": args.train_rbgt_batch_size,
+        "light_cache_batch_size_max": args.train_rbgt_batch_size_max,
     }
     for key, value in overrides.items():
         if value is not None:
             train_config[key] = value
     if args.train_amp:
         train_config["use_amp"] = True
+    if args.train_gpu_cache_datasets:
+        auto_config["gpu_cache_datasets"] = [item.strip() for item in args.train_gpu_cache_datasets.split(",") if item.strip()]
+    if args.train_light_cache_datasets:
+        auto_config["light_cache_datasets"] = [item.strip() for item in args.train_light_cache_datasets.split(",") if item.strip()]
 
 
 def _ensure_auto_methods(base_matrix: Dict[str, Any]) -> None:
@@ -219,6 +227,10 @@ def _write_training_configs(
         raise RuntimeError("Auto prompt runner requires at least one SAM2 checkpoint entry for dataset config generation.")
     checkpoint = checkpoints[0]
     dataset_config_paths: list[str] = []
+    gpu_cache_dataset_ids = {str(item) for item in auto_config.get("gpu_cache_datasets", [])}
+    light_cache_dataset_ids = {str(item) for item in auto_config.get("light_cache_datasets", [])}
+    gpu_cache_dataset_config_paths: list[str] = []
+    light_cache_dataset_config_paths: list[str] = []
     for dataset_id in auto_config["train_datasets"]:
         dataset_payload = _training_dataset_config(
             base_matrix=base_matrix,
@@ -230,6 +242,10 @@ def _write_training_configs(
         dataset_config_path = dataset_config_dir / f"{dataset_id}.yaml"
         fr._write_yaml(dataset_config_path, dataset_payload)
         dataset_config_paths.append(str(dataset_config_path))
+        if str(dataset_id) in gpu_cache_dataset_ids:
+            gpu_cache_dataset_config_paths.append(str(dataset_config_path))
+        if str(dataset_id) in light_cache_dataset_ids:
+            light_cache_dataset_config_paths.append(str(dataset_config_path))
 
     train_settings = copy.deepcopy(auto_config.get("train", {}))
     train_payload = {
@@ -243,6 +259,10 @@ def _write_training_configs(
         "source_config": str(config_path.resolve()),
         "source_config_sha256": sha256_file(config_path),
     }
+    if gpu_cache_dataset_config_paths:
+        train_payload["gpu_cache_dataset_configs"] = gpu_cache_dataset_config_paths
+    if light_cache_dataset_config_paths:
+        train_payload["light_cache_dataset_configs"] = light_cache_dataset_config_paths
     if raw.get("auto_prompt_training"):
         train_payload = fr._deep_merge(train_payload, copy.deepcopy(raw["auto_prompt_training"]))
     train_payload.setdefault("train", {})
@@ -815,6 +835,12 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument("--train-shuffle-buffer-size", type=int, help="Override auto-prompt streaming shuffle_buffer_size.")
     parser.add_argument("--train-amp", action="store_true", help="Enable CUDA AMP for auto-prompt training.")
     parser.add_argument("--train-profile-interval", type=int, help="Print one training throughput profile line every N batches.")
+    parser.add_argument("--train-gpu-cache-datasets", help="Comma-separated train dataset ids to cache as dense tensors on the training GPU.")
+    parser.add_argument("--train-light-cache-datasets", help="Comma-separated train dataset ids to cache as grayscale+box lightweight samples.")
+    parser.add_argument("--train-cache-dtype", choices=("float16", "float32", "bfloat16"), help="Tensor dtype for dense GPU cache.")
+    parser.add_argument("--train-rbgt-samples-per-epoch", type=int, help="Number of lightweight RBGT samples to draw per epoch.")
+    parser.add_argument("--train-rbgt-batch-size", help="Lightweight RBGT batch size, or 'auto' to probe the largest safe value.")
+    parser.add_argument("--train-rbgt-batch-size-max", type=int, help="Maximum candidate batch size for lightweight RBGT auto tuning.")
     parser.add_argument(
         "--preflight-mode",
         choices=PREFLIGHT_MODES,
