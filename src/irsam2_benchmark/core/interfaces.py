@@ -100,5 +100,5 @@ class DatasetAdapterProtocol(Protocol):
     def load(self, config: "AppConfig") -> Any:
         ...
 
-    def iter_samples(self, config: "AppConfig") -> Iterable["Sample"]:
+    def iter_samples(self, config: "AppConfig", *, shard_id: int = 0, num_shards: int = 1) -> Iterable["Sample"]:
         ...

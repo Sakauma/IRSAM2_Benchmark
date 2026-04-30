@@ -349,7 +349,7 @@ class RBGTTinyAdapterTests(unittest.TestCase):
             config = load_app_config(config_path)
             adapter = build_dataset_adapter(config)
 
-            def guarded_xml_files(ann_dir):
+            def guarded_xml_files(ann_dir, *, shard_id=0, num_shards=1):
                 yield xml_path
                 raise AssertionError("iter_samples consumed a second XML before yielding the first sample")
 
@@ -396,6 +396,44 @@ class RBGTTinyAdapterTests(unittest.TestCase):
 
             self.assertEqual(sample.image_path, image_path)
             self.assertEqual(sample.bbox_tight, [1.0, 2.0, 4.0, 6.0])
+
+    def test_rbgt_voc_iter_samples_shards_xml_without_overlap(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_dir = root / "image" / "DJI_0001" / "01"
+            ann_dir = root / "annotations_voc" / "DJI_0001" / "01"
+            image_dir.mkdir(parents=True)
+            ann_dir.mkdir(parents=True)
+            for index in range(5):
+                name = f"{index:05d}"
+                Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(image_dir / f"{name}.jpg")
+                (ann_dir / f"{name}.xml").write_text(
+                    f"""
+<annotation>
+  <filename>DJI_0001/01/{name}.jpg</filename>
+  <size><width>8</width><height>8</height></size>
+  <object>
+    <name>target</name>
+    <bndbox><xmin>1</xmin><ymin>2</ymin><xmax>4</xmax><ymax>6</ymax></bndbox>
+  </object>
+</annotation>
+""".strip(),
+                    encoding="utf-8",
+                )
+            config_path = root / "config.json"
+            _write_rbgt_config(config_path, annotations_dir="annotations_voc", mask_mode="bbox")
+            config = load_app_config(config_path)
+            adapter = build_dataset_adapter(config)
+
+            shard0 = list(adapter.iter_samples(config, shard_id=0, num_shards=2))
+            shard1 = list(adapter.iter_samples(config, shard_id=1, num_shards=2))
+            ids0 = {sample.sample_id for sample in shard0}
+            ids1 = {sample.sample_id for sample in shard1}
+
+            self.assertEqual(len(shard0), 3)
+            self.assertEqual(len(shard1), 2)
+            self.assertFalse(ids0 & ids1)
+            self.assertEqual(len(ids0 | ids1), 5)
 
     def test_rbgt_adapter_reads_voc_segmentation_as_lazy_polygon(self):
         with tempfile.TemporaryDirectory() as temp_dir:

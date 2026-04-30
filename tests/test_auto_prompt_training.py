@@ -164,7 +164,7 @@ class AutoPromptTrainingTests(unittest.TestCase):
                 self.yielded = 0
                 self.to_called_before_first_yield = None
 
-            def iter_samples(self, config):
+            def iter_samples(self, config, *, shard_id=0, num_shards=1):
                 for index in range(100):
                     if index == 0:
                         self.to_called_before_first_yield = model_state["to_called"]
@@ -247,6 +247,104 @@ class AutoPromptTrainingTests(unittest.TestCase):
             self.assertTrue(model_state["to_called"])
             self.assertEqual(summary["sample_count"], 1)
             self.assertEqual(summary["trained_sample_events"], 1)
+
+    def test_iter_training_samples_passes_shard_to_adapter(self):
+        class FakeShardAdapter:
+            adapter_name = "fake_shard"
+            notes = ""
+
+            def __init__(self, image_path: Path) -> None:
+                self.image_path = image_path
+                self.calls = []
+
+            def iter_samples(self, config, *, shard_id=0, num_shards=1):
+                self.calls.append((shard_id, num_shards))
+                for index in range(6):
+                    if index % num_shards != shard_id:
+                        continue
+                    yield Sample(
+                        image_path=self.image_path,
+                        sample_id=f"sample_{index}",
+                        frame_id=f"frame_{index}",
+                        sequence_id="seq",
+                        frame_index=index,
+                        temporal_key=f"frame_{index}",
+                        width=16,
+                        height=16,
+                        category="target",
+                        target_scale="small",
+                        device_source="synthetic",
+                        annotation_protocol_flag="bbox",
+                        supervision_type="bbox",
+                        bbox_tight=[6.0, 6.0, 8.0, 8.0],
+                        bbox_loose=[5.0, 5.0, 9.0, 9.0],
+                        point_prompt=[7.0, 7.0],
+                    )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dataset_config = _write_dataset(root)
+            image_path = root / "data" / "images" / "0.png"
+            train_config = root / "auto_prompt_stream.yaml"
+            train_config.write_text(
+                yaml.safe_dump(
+                    {
+                        "experiment_id": "unit_stream",
+                        "output_root": str(root / "outputs"),
+                        "dataset_configs": [str(dataset_config)],
+                        "train": {"device": "cpu"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fake_adapter = FakeShardAdapter(image_path)
+
+            with patch.object(auto_prompt_module, "build_dataset_adapter", return_value=fake_adapter):
+                samples = list(auto_prompt_module._iter_training_samples(train_config, shard_id=1, num_shards=3))
+
+            self.assertEqual(fake_adapter.calls, [(1, 3)])
+            self.assertEqual([sample.sample_id for sample in samples], ["sample_1", "sample_4"])
+
+    def test_train_auto_prompt_loader_options_are_safe_without_workers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dataset_config = _write_dataset(root)
+            train_config = root / "auto_prompt_loader_options.yaml"
+            train_config.write_text(
+                yaml.safe_dump(
+                    {
+                        "experiment_id": "unit_loader_options",
+                        "output_root": str(root / "outputs"),
+                        "dataset_configs": [str(dataset_config)],
+                        "train": {
+                            "device": "cpu",
+                            "epochs": 1,
+                            "batch_size": 1,
+                            "learning_rate": 0.001,
+                            "max_long_side": 16,
+                            "max_samples": 1,
+                            "num_workers": 0,
+                            "prefetch_factor": 4,
+                            "persistent_workers": True,
+                            "pin_memory": False,
+                            "use_amp": True,
+                            "profile_interval_batches": 1,
+                            "show_progress": False,
+                        },
+                        "model": {"hidden_channels": 4},
+                        "target": {"gaussian_sigma": 1.0, "positive_radius": 1},
+                        "heatmaps": {"sample_limit": 0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                summary = train_auto_prompt_from_config(train_config)
+
+            self.assertEqual(summary["sample_count"], 1)
+            self.assertIn("[train-profile] epoch=1 batch=1", stderr.getvalue())
 
 
 if __name__ == "__main__":

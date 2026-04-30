@@ -1,7 +1,16 @@
 # SAM2-IR-QD M1: learned IR auto prompt training + E2 evaluation.
 # Recommended server launch:
 #   tmux new -s irsam2_auto_prompt
-#   python scripts/run_4090x4_auto_prompt.py --config configs/server_auto_prompt_4090x4.local.yaml
+#   PYTHONPATH=src python scripts/run_4090x4_auto_prompt.py \
+#     --config configs/server_auto_prompt_4090x4.local.yaml \
+#     --stop-on-error \
+#     --preflight-mode fast \
+#     --train-batch-size 16 \
+#     --train-num-workers 4 \
+#     --train-prefetch-factor 4 \
+#     --train-shuffle-buffer-size 512 \
+#     --train-amp \
+#     --train-profile-interval 200
 
 benchmark:
   suite_name: "server_auto_prompt_4090x4"

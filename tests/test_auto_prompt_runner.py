@@ -108,6 +108,17 @@ class AutoPromptRunnerTests(unittest.TestCase):
                             "--no-analysis",
                             "--python-bin",
                             "python",
+                            "--train-batch-size",
+                            "16",
+                            "--train-num-workers",
+                            "4",
+                            "--train-prefetch-factor",
+                            "4",
+                            "--train-shuffle-buffer-size",
+                            "512",
+                            "--train-amp",
+                            "--train-profile-interval",
+                            "200",
                         ]
                     ),
                     0,
@@ -138,6 +149,12 @@ class AutoPromptRunnerTests(unittest.TestCase):
             self.assertEqual(len(train_config["dataset_configs"]), 1)
             self.assertTrue(train_config["train"]["show_progress"])
             self.assertEqual(train_config["train"]["progress_backend"], "tqdm")
+            self.assertEqual(train_config["train"]["batch_size"], 16)
+            self.assertEqual(train_config["train"]["num_workers"], 4)
+            self.assertEqual(train_config["train"]["prefetch_factor"], 4)
+            self.assertEqual(train_config["train"]["shuffle_buffer_size"], 512)
+            self.assertTrue(train_config["train"]["use_amp"])
+            self.assertEqual(train_config["train"]["profile_interval_batches"], 200)
             first_run_config = yaml.safe_load(Path(manifest["records"][0]["config_path"]).read_text(encoding="utf-8"))
             self.assertEqual(first_run_config["method"]["prompt_checkpoint"], manifest["train"]["checkpoint_path"])
             self.assertEqual(first_run_config["method"]["prompt_top_k"], 5)

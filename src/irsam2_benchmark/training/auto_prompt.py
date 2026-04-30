@@ -4,6 +4,7 @@ import json
 import random
 import sys
 import time
+from contextlib import nullcontext
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Iterable, Iterator
@@ -75,12 +76,28 @@ def _load_training_samples(config_path: Path, *, max_samples: int = 0) -> tuple[
     return samples, counts
 
 
-def _iter_training_samples(config_path: Path) -> Iterator[Sample]:
+def _bool_setting(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _iter_training_samples(config_path: Path, *, shard_id: int = 0, num_shards: int = 1) -> Iterator[Sample]:
     raw = _read_yaml(config_path)
     dataset_configs = raw.get("dataset_configs", [])
     if not isinstance(dataset_configs, list) or not dataset_configs:
         raise ValueError("auto prompt training config requires a non-empty dataset_configs list.")
 
+    shard_text = f" shard={shard_id}/{num_shards}" if num_shards > 1 else ""
     for item in dataset_configs:
         dataset_config = _resolve_path(config_path.parent, str(item))
         app_config = load_app_config(dataset_config)
@@ -89,14 +106,14 @@ def _iter_training_samples(config_path: Path) -> Iterator[Sample]:
         print(
             f"[train-load] stream_start dataset={app_config.dataset.dataset_id} "
             f"adapter={adapter.adapter_name} max_samples={app_config.runtime.max_samples} "
-            f"max_images={app_config.runtime.max_images}",
+            f"max_images={app_config.runtime.max_images}{shard_text}",
             file=sys.stderr,
             flush=True,
         )
         loaded_count = 0
         usable_count = 0
         first_usable_reported = False
-        for sample in adapter.iter_samples(app_config):
+        for sample in adapter.iter_samples(app_config, shard_id=shard_id, num_shards=num_shards):
             loaded_count += 1
             if sample.bbox_tight is None and sample.bbox_loose is None:
                 continue
@@ -106,7 +123,7 @@ def _iter_training_samples(config_path: Path) -> Iterator[Sample]:
                 elapsed = time.perf_counter() - started_at
                 print(
                     f"[train-load] first_sample dataset={app_config.dataset.dataset_id} "
-                    f"elapsed={elapsed:.1f}s sample_id={sample.sample_id}",
+                    f"elapsed={elapsed:.1f}s sample_id={sample.sample_id}{shard_text}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -115,7 +132,7 @@ def _iter_training_samples(config_path: Path) -> Iterator[Sample]:
         elapsed = time.perf_counter() - started_at
         print(
             f"[train-load] stream_done dataset={app_config.dataset.dataset_id} "
-            f"loaded={loaded_count} usable={usable_count} elapsed={elapsed:.1f}s",
+            f"loaded={loaded_count} usable={usable_count} elapsed={elapsed:.1f}s{shard_text}",
             file=sys.stderr,
             flush=True,
         )
@@ -340,15 +357,21 @@ def _build_streaming_dataset_class():
             worker_info = torch.utils.data.get_worker_info()
             iteration = self.iteration
             self.iteration += 1
-            rng = random.Random(self.seed + iteration)
+            shard_id = int(worker_info.id) if worker_info is not None else 0
+            num_shards = int(worker_info.num_workers) if worker_info is not None else 1
+            rng = random.Random(self.seed + iteration * max(1, num_shards) + shard_id)
+            sample_limit = self.max_samples
+            if sample_limit > 0 and num_shards > 1:
+                sample_limit = (sample_limit + num_shards - 1) // num_shards
             sample_iterable = _shuffle_buffer(
-                _limit_samples(_iter_training_samples(self.config_path), limit=self.max_samples),
+                _limit_samples(
+                    _iter_training_samples(self.config_path, shard_id=shard_id, num_shards=num_shards),
+                    limit=sample_limit,
+                ),
                 buffer_size=self.shuffle_buffer_size,
                 rng=rng,
             )
-            for index, sample in enumerate(sample_iterable):
-                if worker_info is not None and index % worker_info.num_workers != worker_info.id:
-                    continue
+            for sample in sample_iterable:
                 yield self._sample_to_item(sample)
 
     return StreamingAutoPromptDataset
@@ -428,6 +451,23 @@ def _training_progress_bar(
     )
 
 
+def _cuda_grad_scaler(torch: Any) -> Any:
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        try:
+            return torch.amp.GradScaler("cuda")
+        except TypeError:
+            return torch.amp.GradScaler(enabled=True)
+    return torch.cuda.amp.GradScaler()
+
+
+def _autocast_context(torch: Any, *, enabled: bool) -> Any:
+    if not enabled:
+        return nullcontext()
+    if hasattr(torch, "autocast"):
+        return torch.autocast(device_type="cuda", dtype=torch.float16, enabled=True)
+    return torch.cuda.amp.autocast(enabled=True)
+
+
 def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
     torch, F, DataLoader, _ = _require_torch()
     config_path = Path(config_path).resolve()
@@ -448,6 +488,13 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
         device = "cpu"
 
     batch_size = max(1, int(train_cfg.get("batch_size", 1)))
+    num_workers = max(0, int(train_cfg.get("num_workers", 0)))
+    pin_memory = _bool_setting(train_cfg.get("pin_memory"), default=device.startswith("cuda"))
+    prefetch_factor = max(1, int(train_cfg.get("prefetch_factor", 2)))
+    persistent_workers = _bool_setting(train_cfg.get("persistent_workers"), default=num_workers > 0)
+    non_blocking = _bool_setting(train_cfg.get("non_blocking"), default=pin_memory and device.startswith("cuda"))
+    use_amp = _bool_setting(train_cfg.get("use_amp"), default=False) and device.startswith("cuda")
+    profile_interval_batches = max(0, int(train_cfg.get("profile_interval_batches", 0)))
     heatmap_limit = int(raw.get("heatmaps", {}).get("sample_limit", train_cfg.get("heatmap_sample_limit", 8))) if isinstance(raw.get("heatmaps", {}), dict) else 8
     dataset_cls = _build_streaming_dataset_class()
     dataset = dataset_cls(
@@ -459,16 +506,21 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
         max_samples=max_samples,
         seed=seed,
     )
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=max(0, int(train_cfg.get("num_workers", 0))),
-        collate_fn=_collate_batch,
-    )
+    loader_kwargs = {
+        "batch_size": batch_size,
+        "shuffle": False,
+        "num_workers": num_workers,
+        "collate_fn": _collate_batch,
+        "pin_memory": pin_memory,
+    }
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+        loader_kwargs["persistent_workers"] = persistent_workers
+    loader = DataLoader(dataset, **loader_kwargs)
 
     model: Any | None = None
     optimizer: Any | None = None
+    scaler: Any | None = None
     epochs = max(1, int(train_cfg.get("epochs", 1)))
     show_progress = bool(train_cfg.get("show_progress", True))
     progress_backend = str(train_cfg.get("progress_backend", "auto"))
@@ -498,6 +550,7 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
         )
         try:
             loader_iter = iter(loader)
+            data_wait_started = time.perf_counter()
             while True:
                 if max_steps_per_epoch > 0 and batch_count >= max_steps_per_epoch:
                     break
@@ -505,6 +558,8 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
                     batch = next(loader_iter)
                 except StopIteration:
                     break
+                batch_ready_at = time.perf_counter()
+                data_wait_ms = (batch_ready_at - data_wait_started) * 1000.0
                 if model is None:
                     model = build_ir_prompt_net(model_cfg).to(device)
                     optimizer = torch.optim.AdamW(
@@ -512,23 +567,33 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
                         lr=float(train_cfg.get("learning_rate", 3e-4)),
                         weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
                     )
+                    if use_amp:
+                        scaler = _cuda_grad_scaler(torch)
                 model.train()
                 if optimizer is None:
                     raise RuntimeError("Optimizer was not initialized after model creation.")
-                image = batch["image"].to(device=device, dtype=torch.float32)
-                objectness = batch["objectness"].to(device=device, dtype=torch.float32)
-                objectness_weight = batch["objectness_weight"].to(device=device, dtype=torch.float32)
-                box_size = batch["box_size"].to(device=device, dtype=torch.float32)
-                box_weight = batch["box_weight"].to(device=device, dtype=torch.float32)
-                outputs = model(image)
-                objectness_loss = F.binary_cross_entropy_with_logits(outputs["objectness_logits"], objectness, weight=objectness_weight)
-                raw_box_loss = F.smooth_l1_loss(outputs["box_size"], box_size, reduction="none")
-                weighted_box_loss = raw_box_loss * box_weight
-                box_loss = weighted_box_loss.sum() / box_weight.sum().clamp_min(1.0)
-                loss = objectness_loss + float(train_cfg.get("box_loss_weight", 0.1)) * box_loss
+                step_started = time.perf_counter()
+                image = batch["image"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+                objectness = batch["objectness"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+                objectness_weight = batch["objectness_weight"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+                box_size = batch["box_size"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+                box_weight = batch["box_weight"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
                 optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                optimizer.step()
+                with _autocast_context(torch, enabled=use_amp):
+                    outputs = model(image)
+                    objectness_loss = F.binary_cross_entropy_with_logits(outputs["objectness_logits"], objectness, weight=objectness_weight)
+                    raw_box_loss = F.smooth_l1_loss(outputs["box_size"], box_size, reduction="none")
+                    weighted_box_loss = raw_box_loss * box_weight
+                    box_loss = weighted_box_loss.sum() / box_weight.sum().clamp_min(1.0)
+                    loss = objectness_loss + float(train_cfg.get("box_loss_weight", 0.1)) * box_loss
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    optimizer.step()
+                step_ms = (time.perf_counter() - step_started) * 1000.0
 
                 loss_value = float(loss.detach().cpu())
                 objectness_value = float(objectness_loss.detach().cpu())
@@ -549,6 +614,16 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
                 if len(heatmap_samples) < heatmap_limit:
                     needed = heatmap_limit - len(heatmap_samples)
                     heatmap_samples.extend(batch["samples"][:needed])
+                if profile_interval_batches > 0 and batch_count % profile_interval_batches == 0:
+                    step_seconds = max(step_ms / 1000.0, 1e-9)
+                    print(
+                        f"[train-profile] epoch={epoch + 1} batch={batch_count} "
+                        f"data_wait_ms={data_wait_ms:.1f} step_ms={step_ms:.1f} "
+                        f"samples_per_s={batch_sample_count / step_seconds:.2f} "
+                        f"batch_size={batch_sample_count} num_workers={num_workers} amp={use_amp}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
                 if progress is not None:
                     progress.set_postfix(
                         loss=f"{loss_value:.4f}",
@@ -557,6 +632,7 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
                         lr=f"{optimizer.param_groups[0]['lr']:.2e}",
                     )
                     progress.update(1)
+                data_wait_started = time.perf_counter()
         finally:
             if progress is not None:
                 progress.close()

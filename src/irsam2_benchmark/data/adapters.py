@@ -76,8 +76,10 @@ class DatasetAdapter:
     def load_samples(self, config: AppConfig) -> List[Sample]:
         raise NotImplementedError
 
-    def iter_samples(self, config: AppConfig) -> Iterable[Sample]:
-        yield from self.load_samples(config)
+    def iter_samples(self, config: AppConfig, *, shard_id: int = 0, num_shards: int = 1) -> Iterable[Sample]:
+        for index, sample in enumerate(self.load_samples(config)):
+            if _shard_matches(index, shard_id=shard_id, num_shards=num_shards):
+                yield sample
 
 
 def _dataset_root(config: AppConfig) -> Path:
@@ -119,9 +121,16 @@ def _sorted_files(root: Path, extensions: Sequence[str]) -> List[Path]:
     return sorted([path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in lower])
 
 
-def _iter_files_depth_first(root: Path, *, suffix: str) -> Iterator[Path]:
+def _shard_matches(index: int, *, shard_id: int, num_shards: int) -> bool:
+    if num_shards <= 1:
+        return True
+    return index % max(1, int(num_shards)) == int(shard_id)
+
+
+def _iter_files_depth_first(root: Path, *, suffix: str, shard_id: int = 0, num_shards: int = 1) -> Iterator[Path]:
     stack = [root]
     suffix = suffix.lower()
+    file_index = 0
     while stack:
         current = stack.pop()
         try:
@@ -133,7 +142,9 @@ def _iter_files_depth_first(root: Path, *, suffix: str) -> Iterator[Path]:
             if entry.is_dir():
                 directories.append(entry)
             elif entry.is_file() and entry.suffix.lower() == suffix:
-                yield entry
+                if _shard_matches(file_index, shard_id=shard_id, num_shards=num_shards):
+                    yield entry
+                file_index += 1
         stack.extend(reversed(directories))
 
 
@@ -620,17 +631,25 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
             }
         return None
 
-    def _iter_voc_annotation_files(self, ann_dir: Path) -> Iterator[Path]:
-        yield from _iter_files_depth_first(ann_dir, suffix=".xml")
+    def _iter_voc_annotation_files(self, ann_dir: Path, *, shard_id: int = 0, num_shards: int = 1) -> Iterator[Path]:
+        yield from _iter_files_depth_first(ann_dir, suffix=".xml", shard_id=shard_id, num_shards=num_shards)
 
-    def _iter_voc_samples(self, config: AppConfig, ann_dir: Path, image_root: Path) -> Iterator[Sample]:
+    def _iter_voc_samples(
+        self,
+        config: AppConfig,
+        ann_dir: Path,
+        image_root: Path,
+        *,
+        shard_id: int = 0,
+        num_shards: int = 1,
+    ) -> Iterator[Sample]:
         sample_count = 0
         missing_image_count = 0
         first_xml_reported = False
         first_image_reported = False
         seen_images: set[str] = set()
         use_segmentation = _mask_mode_requests_segmentation(config.dataset.mask_mode)
-        for ann_path in self._iter_voc_annotation_files(ann_dir):
+        for ann_path in self._iter_voc_annotation_files(ann_dir, shard_id=shard_id, num_shards=num_shards):
             if not first_xml_reported:
                 print(f"[train-load] rbgt_voc_first_xml path={ann_path}", file=sys.stderr, flush=True)
                 first_xml_reported = True
@@ -809,14 +828,16 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
                     return samples
         return samples
 
-    def iter_samples(self, config: AppConfig) -> Iterable[Sample]:
+    def iter_samples(self, config: AppConfig, *, shard_id: int = 0, num_shards: int = 1) -> Iterable[Sample]:
         root = _dataset_root(config)
         ann_dir = root / (config.dataset.annotations_dir or "annotations_coco")
         image_root = self._resolve_image_root(root, config.dataset.images_dir)
         if self._use_voc_annotations(ann_dir):
-            yield from self._iter_voc_samples(config, ann_dir, image_root)
+            yield from self._iter_voc_samples(config, ann_dir, image_root, shard_id=shard_id, num_shards=num_shards)
             return
-        yield from self.load_samples(config)
+        for index, sample in enumerate(self.load_samples(config)):
+            if _shard_matches(index, shard_id=shard_id, num_shards=num_shards):
+                yield sample
 
 
 class GenericImageMaskAdapter(DatasetAdapter):

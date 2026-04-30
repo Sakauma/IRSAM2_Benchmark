@@ -117,6 +117,22 @@ def _auto_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
+def _apply_train_cli_overrides(auto_config: Dict[str, Any], args: argparse.Namespace) -> None:
+    train_config = auto_config.setdefault("train", {})
+    overrides = {
+        "batch_size": args.train_batch_size,
+        "num_workers": args.train_num_workers,
+        "prefetch_factor": args.train_prefetch_factor,
+        "shuffle_buffer_size": args.train_shuffle_buffer_size,
+        "profile_interval_batches": args.train_profile_interval,
+    }
+    for key, value in overrides.items():
+        if value is not None:
+            train_config[key] = value
+    if args.train_amp:
+        train_config["use_amp"] = True
+
+
 def _ensure_auto_methods(base_matrix: Dict[str, Any]) -> None:
     methods = base_matrix.setdefault("methods", {})
     for method_id, payload in {**DEFAULT_HEURISTIC_METHODS, **DEFAULT_LEARNED_METHODS}.items():
@@ -793,6 +809,12 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument("--stream-logs", action="store_true", help="Mirror child process logs to stderr while still writing log files.")
     parser.add_argument("--no-progress", action="store_true")
     parser.add_argument("--progress-backend", choices=("auto", "tqdm", "line", "none"), default="tqdm")
+    parser.add_argument("--train-batch-size", type=int, help="Override auto-prompt training batch_size.")
+    parser.add_argument("--train-num-workers", type=int, help="Override auto-prompt training DataLoader num_workers.")
+    parser.add_argument("--train-prefetch-factor", type=int, help="Override auto-prompt training DataLoader prefetch_factor when workers are enabled.")
+    parser.add_argument("--train-shuffle-buffer-size", type=int, help="Override auto-prompt streaming shuffle_buffer_size.")
+    parser.add_argument("--train-amp", action="store_true", help="Enable CUDA AMP for auto-prompt training.")
+    parser.add_argument("--train-profile-interval", type=int, help="Print one training throughput profile line every N batches.")
     parser.add_argument(
         "--preflight-mode",
         choices=PREFLIGHT_MODES,
@@ -804,6 +826,7 @@ def main(argv: List[str] | None = None) -> int:
     config_path = (args.config if args.config is not None else _default_config()).resolve()
     raw = _load_yaml(config_path)
     auto_config = _auto_config(raw)
+    _apply_train_cli_overrides(auto_config, args)
     paths, suite_config, base_matrix, config_sources = fr._load_complete_benchmark_config(config_path)
     _ensure_auto_methods(base_matrix)
     artifact_base = fr._artifact_base(paths)
