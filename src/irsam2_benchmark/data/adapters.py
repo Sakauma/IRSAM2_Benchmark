@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import warnings
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
@@ -513,24 +514,50 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
         except OSError:
             return False
 
-    def _voc_image_path(self, image_root: Path, xml_root: ET.Element, ann_path: Path, *, image_root_is_ir_only_layout: bool) -> Path:
+    def _existing_path(self, *candidates: Path) -> Optional[Path]:
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _voc_image_path(self, image_root: Path, ann_dir: Path, xml_root: ET.Element, ann_path: Path) -> Path:
         path_text = _xml_text(xml_root, "path")
         if path_text:
             path = Path(path_text)
             if path.is_absolute():
                 return path
-            candidate = image_root / path
-            if candidate.exists():
-                return candidate
+            found = self._existing_path(image_root / path, image_root.parent / path)
+            if found is not None:
+                return found
+        resolved_text = _xml_text(xml_root, "resolved_image_path")
+        if resolved_text:
+            resolved = Path(resolved_text)
+            if resolved.is_absolute():
+                return resolved
+            found = self._existing_path(image_root / resolved, image_root.parent / resolved)
+            if found is not None:
+                return found
         filename = _xml_text(xml_root, "filename")
         if filename:
-            return self._resolve_image_path(
-                image_root,
-                filename,
-                ann_path,
-                image_root_is_ir_only_layout=image_root_is_ir_only_layout,
-            )
-        return image_root / ann_path.with_suffix("").name
+            relative = Path(filename)
+            candidates = [image_root / relative]
+            if len(relative.parts) > 1:
+                candidates.extend(image_root / relative.parent / branch_name / relative.name for branch_name in ("01", "ir", "infrared", "thermal"))
+            try:
+                xml_relative = ann_path.relative_to(ann_dir)
+                candidates.append(image_root / xml_relative.with_name(relative.name))
+                if relative.suffix:
+                    candidates.append(image_root / xml_relative.with_suffix(relative.suffix))
+            except ValueError:
+                pass
+            found = self._existing_path(*candidates)
+            if found is not None:
+                return found
+            return candidates[0]
+        try:
+            return image_root / ann_path.relative_to(ann_dir).with_suffix("")
+        except ValueError:
+            return image_root / ann_path.with_suffix("").name
 
     def _voc_image_size(self, xml_root: ET.Element, image_path: Path) -> tuple[int, int]:
         width_text = _xml_text(xml_root, "size/width")
@@ -598,19 +625,23 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
 
     def _iter_voc_samples(self, config: AppConfig, ann_dir: Path, image_root: Path) -> Iterator[Sample]:
         sample_count = 0
+        missing_image_count = 0
+        first_xml_reported = False
+        first_image_reported = False
         seen_images: set[str] = set()
         use_segmentation = _mask_mode_requests_segmentation(config.dataset.mask_mode)
-        image_root_is_ir_only_layout = self._image_root_is_ir_only_layout(image_root)
         for ann_path in self._iter_voc_annotation_files(ann_dir):
+            if not first_xml_reported:
+                print(f"[train-load] rbgt_voc_first_xml path={ann_path}", file=sys.stderr, flush=True)
+                first_xml_reported = True
             xml_root = ET.parse(ann_path).getroot()
-            image_path = self._voc_image_path(
-                image_root,
-                xml_root,
-                ann_path,
-                image_root_is_ir_only_layout=image_root_is_ir_only_layout,
-            )
+            image_path = self._voc_image_path(image_root, ann_dir, xml_root, ann_path)
             if not image_path.exists():
+                missing_image_count += 1
                 continue
+            if not first_image_reported:
+                print(f"[train-load] rbgt_voc_first_image path={image_path}", file=sys.stderr, flush=True)
+                first_image_reported = True
             frame_id = self._voc_frame_id(image_path, image_root, xml_root)
             if not self._image_file_is_ir_branch(frame_id) and not self._annotation_file_is_ir_specific(ann_path):
                 continue
@@ -681,6 +712,8 @@ class RBGTTinyIRAdapter(CocoLikeAdapter):
                 sample_count += 1
                 if _limit_reached(config.runtime.max_samples, sample_count):
                     return
+        if missing_image_count > 0:
+            print(f"[train-load] rbgt_voc_missing_images count={missing_image_count}", file=sys.stderr, flush=True)
 
     def _load_voc_samples(self, config: AppConfig, ann_dir: Path, image_root: Path) -> List[Sample]:
         return list(self._iter_voc_samples(config, ann_dir, image_root))

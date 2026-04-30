@@ -354,10 +354,48 @@ class RBGTTinyAdapterTests(unittest.TestCase):
                 raise AssertionError("iter_samples consumed a second XML before yielding the first sample")
 
             adapter._iter_voc_annotation_files = guarded_xml_files
+            adapter._image_root_is_ir_only_layout = lambda image_root: (_ for _ in ()).throw(
+                AssertionError("VOC streaming must not scan the full image root before yielding")
+            )
             sample = next(adapter.iter_samples(config))
 
             self.assertEqual(sample.sample_id, "DJI_0001/01/00000.jpg__ann_0::target::voc_bbox_only")
             self.assertEqual(sample.bbox_tight, [2.0, 2.0, 5.0, 5.0])
+
+    def test_rbgt_voc_resolves_filename_from_annotation_relative_path_without_global_scan(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "image" / "DJI_0001" / "01" / "00000.jpg"
+            ann_root = root / "annotations_voc" / "DJI_0001" / "01"
+            image_path.parent.mkdir(parents=True)
+            ann_root.mkdir(parents=True)
+            Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(image_path)
+            xml_path = ann_root / "00000.xml"
+            xml_path.write_text(
+                """
+<annotation>
+  <filename>00000.jpg</filename>
+  <size><width>8</width><height>8</height></size>
+  <object>
+    <name>target</name>
+    <bndbox><xmin>1</xmin><ymin>2</ymin><xmax>4</xmax><ymax>6</ymax></bndbox>
+  </object>
+</annotation>
+""".strip(),
+                encoding="utf-8",
+            )
+            config_path = root / "config.json"
+            _write_rbgt_config(config_path, annotations_dir="annotations_voc", mask_mode="bbox")
+            config = load_app_config(config_path)
+            adapter = build_dataset_adapter(config)
+            adapter._image_root_is_ir_only_layout = lambda image_root: (_ for _ in ()).throw(
+                AssertionError("VOC filename resolution must use annotation-relative paths")
+            )
+
+            sample = next(adapter.iter_samples(config))
+
+            self.assertEqual(sample.image_path, image_path)
+            self.assertEqual(sample.bbox_tight, [1.0, 2.0, 4.0, 6.0])
 
     def test_rbgt_adapter_reads_voc_segmentation_as_lazy_polygon(self):
         with tempfile.TemporaryDirectory() as temp_dir:

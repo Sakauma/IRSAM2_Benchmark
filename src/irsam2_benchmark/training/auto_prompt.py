@@ -455,7 +455,7 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
         max_long_side=int(train_cfg.get("max_long_side", 512)),
         target_config=target_cfg,
         model_config=model_cfg,
-        shuffle_buffer_size=int(train_cfg.get("shuffle_buffer_size", 4096)),
+        shuffle_buffer_size=int(train_cfg.get("shuffle_buffer_size", 256)),
         max_samples=max_samples,
         seed=seed,
     )
@@ -467,12 +467,8 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
         collate_fn=_collate_batch,
     )
 
-    model = build_ir_prompt_net(model_cfg).to(device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(train_cfg.get("learning_rate", 3e-4)),
-        weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
-    )
+    model: Any | None = None
+    optimizer: Any | None = None
     epochs = max(1, int(train_cfg.get("epochs", 1)))
     show_progress = bool(train_cfg.get("show_progress", True))
     progress_backend = str(train_cfg.get("progress_backend", "auto"))
@@ -483,7 +479,8 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
     trained_sample_events = 0
     heatmap_samples: list[Sample] = []
     for epoch in range(epochs):
-        model.train()
+        if model is not None:
+            model.train()
         loss_sum = 0.0
         objectness_sum = 0.0
         box_sum = 0.0
@@ -508,6 +505,16 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
                     batch = next(loader_iter)
                 except StopIteration:
                     break
+                if model is None:
+                    model = build_ir_prompt_net(model_cfg).to(device)
+                    optimizer = torch.optim.AdamW(
+                        model.parameters(),
+                        lr=float(train_cfg.get("learning_rate", 3e-4)),
+                        weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
+                    )
+                model.train()
+                if optimizer is None:
+                    raise RuntimeError("Optimizer was not initialized after model creation.")
                 image = batch["image"].to(device=device, dtype=torch.float32)
                 objectness = batch["objectness"].to(device=device, dtype=torch.float32)
                 objectness_weight = batch["objectness_weight"].to(device=device, dtype=torch.float32)
@@ -572,6 +579,8 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
             }
         )
 
+    if model is None:
+        raise RuntimeError("No samples with bbox_tight/bbox_loose were found for auto prompt training.")
     output_root = _resolve_path(config_path.parent, str(raw.get("output_root", "artifacts/auto_prompt")))
     experiment_id = str(raw.get("experiment_id", "auto_prompt_v1"))
     output_dir = output_root / experiment_id

@@ -162,9 +162,12 @@ class AutoPromptTrainingTests(unittest.TestCase):
             def __init__(self, image_path: Path) -> None:
                 self.image_path = image_path
                 self.yielded = 0
+                self.to_called_before_first_yield = None
 
             def iter_samples(self, config):
                 for index in range(100):
+                    if index == 0:
+                        self.to_called_before_first_yield = model_state["to_called"]
                     self.yielded += 1
                     yield Sample(
                         image_path=self.image_path,
@@ -184,6 +187,24 @@ class AutoPromptTrainingTests(unittest.TestCase):
                         bbox_loose=[5.0, 5.0, 9.0, 9.0],
                         point_prompt=[7.0, 7.0],
                     )
+
+        torch, _, _, _ = auto_prompt_module._require_torch()
+        model_state = {"to_called": False}
+
+        class RecordingModel(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.tensor(0.0))
+
+            def to(self, *args, **kwargs):
+                model_state["to_called"] = True
+                return super().to(*args, **kwargs)
+
+            def forward(self, image):
+                batch, _, height, width = image.shape
+                objectness = self.weight + torch.zeros((batch, 1, height, width), device=image.device, dtype=image.dtype)
+                box_size = self.weight + torch.ones((batch, 2, height, width), device=image.device, dtype=image.dtype)
+                return {"objectness_logits": objectness, "box_size": box_size}
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -215,10 +236,15 @@ class AutoPromptTrainingTests(unittest.TestCase):
             )
             fake_adapter = FakeStreamingAdapter(image_path)
 
-            with patch.object(auto_prompt_module, "build_dataset_adapter", return_value=fake_adapter):
+            with (
+                patch.object(auto_prompt_module, "build_dataset_adapter", return_value=fake_adapter),
+                patch.object(auto_prompt_module, "build_ir_prompt_net", return_value=RecordingModel()),
+            ):
                 summary = train_auto_prompt_from_config(train_config)
 
             self.assertEqual(fake_adapter.yielded, 1)
+            self.assertFalse(fake_adapter.to_called_before_first_yield)
+            self.assertTrue(model_state["to_called"])
             self.assertEqual(summary["sample_count"], 1)
             self.assertEqual(summary["trained_sample_events"], 1)
 
