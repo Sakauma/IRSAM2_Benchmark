@@ -97,17 +97,35 @@ class ExternalPredictionMaskBaseline(BaseMethod):
             self.prediction_suffix = f".{self.prediction_suffix}"
         self.threshold = float(config.method.get("prediction_threshold", 0.5))
         self.model_name = str(config.method.get("external_model_name") or config.method.get("name") or "external_prediction")
-        self._latency_by_frame_id = {} if self._configuration_error else self._load_latency_manifest()
+        if self._configuration_error:
+            self._latency_by_frame_id: Dict[str, float] = {}
+            self._latency_by_sample_id: Dict[str, float] = {}
+            self._prediction_by_sample_id: Dict[str, Path] = {}
+        else:
+            self._latency_by_frame_id, self._latency_by_sample_id, self._prediction_by_sample_id = self._load_prediction_manifest()
 
     @property
     def _dataset_dir(self) -> Path:
         return self.prediction_root / self.dataset_id
 
-    def _load_latency_manifest(self) -> Dict[str, float]:
+    def _resolve_manifest_prediction_path(self, value: object) -> Path | None:
+        if value is None:
+            return None
+        raw = Path(str(value))
+        if raw.is_absolute():
+            return raw
+        candidate = self._dataset_dir / raw
+        if candidate.exists():
+            return candidate
+        return (Path.cwd() / raw).resolve()
+
+    def _load_prediction_manifest(self) -> tuple[Dict[str, float], Dict[str, float], Dict[str, Path]]:
         manifest_path = self._dataset_dir / "manifest.jsonl"
         if not manifest_path.exists():
-            return {}
-        latency: Dict[str, float] = {}
+            return {}, {}, {}
+        latency_by_frame_id: Dict[str, float] = {}
+        latency_by_sample_id: Dict[str, float] = {}
+        prediction_by_sample_id: Dict[str, Path] = {}
         with manifest_path.open("r", encoding="utf-8") as handle:
             for line in handle:
                 text = line.strip()
@@ -115,13 +133,23 @@ class ExternalPredictionMaskBaseline(BaseMethod):
                     continue
                 record = json.loads(text)
                 frame_id = record.get("frame_id")
+                sample_id = record.get("sample_id")
                 latency_ms = record.get("latency_ms")
-                if frame_id is None or latency_ms is None:
-                    continue
-                latency[str(frame_id)] = float(latency_ms)
-        return latency
+                if frame_id is not None and latency_ms is not None:
+                    latency_by_frame_id[str(frame_id)] = float(latency_ms)
+                if sample_id is not None:
+                    if latency_ms is not None:
+                        latency_by_sample_id[str(sample_id)] = float(latency_ms)
+                    prediction_path = self._resolve_manifest_prediction_path(record.get("prediction_path"))
+                    if prediction_path is not None:
+                        prediction_by_sample_id[str(sample_id)] = prediction_path
+        return latency_by_frame_id, latency_by_sample_id, prediction_by_sample_id
 
-    def _prediction_path(self, frame_id: str) -> Path:
+    def _prediction_path(self, frame_id: str, sample_id: str | None = None) -> Path:
+        if sample_id is not None:
+            manifest_path = self._prediction_by_sample_id.get(sample_id)
+            if manifest_path is not None and manifest_path.exists():
+                return manifest_path
         rel = _safe_relative_path(frame_id)
         appended = self._dataset_dir / Path(f"{rel.as_posix()}{self.prediction_suffix}")
         replaced = self._dataset_dir / rel.with_suffix(self.prediction_suffix)
@@ -139,7 +167,7 @@ class ExternalPredictionMaskBaseline(BaseMethod):
     def predict_sample(self, sample: Sample) -> Dict[str, Any]:
         if self._configuration_error:
             raise ValueError(self._configuration_error)
-        prediction_path = self._prediction_path(sample.frame_id)
+        prediction_path = self._prediction_path(sample.frame_id, sample.sample_id)
         with Image.open(prediction_path) as image:
             arr = np.asarray(image.convert("L"), dtype=np.float32)
         if arr.size and float(arr.max()) > 1.0:
@@ -161,7 +189,7 @@ class ExternalPredictionMaskBaseline(BaseMethod):
                 "ExternalPredictionThreshold": self.threshold,
             },
         }
-        latency_ms = self._latency_by_frame_id.get(sample.frame_id)
+        latency_ms = self._latency_by_sample_id.get(sample.sample_id, self._latency_by_frame_id.get(sample.frame_id))
         if latency_ms is not None:
             payload["LatencyMs"] = latency_ms
         return payload

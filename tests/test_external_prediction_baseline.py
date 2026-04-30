@@ -114,6 +114,39 @@ class ExternalPredictionMaskBaselineTests(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 method.predict_sample(_sample())
 
+    def test_manifest_sample_id_prediction_overrides_frame_path(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            prediction_root = root / "predictions"
+            dataset_dir = prediction_root / "NUAA-SIRST" / "samples"
+            dataset_dir.mkdir(parents=True)
+            sample = _sample()
+            sample.sample_id = "seq/img.v1__inst_0::target::polygon_mask"
+            mask = np.zeros((4, 4), dtype=np.uint8)
+            mask[0:2, 0:2] = 255
+            sample_prediction = dataset_dir / "seq_img.v1__inst_0__target__polygon_mask.png"
+            Image.fromarray(mask, mode="L").save(sample_prediction)
+            manifest = prediction_root / "NUAA-SIRST" / "manifest.jsonl"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "frame_id": "seq/img.v1",
+                        "sample_id": sample.sample_id,
+                        "prediction_path": str(sample_prediction),
+                        "latency_ms": 33.0,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            method = ExternalPredictionMaskBaseline(_config(root, prediction_root))
+            pred = method.predict_sample(sample)
+
+            self.assertEqual(float(pred["mask"].sum()), 4.0)
+            self.assertEqual(pred["LatencyMs"], 33.0)
+            self.assertEqual(pred["metadata"]["ExternalPredictionPath"], str(sample_prediction))
+
 
 if __name__ == "__main__":
     unittest.main()
