@@ -39,7 +39,7 @@ def _analysis_report(manifest: Dict[str, Any], table_outputs: Dict[str, str]) ->
     if manifest.get("missing_or_failed_runs"):
         lines.extend(["", "## Missing Or Failed Runs", ""])
         for item in manifest["missing_or_failed_runs"]:
-            lines.append(f"- `{item['experiment_id']}/{item['dataset']}/{item['method']}` missing {item['missing_files']}")
+            lines.append(_missing_or_failed_run_line(item))
     lines.extend(
         [
             "",
@@ -51,6 +51,21 @@ def _analysis_report(manifest: Dict[str, Any], table_outputs: Dict[str, str]) ->
         ]
     )
     return "\n".join(lines) + "\n"
+
+
+def _missing_or_failed_run_line(item: Dict[str, Any]) -> str:
+    run_id = f"{item.get('experiment_id', '')}/{item.get('dataset', '')}/{item.get('method', '')}"
+    if item.get("missing_files"):
+        reason = f"missing {item['missing_files']}"
+    elif item.get("validation_errors"):
+        reason = f"failed validation: {item['validation_errors']}"
+    elif item.get("invalid_artifacts"):
+        reason = "failed validation"
+    else:
+        reason = "unavailable"
+    run_dir = item.get("run_dir")
+    suffix = f" (`{run_dir}`)" if run_dir else ""
+    return f"- `{run_id}` {reason}{suffix}"
 
 
 def _stats_appendix(manifest: Dict[str, Any], significance_rows: List[Dict[str, Any]]) -> str:
@@ -97,4 +112,3 @@ def _figure_catalog(case_outputs: Dict[str, str]) -> str:
         if name.endswith("_figure_dir"):
             lines.append(f"- `{name}`: `{path}`")
     return "\n".join(lines) + "\n"
-

@@ -7,6 +7,7 @@ from pathlib import Path
 import yaml
 
 from irsam2_benchmark.analysis.collector import collect_runs
+from irsam2_benchmark.analysis.reports import write_reports
 from irsam2_benchmark.analysis.runner import run_analysis
 from irsam2_benchmark.analysis.stats import run_paired_tests
 from irsam2_benchmark.analysis.tables import main_baseline_table, multimodal_size_table
@@ -172,6 +173,33 @@ class AnalysisV2Tests(unittest.TestCase):
             invalid = [item for item in missing if item.get("invalid_artifacts")]
             self.assertEqual(len(invalid), 1)
             self.assertTrue(any("missing health field" in error for error in invalid[0]["validation_errors"]))
+
+    def test_reports_handle_invalid_artifact_records(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "analysis"
+            write_reports(
+                output_dir,
+                manifest={
+                    "run_count": 1,
+                    "row_count": 0,
+                    "missing_or_failed_runs": [
+                        {
+                            "experiment_id": "exp",
+                            "dataset": "multimodal",
+                            "method": "sam2_learned_auto_box",
+                            "invalid_artifacts": True,
+                            "validation_errors": ["summary.json failure_rate=0.0701 exceeds failure_rate_threshold=0.0500."],
+                        }
+                    ],
+                },
+                table_outputs={},
+                case_outputs={},
+                significance_rows=[],
+            )
+
+            report = (output_dir / "analysis-report.md").read_text(encoding="utf-8")
+            self.assertIn("failed validation", report)
+            self.assertIn("failure_rate=0.0701", report)
 
     def test_table_builder_summarizes_dataset_method(self):
         rows = [
