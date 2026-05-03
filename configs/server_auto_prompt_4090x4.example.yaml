@@ -4,25 +4,17 @@
 # Recommended server launch:
 #   tmux new -s irsam2_auto_prompt
 #   PYTHONPATH=src python scripts/run_4090x4_auto_prompt.py \
-#     --config configs/server_auto_prompt_4090x4.local.yaml \
+#     --config configs/server_auto_prompt_4090x4.example.yaml \
 #     --stop-on-error \
-#     --preflight-mode fast \
-#     --train-gpu-cache-datasets nuaa_sirst,nudt_sirst,irstd_1k \
-#     --train-cache-dtype float16 \
-#     --train-batch-size 128 \
-#     --train-num-workers 4 \
-#     --train-prefetch-factor 4 \
-#     --train-shuffle-buffer-size 512 \
-#     --train-amp \
-#     --train-profile-interval 200
+#     --preflight-mode fast
 
 benchmark:
-  suite_name: "server_auto_prompt_4090x4_no_rbgt"
-  artifact_subdir: "sam2_ir_qd_m1_auto_prompt_no_rbgt"
+  suite_name: "server_auto_prompt_4090x4_no_rbgt_proposal_v2"
+  artifact_subdir: "sam2_ir_qd_m2_prompt_proposal_v2"
 
 auto_prompt:
-  experiment_id: "sam2_ir_qd_m1_auto_prompt_no_rbgt_v1"
-  artifact_subdir: "sam2_ir_qd_m1_auto_prompt_no_rbgt"
+  experiment_id: "sam2_ir_qd_m2_prompt_proposal_v2"
+  artifact_subdir: "sam2_ir_qd_m2_prompt_proposal_v2"
   train_gpu: "0"
   eval_gpus: ["1", "6", "7", "0"]
   train_datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k"]
