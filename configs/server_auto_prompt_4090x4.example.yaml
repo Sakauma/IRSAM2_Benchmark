@@ -47,6 +47,8 @@ auto_prompt:
     max_samples: 0
     num_workers: 0
     cache_dtype: "float16"
+    use_amp: true
+    profile_interval_batches: 200
     show_progress: true
     progress_backend: "tqdm"
     progress_update_interval_s: 1.0
