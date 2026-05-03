@@ -127,15 +127,24 @@ def _chunks(items: List[Sample], batch_size: int) -> Iterable[List[Sample]]:
         yield items[start : start + batch_size]
 
 
-def _prompted_batches(items: List[Sample], batch_size: int, *, reuse_image_embedding: bool) -> Iterable[List[Sample]]:
+def _prompted_batches(
+    items: List[Sample],
+    batch_size: int,
+    *,
+    reuse_image_embedding: bool,
+    max_prompts_per_image_batch: int = 32,
+) -> Iterable[List[Sample]]:
+    batch_size = max(1, int(batch_size))
     if not reuse_image_embedding:
         yield from _chunks(items, batch_size)
         return
+    prompt_batch_size = max(1, int(max_prompts_per_image_batch))
     image_groups: Dict[str, List[Sample]] = {}
     for item in items:
         key = str(item.image_path)
         image_groups.setdefault(key, []).append(item)
-    yield from image_groups.values()
+    for group in image_groups.values():
+        yield from _chunks(group, prompt_batch_size)
 
 
 def _is_cuda_oom(exc: Exception) -> bool:
@@ -483,6 +492,7 @@ def evaluate_method(
     runtime = getattr(config, "runtime", None)
     configured_batch_size = max(1, int(getattr(runtime, "image_batch_size", 1)))
     reuse_image_embedding = bool(getattr(runtime, "reuse_image_embedding", False))
+    max_prompts_per_image_batch = max(1, int(getattr(runtime, "max_prompts_per_image_batch", 32)))
     batch_index = 0
     progress = _progress_bar(
         method=method,
@@ -494,7 +504,12 @@ def evaluate_method(
     )
     try:
         for requested_batch_index, batch in enumerate(
-            _prompted_batches(samples, configured_batch_size, reuse_image_embedding=reuse_image_embedding)
+            _prompted_batches(
+                samples,
+                configured_batch_size,
+                reuse_image_embedding=reuse_image_embedding,
+                max_prompts_per_image_batch=max_prompts_per_image_batch,
+            )
         ):
             batch_results = _predict_batch_with_fallback(
                 method,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 import numpy as np
 from PIL import Image
@@ -42,6 +42,66 @@ class BaseMethod:
 
     def predict_samples(self, samples: List[Sample]) -> Dict[str, Dict[str, Any]]:
         return {sample.sample_id: self.predict_sample(sample) for sample in samples}
+
+
+def _predict_prompted_sam2_samples(
+    samples: List[Sample],
+    *,
+    adapter: SAM2ModelAdapter,
+    inference_mode: InferenceMode,
+    build_prompt: Callable[[Sample], tuple[Dict[str, Any], Dict[str, Any]]],
+    build_prediction: Callable[[Dict[str, Any], Dict[str, Any]], Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    if not samples:
+        return {}
+    kwargs_and_prompts = [build_prompt(sample) for sample in samples]
+    kwargs_list = [item[0] for item in kwargs_and_prompts]
+    prompts = [item[1] for item in kwargs_and_prompts]
+    image_paths = [str(sample.image_path) for sample in samples]
+
+    def predict_group(indices: List[int]) -> Dict[str, Dict[str, Any]]:
+        group_samples = [samples[idx] for idx in indices]
+        group_kwargs = [kwargs_list[idx] for idx in indices]
+        group_prompts = [prompts[idx] for idx in indices]
+        image_rgb = load_image_rgb(group_samples[0].image_path)
+        results = adapter.predict_prompts_for_image(
+            image_rgb,
+            boxes=[kwargs.get("box") for kwargs in group_kwargs],
+            points=[kwargs.get("points") for kwargs in group_kwargs],
+            point_labels=[kwargs.get("point_labels") for kwargs in group_kwargs],
+            multimask_output=inference_mode == InferenceMode.MULTI_MASK,
+        )
+        if len(results) != len(group_samples):
+            raise RuntimeError(f"Prompt prediction returned {len(results)} results for {len(group_samples)} samples.")
+        return {
+            sample.sample_id: build_prediction(result, prompt)
+            for sample, result, prompt in zip(group_samples, results, group_prompts)
+        }
+
+    if len(set(image_paths)) == len(image_paths):
+        images = [load_image_rgb(sample.image_path) for sample in samples]
+        results = adapter.predict_images(
+            images,
+            boxes=[kwargs.get("box") for kwargs in kwargs_list],
+            points=[kwargs.get("points") for kwargs in kwargs_list],
+            point_labels=[kwargs.get("point_labels") for kwargs in kwargs_list],
+            multimask_output=inference_mode == InferenceMode.MULTI_MASK,
+        )
+        if len(results) != len(samples):
+            raise RuntimeError(f"Batch prediction returned {len(results)} results for {len(samples)} samples.")
+        return {
+            sample.sample_id: build_prediction(result, prompt)
+            for sample, result, prompt in zip(samples, results, prompts)
+        }
+
+    image_groups: Dict[str, List[int]] = {}
+    for idx, image_path in enumerate(image_paths):
+        image_groups.setdefault(image_path, []).append(idx)
+
+    predictions: Dict[str, Dict[str, Any]] = {}
+    for indices in image_groups.values():
+        predictions.update(predict_group(indices))
+    return predictions
 
 
 class BBoxRectMaskBaseline(BaseMethod):
@@ -301,31 +361,13 @@ class PretrainedPromptedSAM2(BaseMethod):
 
     def predict_samples(self, samples: List[Sample]) -> Dict[str, Dict[str, Any]]:
         # 同一图像内的多实例 prompt 共享一次 SAM2 image embedding。
-        if not samples:
-            return {}
-        kwargs_and_prompts = [self._predict_kwargs_and_prompt(sample) for sample in samples]
-        image_groups: Dict[str, List[int]] = {}
-        for idx, sample in enumerate(samples):
-            image_groups.setdefault(str(sample.image_path), []).append(idx)
-
-        predictions: Dict[str, Dict[str, Any]] = {}
-        for indices in image_groups.values():
-            group_samples = [samples[idx] for idx in indices]
-            group_kwargs = [kwargs_and_prompts[idx][0] for idx in indices]
-            group_prompts = [kwargs_and_prompts[idx][1] for idx in indices]
-            image_rgb = load_image_rgb(group_samples[0].image_path)
-            results = self.adapter.predict_prompts_for_image(
-                image_rgb,
-                boxes=[kwargs.get("box") for kwargs in group_kwargs],
-                points=[kwargs.get("points") for kwargs in group_kwargs],
-                point_labels=[kwargs.get("point_labels") for kwargs in group_kwargs],
-                multimask_output=self.inference_mode == InferenceMode.MULTI_MASK,
-            )
-            if len(results) != len(group_samples):
-                raise RuntimeError(f"Prompt prediction returned {len(results)} results for {len(group_samples)} samples.")
-            for sample, result, prompt in zip(group_samples, results, group_prompts):
-                predictions[sample.sample_id] = self._prediction_from_result(result, prompt)
-        return predictions
+        return _predict_prompted_sam2_samples(
+            samples,
+            adapter=self.adapter,
+            inference_mode=self.inference_mode,
+            build_prompt=self._predict_kwargs_and_prompt,
+            build_prediction=self._prediction_from_result,
+        )
 
 
 class NoPromptAutoMaskSAM2(BaseMethod):
@@ -419,25 +461,13 @@ class HeuristicAutoPromptedSAM2(BaseMethod):
         return self._prediction_from_result(result, prompt)
 
     def predict_samples(self, samples: List[Sample]) -> Dict[str, Dict[str, Any]]:
-        if not samples:
-            return {}
-        images = [load_image_rgb(sample.image_path) for sample in samples]
-        kwargs_and_prompts = [self._predict_kwargs_and_prompt(sample) for sample in samples]
-        kwargs_list = [item[0] for item in kwargs_and_prompts]
-        prompts = [item[1] for item in kwargs_and_prompts]
-        results = self.adapter.predict_images(
-            images,
-            boxes=[kwargs.get("box") for kwargs in kwargs_list],
-            points=[kwargs.get("points") for kwargs in kwargs_list],
-            point_labels=[kwargs.get("point_labels") for kwargs in kwargs_list],
-            multimask_output=self.inference_mode == InferenceMode.MULTI_MASK,
+        return _predict_prompted_sam2_samples(
+            samples,
+            adapter=self.adapter,
+            inference_mode=self.inference_mode,
+            build_prompt=self._predict_kwargs_and_prompt,
+            build_prediction=self._prediction_from_result,
         )
-        if len(results) != len(samples):
-            raise RuntimeError(f"Batch prediction returned {len(results)} results for {len(samples)} samples.")
-        return {
-            sample.sample_id: self._prediction_from_result(result, prompt)
-            for sample, result, prompt in zip(samples, results, prompts)
-        }
 
 
 class LearnedAutoPromptedSAM2(BaseMethod):
@@ -592,25 +622,13 @@ class LearnedAutoPromptedSAM2(BaseMethod):
         return self._prediction_from_result(result, prompt)
 
     def predict_samples(self, samples: List[Sample]) -> Dict[str, Dict[str, Any]]:
-        if not samples:
-            return {}
-        images = [load_image_rgb(sample.image_path) for sample in samples]
-        kwargs_and_prompts = [self._predict_kwargs_and_prompt(sample) for sample in samples]
-        kwargs_list = [item[0] for item in kwargs_and_prompts]
-        prompts = [item[1] for item in kwargs_and_prompts]
-        results = self.adapter.predict_images(
-            images,
-            boxes=[kwargs.get("box") for kwargs in kwargs_list],
-            points=[kwargs.get("points") for kwargs in kwargs_list],
-            point_labels=[kwargs.get("point_labels") for kwargs in kwargs_list],
-            multimask_output=self.inference_mode == InferenceMode.MULTI_MASK,
+        return _predict_prompted_sam2_samples(
+            samples,
+            adapter=self.adapter,
+            inference_mode=self.inference_mode,
+            build_prompt=self._predict_kwargs_and_prompt,
+            build_prediction=self._prediction_from_result,
         )
-        if len(results) != len(samples):
-            raise RuntimeError(f"Batch prediction returned {len(results)} results for {len(samples)} samples.")
-        return {
-            sample.sample_id: self._prediction_from_result(result, prompt)
-            for sample, result, prompt in zip(samples, results, prompts)
-        }
 
 
 CANONICAL_BASELINE_NAMES = (

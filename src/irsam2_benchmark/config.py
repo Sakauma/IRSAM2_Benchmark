@@ -71,6 +71,7 @@ class RuntimeConfig:
     seeds: list[int] = field(default_factory=lambda: [42, 123, 456])
     image_batch_size: int = 1
     reuse_image_embedding: bool = True
+    max_prompts_per_image_batch: int = 32
     auto_mask_points_per_batch: int = 64
     batch_oom_fallback: bool = True
     max_failure_rate: float = 0.05

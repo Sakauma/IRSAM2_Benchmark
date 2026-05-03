@@ -66,6 +66,7 @@ class LoggingConfig:
         *,
         image_batch_size: int = 1,
         reuse_image_embedding: bool = False,
+        max_prompts_per_image_batch: int = 32,
         show_progress: bool = False,
         progress_backend: str = "auto",
         progress_position: int = 0,
@@ -80,6 +81,7 @@ class LoggingConfig:
             {
                 "image_batch_size": image_batch_size,
                 "reuse_image_embedding": reuse_image_embedding,
+                "max_prompts_per_image_batch": max_prompts_per_image_batch,
                 "batch_oom_fallback": True,
                 "show_progress": show_progress,
                 "progress_backend": progress_backend,
@@ -288,6 +290,51 @@ class EvaluationRunnerTests(unittest.TestCase):
         self.assertEqual(method.calls, [["frame_0__inst_0", "frame_0__inst_1"], ["frame_1__inst_0"]])
         self.assertEqual([row["BatchSize"] for row in rows], [2, 2, 1])
         self.assertEqual([row["BatchIndex"] for row in rows], [0, 0, 1])
+
+    def test_evaluate_method_chunks_shared_image_prompts_by_runtime_limit(self):
+        mask = box_to_area([0, 0, 4, 4], 4, 4)
+        samples = [
+            make_sample(sample_id=f"frame_0__inst_{idx}", frame_id="frame_0", image_path="shared.png", mask_array=mask)
+            for idx in range(5)
+        ]
+
+        class DummyBatchMethod:
+            def __init__(self):
+                self.calls = []
+
+            def predict_samples(self, batch):
+                self.calls.append([sample.sample_id for sample in batch])
+                return {
+                    sample.sample_id: {"mask": np.ones((4, 4), dtype=np.float32), "prompt": None}
+                    for sample in batch
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = LoggingConfig(
+                Path(temp_dir) / "out",
+                image_batch_size=1,
+                reuse_image_embedding=True,
+                max_prompts_per_image_batch=2,
+            )
+            method = DummyBatchMethod()
+            _, rows = evaluate_method(
+                method=method,
+                samples=samples,
+                config=config,
+                track_name="track_a_mask_prompt",
+                inference_mode=InferenceMode.BOX,
+            )
+
+        self.assertEqual(
+            method.calls,
+            [
+                ["frame_0__inst_0", "frame_0__inst_1"],
+                ["frame_0__inst_2", "frame_0__inst_3"],
+                ["frame_0__inst_4"],
+            ],
+        )
+        self.assertEqual([row["BatchSize"] for row in rows], [2, 2, 2, 2, 1])
+        self.assertEqual([row["BatchIndex"] for row in rows], [0, 0, 1, 1, 2])
 
     def test_evaluate_method_reports_tqdm_progress_when_enabled(self):
         mask = box_to_area([0, 0, 4, 4], 4, 4)
