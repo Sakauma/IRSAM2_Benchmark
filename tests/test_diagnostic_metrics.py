@@ -1,6 +1,13 @@
 import unittest
 
-from irsam2_benchmark.analysis.diagnostics import aor_rows, diagnostic_metric_rows, fab_tr_rows, pmcr_rows
+from irsam2_benchmark.analysis.diagnostics import (
+    aor_rows,
+    diagnostic_metric_rows,
+    fab_tr_rows,
+    hit_conditioned_iou_rows,
+    pmcr_rows,
+    prompt_aggregate_rows,
+)
 
 
 class DiagnosticMetricTests(unittest.TestCase):
@@ -64,6 +71,21 @@ class DiagnosticMetricTests(unittest.TestCase):
         self.assertEqual(by_budget[5000.0]["eligible_count"], 2)
         self.assertAlmostEqual(by_budget[5000.0]["FAB-TR"], 0.5)
 
+    def test_prompt_quality_rows_measure_border_topk_and_hit_conditioned_iou(self):
+        rows = [
+            {"dataset": "d", "method": "auto", "PromptHitRate": 1.0, "PromptBorderRate": 0.0, "PromptTopKHitRate": 1.0, "mIoU": 0.6},
+            {"dataset": "d", "method": "auto", "PromptHitRate": 0.0, "PromptBorderRate": 1.0, "PromptTopKHitRate": 0.0, "mIoU": 0.1},
+        ]
+
+        aggregates = prompt_aggregate_rows(rows, {"diagnostics": {"prompt_quality": {}}})
+        by_metric = {row["metric"]: row for row in aggregates}
+        hit_conditioned = hit_conditioned_iou_rows(rows, {"diagnostics": {"prompt_quality": {}}})
+
+        self.assertAlmostEqual(by_metric["PromptBorderRate"]["value"], 0.5)
+        self.assertAlmostEqual(by_metric["PromptTopKHitRate"]["value"], 0.5)
+        self.assertEqual(hit_conditioned[0]["hit_count"], 1)
+        self.assertAlmostEqual(hit_conditioned[0]["HitConditionedIoU"], 0.6)
+
     def test_diagnostic_metric_rows_combines_all_sections(self):
         rows = [
             {"dataset": "d", "method": "sam2_no_prompt_auto_mask", "mIoU": 0.2, "PromptHitRate": 0.0, "FalseAlarmPixelsPerMP": 0.0, "TargetRecallIoU25": 0.0},
@@ -83,6 +105,7 @@ class DiagnosticMetricTests(unittest.TestCase):
         self.assertTrue(any(row["diagnostic"] == "AOR" for row in table))
         self.assertTrue(any(row["diagnostic"] == "PMCR" for row in table))
         self.assertTrue(any(row["diagnostic"] == "FAB-TR" for row in table))
+        self.assertTrue(any(row["diagnostic"] == "HitConditionedIoU" for row in table))
 
 
 if __name__ == "__main__":

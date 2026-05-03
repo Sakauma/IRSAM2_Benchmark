@@ -13,6 +13,14 @@ train:
   batch_size: 1
   learning_rate: 0.0003
   weight_decay: 0.0001
+  objectness_loss: balanced_focal
+  focal_alpha: 0.75
+  focal_gamma: 2.0
+  max_positive_weight: 256.0
+  ranking_loss_weight: 0.25
+  ranking_margin: 1.0
+  ranking_negative_top_k: 32
+  heuristic_distill_weight: 0.05
   box_loss_weight: 0.1
   max_long_side: 512
   max_samples: 0

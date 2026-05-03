@@ -116,6 +116,25 @@ class LearnedAutoPromptTests(unittest.TestCase):
         self.assertEqual(prompt.metadata["positive_point_count"], 2)
         self.assertEqual(prompt.points[0], [2.0, 2.0])
         self.assertEqual(prompt.points[1], [6.0, 6.0])
+        self.assertEqual(prompt.metadata["candidate_points"][0][:2], [2.0, 2.0])
+
+    def test_decode_auto_prompt_can_suppress_border_candidates(self):
+        logits = np.zeros((1, 8, 8), dtype=np.float32)
+        logits[0, 0, 7] = 10.0
+        logits[0, 4, 4] = 8.0
+        box_size = np.ones((2, 8, 8), dtype=np.float32) * 2.0
+
+        prompt = decode_auto_prompt(
+            objectness_logits=logits,
+            box_size=box_size,
+            image_width=8,
+            image_height=8,
+            border_suppression_px=1,
+        )
+
+        self.assertEqual(prompt.point, [4.0, 4.0])
+        self.assertEqual(prompt.metadata["border_suppression_px"], 1)
+        self.assertGreater(prompt.metadata["primary_border_distance_px"], 0)
 
     def test_checkpoint_roundtrip_loads_model_metadata(self):
         with tempfile.TemporaryDirectory() as temp_dir:

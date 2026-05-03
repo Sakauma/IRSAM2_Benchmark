@@ -92,6 +92,9 @@ class AutoPromptTrainingTests(unittest.TestCase):
                             "epochs": 1,
                             "batch_size": 1,
                             "learning_rate": 0.001,
+                            "objectness_loss": "balanced_focal",
+                            "ranking_loss_weight": 0.1,
+                            "heuristic_distill_weight": 0.05,
                             "max_long_side": 16,
                             "max_samples": 2,
                             "show_progress": False,
@@ -112,6 +115,8 @@ class AutoPromptTrainingTests(unittest.TestCase):
             saved = json.loads(summary_path.read_text(encoding="utf-8"))
             self.assertEqual(saved["sample_count"], 2)
             self.assertIn("final_loss", saved)
+            self.assertIn("ranking_loss", saved["history"][0])
+            self.assertIn("heuristic_distill_loss", saved["history"][0])
             self.assertEqual(len(saved["heatmaps"]), 2)
             self.assertTrue(Path(saved["heatmaps"][0]["overlay"]).exists())
 

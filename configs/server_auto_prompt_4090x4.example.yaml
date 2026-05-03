@@ -34,6 +34,7 @@ auto_prompt:
   point_budget: 1
   response_threshold: 0.15
   nms_radius: 4
+  border_suppression_px: 4
   train:
     device: "cuda"
     seed: 42
@@ -41,6 +42,14 @@ auto_prompt:
     batch_size: 128
     learning_rate: 0.0003
     weight_decay: 0.0001
+    objectness_loss: "balanced_focal"
+    focal_alpha: 0.75
+    focal_gamma: 2.0
+    max_positive_weight: 256.0
+    ranking_loss_weight: 0.25
+    ranking_margin: 1.0
+    ranking_negative_top_k: 32
+    heuristic_distill_weight: 0.05
     box_loss_weight: 0.1
     max_long_side: 512
     max_samples: 0
@@ -300,7 +309,7 @@ modes:
 
 analysis:
   primary_metric: "mIoU"
-  metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "LatencyMs"]
+  metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "LatencyMs"]
   lower_is_better: ["FalseAlarmPixelsPerMP", "FalseAlarmComponents", "LatencyMs"]
   case_selection:
     top_k: 8
@@ -314,6 +323,9 @@ analysis:
       thresholds: [0.25, 0.5]
     fab_tr:
       budgets: [1000.0, 5000.0, 10000.0]
+    prompt_quality:
+      aggregate_metrics: ["PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid"]
+      hit_threshold: 1.0
   statistics:
     n_bootstrap: 10000
     ci: 0.95
@@ -349,5 +361,5 @@ suites:
     datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal"]
     run_analysis: true
     primary_metric: "mIoU"
-    metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "LatencyMs"]
+    metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "LatencyMs"]
     lower_is_better: ["FalseAlarmPixelsPerMP", "FalseAlarmComponents", "LatencyMs"]

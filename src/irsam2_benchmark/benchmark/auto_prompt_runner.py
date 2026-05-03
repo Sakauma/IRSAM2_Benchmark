@@ -166,6 +166,9 @@ def _inject_learned_prompt_config(
         method_payload["prompt_point_budget"] = int(prompt_runtime.get("point_budget", auto_config.get("point_budget", 1)))
         method_payload["prompt_response_threshold"] = float(prompt_runtime.get("response_threshold", auto_config.get("response_threshold", 0.0)))
         method_payload["prompt_nms_radius"] = int(prompt_runtime.get("nms_radius", auto_config.get("nms_radius", 4)))
+        method_payload["prompt_border_suppression_px"] = int(
+            prompt_runtime.get("border_suppression_px", auto_config.get("border_suppression_px", 0))
+        )
         method_payload["prompt_min_box_side"] = float(prompt_runtime.get("min_box_side", auto_config.get("model", {}).get("min_box_side", 2.0)))
         method_payload["prompt_negative_ring_offset"] = float(
             prompt_runtime.get("negative_ring_offset", auto_config.get("model", {}).get("negative_ring_offset", 4.0))

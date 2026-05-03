@@ -463,6 +463,7 @@ class LearnedAutoPromptedSAM2(BaseMethod):
         self.point_budget = int(config.method.get("prompt_point_budget", 1))
         self.response_threshold = float(config.method.get("prompt_response_threshold", 0.0))
         self.nms_radius = int(config.method.get("prompt_nms_radius", 4))
+        self.border_suppression_px = int(config.method.get("prompt_border_suppression_px", 0))
         self.use_local_contrast = bool(config.method.get("prompt_use_local_contrast", True))
         self.use_top_hat = bool(config.method.get("prompt_use_top_hat", True))
         heatmap_config = config.method.get("heatmaps", {})
@@ -515,6 +516,7 @@ class LearnedAutoPromptedSAM2(BaseMethod):
             point_budget=self.point_budget,
             response_threshold=self.response_threshold,
             nms_radius=self.nms_radius,
+            border_suppression_px=self.border_suppression_px,
             use_local_contrast=self.use_local_contrast,
             use_top_hat=self.use_top_hat,
         )
@@ -554,6 +556,8 @@ class LearnedAutoPromptedSAM2(BaseMethod):
                 "point": auto_prompt.point,
                 "box": auto_prompt.box,
                 "candidate_score": auto_prompt.metadata.get("candidate_score"),
+                "candidate_points": auto_prompt.metadata.get("candidate_points"),
+                "primary_border_distance_px": auto_prompt.metadata.get("primary_border_distance_px"),
             },
         )
         self._saved_heatmaps += 1

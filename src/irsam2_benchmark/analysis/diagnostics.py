@@ -9,6 +9,7 @@ DEFAULT_AOR_METRICS = ("mIoU", "TargetRecallIoU25")
 DEFAULT_PMCR_THRESHOLDS = (0.25, 0.50)
 DEFAULT_FAB_BUDGETS = (1000.0, 5000.0, 10000.0)
 LOW_AOR_GAP = 0.05
+DEFAULT_PROMPT_AGGREGATES = ("PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid")
 
 
 def _is_number(value: object) -> bool:
@@ -167,9 +168,70 @@ def fab_tr_rows(rows: List[Dict[str, Any]], analysis_config: Dict[str, Any]) -> 
     return output
 
 
+def prompt_aggregate_rows(rows: List[Dict[str, Any]], analysis_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    diagnostics = analysis_config.get("diagnostics", {}) if isinstance(analysis_config.get("diagnostics", {}), dict) else {}
+    prompt_config = diagnostics.get("prompt_quality", {}) if isinstance(diagnostics.get("prompt_quality", {}), dict) else {}
+    metrics = [str(item) for item in prompt_config.get("aggregate_metrics", DEFAULT_PROMPT_AGGREGATES)]
+    output: List[Dict[str, Any]] = []
+    grouped = _method_rows(rows)
+    for (dataset, method), group_rows in sorted(grouped.items()):
+        for metric in metrics:
+            values = [float(row[metric]) for row in group_rows if _is_number(row.get(metric))]
+            payload: Dict[str, Any] = {
+                "diagnostic": metric,
+                "dataset": dataset,
+                "method": method,
+                "metric": metric,
+                "row_count": len(group_rows),
+                "eligible_count": len(values),
+            }
+            if not values:
+                payload.update({"status": "missing_metrics", "value": None})
+            else:
+                payload.update({"status": "ok", "value": _mean(values)})
+            output.append(payload)
+    return output
+
+
+def hit_conditioned_iou_rows(rows: List[Dict[str, Any]], analysis_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    diagnostics = analysis_config.get("diagnostics", {}) if isinstance(analysis_config.get("diagnostics", {}), dict) else {}
+    prompt_config = diagnostics.get("prompt_quality", {}) if isinstance(diagnostics.get("prompt_quality", {}), dict) else {}
+    hit_threshold = float(prompt_config.get("hit_threshold", 1.0))
+    output: List[Dict[str, Any]] = []
+    grouped = _method_rows(rows)
+    for (dataset, method), group_rows in sorted(grouped.items()):
+        hit_rows = [
+            row
+            for row in group_rows
+            if _is_number(row.get("PromptHitRate")) and float(row["PromptHitRate"]) >= hit_threshold
+        ]
+        values = [float(row["mIoU"]) for row in hit_rows if _is_number(row.get("mIoU"))]
+        payload: Dict[str, Any] = {
+            "diagnostic": "HitConditionedIoU",
+            "dataset": dataset,
+            "method": method,
+            "metric": "mIoU",
+            "threshold": hit_threshold,
+            "row_count": len(group_rows),
+            "hit_count": len(hit_rows),
+            "eligible_count": len(values),
+        }
+        if not hit_rows:
+            payload.update({"status": "no_prompt_hits", "value": None, "HitConditionedIoU": None})
+        elif not values:
+            payload.update({"status": "missing_metrics", "value": None, "HitConditionedIoU": None})
+        else:
+            value = _mean(values)
+            payload.update({"status": "ok", "value": value, "HitConditionedIoU": value})
+        output.append(payload)
+    return output
+
+
 def diagnostic_metric_rows(rows: List[Dict[str, Any]], analysis_config: Dict[str, Any]) -> List[Dict[str, Any]]:
     output: List[Dict[str, Any]] = []
     output.extend(aor_rows(rows, analysis_config))
     output.extend(pmcr_rows(rows, analysis_config))
     output.extend(fab_tr_rows(rows, analysis_config))
+    output.extend(prompt_aggregate_rows(rows, analysis_config))
+    output.extend(hit_conditioned_iou_rows(rows, analysis_config))
     return output

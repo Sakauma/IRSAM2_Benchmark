@@ -410,6 +410,124 @@ def _target_from_box_batch(
     return objectness[:, None], box_size, positive[:, None], objectness_weight[:, None]
 
 
+def _positive_balance_weight(torch: Any, positive: Any, *, max_positive_weight: float) -> Any:
+    positive = positive.float()
+    negative = 1.0 - positive
+    total = positive.flatten(1).shape[1]
+    pos_count = positive.flatten(1).sum(dim=1).clamp_min(1.0).view(-1, 1, 1, 1)
+    neg_count = negative.flatten(1).sum(dim=1).clamp_min(1.0).view(-1, 1, 1, 1)
+    pos_weight = (float(total) / (2.0 * pos_count)).clamp(max=float(max_positive_weight))
+    neg_weight = float(total) / (2.0 * neg_count)
+    return positive * pos_weight + negative * neg_weight
+
+
+def _objectness_loss(
+    *,
+    torch: Any,
+    F: Any,
+    logits: Any,
+    target: Any,
+    positive: Any,
+    objectness_weight: Any,
+    train_cfg: dict[str, Any],
+) -> Any:
+    mode = str(train_cfg.get("objectness_loss", "weighted_bce")).strip().lower()
+    base = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+    weight = objectness_weight.float()
+    if mode in {"balanced_bce", "balanced_focal", "focal_balanced"}:
+        weight = weight * _positive_balance_weight(
+            torch,
+            (positive > 0.0).float(),
+            max_positive_weight=float(train_cfg.get("max_positive_weight", 256.0)),
+        )
+    if mode in {"focal", "balanced_focal", "focal_balanced"}:
+        gamma = float(train_cfg.get("focal_gamma", 2.0))
+        alpha = float(train_cfg.get("focal_alpha", 0.75))
+        pt = torch.exp(-base)
+        alpha_factor = torch.where((positive > 0.0), torch.full_like(base, alpha), torch.full_like(base, 1.0 - alpha))
+        base = alpha_factor * (1.0 - pt).clamp_min(0.0).pow(gamma) * base
+    return (base * weight).mean()
+
+
+def _ranking_loss(
+    *,
+    torch: Any,
+    logits: Any,
+    positive: Any,
+    train_cfg: dict[str, Any],
+) -> Any:
+    weight = float(train_cfg.get("ranking_loss_weight", 0.0))
+    if weight <= 0.0:
+        return logits.new_tensor(0.0)
+    margin = float(train_cfg.get("ranking_margin", 1.0))
+    negative_top_k = max(1, int(train_cfg.get("ranking_negative_top_k", 32)))
+    flat_logits = logits.flatten(1)
+    flat_positive = (positive > 0.0).flatten(1)
+    losses = []
+    for sample_logits, sample_positive in zip(flat_logits, flat_positive):
+        if not bool(sample_positive.any()):
+            continue
+        pos_score = sample_logits[sample_positive].max()
+        neg_logits = sample_logits[~sample_positive]
+        if int(neg_logits.numel()) <= 0:
+            continue
+        top_k = min(negative_top_k, int(neg_logits.numel()))
+        neg_score = torch.topk(neg_logits, k=top_k).values.mean()
+        losses.append((margin + neg_score - pos_score).clamp_min(0.0))
+    if not losses:
+        return logits.new_tensor(0.0)
+    return torch.stack(losses).mean()
+
+
+def _heuristic_distill_loss(*, F: Any, logits: Any, image: Any, train_cfg: dict[str, Any]) -> Any:
+    weight = float(train_cfg.get("heuristic_distill_weight", 0.0))
+    if weight <= 0.0:
+        return logits.new_tensor(0.0)
+    teacher = image.float().max(dim=1, keepdim=True).values.clamp(0.0, 1.0)
+    return F.mse_loss(logits.sigmoid(), teacher)
+
+
+def _compute_auto_prompt_losses(
+    *,
+    torch: Any,
+    F: Any,
+    outputs: dict[str, Any],
+    batch: dict[str, Any],
+    train_cfg: dict[str, Any],
+) -> tuple[Any, dict[str, Any]]:
+    objectness = batch["objectness"]
+    objectness_weight = batch["objectness_weight"]
+    box_size = batch["box_size"]
+    box_weight = batch["box_weight"]
+    logits = outputs["objectness_logits"]
+    objectness_loss = _objectness_loss(
+        torch=torch,
+        F=F,
+        logits=logits,
+        target=objectness,
+        positive=box_weight,
+        objectness_weight=objectness_weight,
+        train_cfg=train_cfg,
+    )
+    raw_box_loss = F.smooth_l1_loss(outputs["box_size"], box_size, reduction="none")
+    weighted_box_loss = raw_box_loss * box_weight
+    box_loss = weighted_box_loss.sum() / box_weight.sum().clamp_min(1.0)
+    ranking_loss = _ranking_loss(torch=torch, logits=logits, positive=box_weight, train_cfg=train_cfg)
+    distill_loss = _heuristic_distill_loss(F=F, logits=logits, image=batch["image"], train_cfg=train_cfg)
+    loss = (
+        objectness_loss
+        + float(train_cfg.get("box_loss_weight", 0.1)) * box_loss
+        + float(train_cfg.get("ranking_loss_weight", 0.0)) * ranking_loss
+        + float(train_cfg.get("heuristic_distill_weight", 0.0)) * distill_loss
+    )
+    return loss, {
+        "objectness_loss": objectness_loss,
+        "box_loss": box_loss,
+        "ranking_loss": ranking_loss,
+        "heuristic_distill_loss": distill_loss,
+    }
+
+
 def _build_dataset_class():
     _, _, _, Dataset = _require_torch()
 
@@ -845,7 +963,7 @@ def _train_tensor_batch(
     non_blocking: bool,
     use_amp: bool,
     step_optimizer: bool = True,
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float, float, float, float, float]:
     step_started = time.perf_counter()
     image = batch["image"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
     objectness = batch["objectness"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
@@ -855,11 +973,20 @@ def _train_tensor_batch(
     optimizer.zero_grad(set_to_none=True)
     with _autocast_context(torch, enabled=use_amp):
         outputs = model(image)
-        objectness_loss = F.binary_cross_entropy_with_logits(outputs["objectness_logits"], objectness, weight=objectness_weight)
-        raw_box_loss = F.smooth_l1_loss(outputs["box_size"], box_size, reduction="none")
-        weighted_box_loss = raw_box_loss * box_weight
-        box_loss = weighted_box_loss.sum() / box_weight.sum().clamp_min(1.0)
-        loss = objectness_loss + float(train_cfg.get("box_loss_weight", 0.1)) * box_loss
+        loss, loss_parts = _compute_auto_prompt_losses(
+            torch=torch,
+            F=F,
+            outputs=outputs,
+            batch={
+                **batch,
+                "image": image,
+                "objectness": objectness,
+                "objectness_weight": objectness_weight,
+                "box_size": box_size,
+                "box_weight": box_weight,
+            },
+            train_cfg=train_cfg,
+        )
     if scaler is not None:
         scaler.scale(loss).backward()
         if step_optimizer:
@@ -871,8 +998,10 @@ def _train_tensor_batch(
             optimizer.step()
     return (
         float(loss.detach().cpu()),
-        float(objectness_loss.detach().cpu()),
-        float(box_loss.detach().cpu()),
+        float(loss_parts["objectness_loss"].detach().cpu()),
+        float(loss_parts["box_loss"].detach().cpu()),
+        float(loss_parts["ranking_loss"].detach().cpu()),
+        float(loss_parts["heuristic_distill_loss"].detach().cpu()),
         (time.perf_counter() - step_started) * 1000.0,
     )
 
@@ -1106,6 +1235,8 @@ def _train_auto_prompt_cached_from_config(
         loss_sum = 0.0
         objectness_sum = 0.0
         box_sum = 0.0
+        ranking_sum = 0.0
+        distill_sum = 0.0
         batch_count = 0
         epoch_sample_count = 0
         dense_batches = (len(dense_cache) + batch_size - 1) // batch_size if dense_cache is not None else 0
@@ -1121,10 +1252,11 @@ def _train_auto_prompt_cached_from_config(
         )
 
         def consume_batch(batch: dict[str, Any], *, source: str, data_wait_ms: float = 0.0) -> bool:
-            nonlocal loss_sum, objectness_sum, box_sum, batch_count, epoch_sample_count, trained_sample_events, heatmap_samples
+            nonlocal loss_sum, objectness_sum, box_sum, ranking_sum, distill_sum
+            nonlocal batch_count, epoch_sample_count, trained_sample_events, heatmap_samples
             if max_steps_per_epoch > 0 and batch_count >= max_steps_per_epoch:
                 return False
-            loss_value, objectness_value, box_value, step_ms = _train_tensor_batch(
+            loss_value, objectness_value, box_value, ranking_value, distill_value, step_ms = _train_tensor_batch(
                 torch=torch,
                 F=F,
                 model=model,
@@ -1143,6 +1275,8 @@ def _train_auto_prompt_cached_from_config(
             loss_sum += loss_value
             objectness_sum += objectness_value
             box_sum += box_value
+            ranking_sum += ranking_value
+            distill_sum += distill_value
             if epoch == 0:
                 _record_batch_counts(batch, first_epoch_sample_counts)
             if len(heatmap_samples) < heatmap_limit:
@@ -1162,6 +1296,8 @@ def _train_auto_prompt_cached_from_config(
                     loss=f"{loss_value:.4f}",
                     objectness=f"{objectness_value:.4f}",
                     box=f"{box_value:.4f}",
+                    rank=f"{ranking_value:.4f}",
+                    distill=f"{distill_value:.4f}",
                     lr=f"{optimizer.param_groups[0]['lr']:.2e}",
                     source=source,
                 )
@@ -1212,6 +1348,8 @@ def _train_auto_prompt_cached_from_config(
                 "loss": loss_sum / denom,
                 "objectness_loss": objectness_sum / denom,
                 "box_loss": box_sum / denom,
+                "ranking_loss": ranking_sum / denom,
+                "heuristic_distill_loss": distill_sum / denom,
             }
         )
 
@@ -1319,6 +1457,8 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
         loss_sum = 0.0
         objectness_sum = 0.0
         box_sum = 0.0
+        ranking_sum = 0.0
+        distill_sum = 0.0
         batch_count = 0
         epoch_sample_count = 0
         progress_total = max_steps_per_epoch if max_steps_per_epoch > 0 else None
@@ -1364,11 +1504,20 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
                 optimizer.zero_grad(set_to_none=True)
                 with _autocast_context(torch, enabled=use_amp):
                     outputs = model(image)
-                    objectness_loss = F.binary_cross_entropy_with_logits(outputs["objectness_logits"], objectness, weight=objectness_weight)
-                    raw_box_loss = F.smooth_l1_loss(outputs["box_size"], box_size, reduction="none")
-                    weighted_box_loss = raw_box_loss * box_weight
-                    box_loss = weighted_box_loss.sum() / box_weight.sum().clamp_min(1.0)
-                    loss = objectness_loss + float(train_cfg.get("box_loss_weight", 0.1)) * box_loss
+                    loss, loss_parts = _compute_auto_prompt_losses(
+                        torch=torch,
+                        F=F,
+                        outputs=outputs,
+                        batch={
+                            **batch,
+                            "image": image,
+                            "objectness": objectness,
+                            "objectness_weight": objectness_weight,
+                            "box_size": box_size,
+                            "box_weight": box_weight,
+                        },
+                        train_cfg=train_cfg,
+                    )
                 if scaler is not None:
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
@@ -1379,11 +1528,15 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
                 step_ms = (time.perf_counter() - step_started) * 1000.0
 
                 loss_value = float(loss.detach().cpu())
-                objectness_value = float(objectness_loss.detach().cpu())
-                box_value = float(box_loss.detach().cpu())
+                objectness_value = float(loss_parts["objectness_loss"].detach().cpu())
+                box_value = float(loss_parts["box_loss"].detach().cpu())
+                ranking_value = float(loss_parts["ranking_loss"].detach().cpu())
+                distill_value = float(loss_parts["heuristic_distill_loss"].detach().cpu())
                 loss_sum += loss_value
                 objectness_sum += objectness_value
                 box_sum += box_value
+                ranking_sum += ranking_value
+                distill_sum += distill_value
                 batch_count += 1
                 batch_sample_count = len(batch["sample_ids"])
                 epoch_sample_count += batch_sample_count
@@ -1412,6 +1565,8 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
                         loss=f"{loss_value:.4f}",
                         objectness=f"{objectness_value:.4f}",
                         box=f"{box_value:.4f}",
+                        rank=f"{ranking_value:.4f}",
+                        distill=f"{distill_value:.4f}",
                         lr=f"{optimizer.param_groups[0]['lr']:.2e}",
                     )
                     progress.update(1)
@@ -1435,6 +1590,8 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
                 "loss": loss_sum / denom,
                 "objectness_loss": objectness_sum / denom,
                 "box_loss": box_sum / denom,
+                "ranking_loss": ranking_sum / denom,
+                "heuristic_distill_loss": distill_sum / denom,
             }
         )
 

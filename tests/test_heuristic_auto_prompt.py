@@ -62,6 +62,7 @@ class HeuristicAutoPromptTests(unittest.TestCase):
             "box": [5.0, 5.0, 10.0, 10.0],
             "points": [[7.0, 7.0], [0.0, 0.0], [15.0, 15.0]],
             "point_labels": [1, 0, 0],
+            "candidate_points": [[0.0, 0.0, 0.9], [7.0, 7.0, 0.8]],
             "candidate_score": 0.75,
             "fallback": False,
         }
@@ -74,6 +75,9 @@ class HeuristicAutoPromptTests(unittest.TestCase):
         self.assertEqual(metrics["AutoPromptNegativePointCount"], 2.0)
         self.assertEqual(metrics["NegativePromptInGtRate"], 0.0)
         self.assertEqual(metrics["AutoPromptFallback"], 0.0)
+        self.assertEqual(metrics["PromptBorderRate"], 0.0)
+        self.assertEqual(metrics["PromptTopKHitRate"], 1.0)
+        self.assertEqual(metrics["AutoPromptCandidateCount"], 2.0)
 
     def test_load_from_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:

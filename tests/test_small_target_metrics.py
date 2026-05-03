@@ -23,10 +23,18 @@ class SmallTargetMetricTests(unittest.TestCase):
     def test_prompt_metrics(self):
         gt = np.zeros((8, 8), dtype=np.float32)
         gt[2:4, 2:4] = 1.0
-        metrics = prompt_metrics({"point": [2.5, 2.5], "box": [1, 1, 5, 5]}, gt)
+        metrics = prompt_metrics({"point": [2.5, 2.5], "box": [1, 1, 5, 5], "candidate_points": [[0, 0, 0.9], [2.5, 2.5, 0.8]]}, gt)
         self.assertEqual(metrics["PromptHitRate"], 1.0)
         self.assertEqual(metrics["PromptBoxCoverage"], 1.0)
         self.assertLess(metrics["PromptDistanceToCentroid"], 1.0)
+        self.assertEqual(metrics["PromptTopKHitRate"], 1.0)
+
+    def test_prompt_metrics_detect_border_prompt(self):
+        gt = np.zeros((8, 8), dtype=np.float32)
+        gt[0, 7] = 1.0
+        metrics = prompt_metrics({"point": [7.0, 0.0], "border_metric_px": 1}, gt)
+        self.assertEqual(metrics["PromptHitRate"], 1.0)
+        self.assertEqual(metrics["PromptBorderRate"], 1.0)
 
     def test_boundary_f1_tolerance_handles_one_pixel_shift(self):
         gt = np.zeros((8, 8), dtype=np.float32)

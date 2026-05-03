@@ -113,10 +113,40 @@ def _to_numpy_first(value: Any) -> np.ndarray:
     return arr
 
 
-def _topk_candidates(score: np.ndarray, *, top_k: int, threshold: float, nms_radius: int) -> list[tuple[int, int, float]]:
+def _border_distance(x: int, y: int, width: int, height: int) -> int:
+    left = max(0, int(x))
+    top = max(0, int(y))
+    right = max(0, int(width) - 1 - int(x))
+    bottom = max(0, int(height) - 1 - int(y))
+    return int(min(left, top, right, bottom))
+
+
+def _suppress_border(score: np.ndarray, border_px: int) -> np.ndarray:
+    work = np.asarray(score, dtype=np.float32).copy()
+    border = max(0, int(border_px))
+    if border <= 0:
+        return work
+    h, w = work.shape
+    if h <= 2 * border or w <= 2 * border:
+        return work
+    work[:border, :] = -1.0
+    work[-border:, :] = -1.0
+    work[:, :border] = -1.0
+    work[:, -border:] = -1.0
+    return work
+
+
+def _topk_candidates(
+    score: np.ndarray,
+    *,
+    top_k: int,
+    threshold: float,
+    nms_radius: int,
+    border_suppression_px: int = 0,
+) -> list[tuple[int, int, float]]:
     work = np.asarray(score, dtype=np.float32)
     h, w = work.shape
-    suppressed = work.copy()
+    suppressed = _suppress_border(work, border_suppression_px)
     candidates: list[tuple[int, int, float]] = []
     for _ in range(max(1, min(int(top_k), int(work.size)))):
         flat_idx = int(np.argmax(suppressed))
@@ -153,6 +183,7 @@ def decode_auto_prompt(
     point_budget: int = 1,
     response_threshold: float = 0.0,
     nms_radius: int = 4,
+    border_suppression_px: int = 0,
 ) -> LearnedAutoPrompt:
     logits = _to_numpy_first(objectness_logits)
     if logits.ndim == 3:
@@ -169,7 +200,13 @@ def decode_auto_prompt(
         raise ValueError(f"Expected box_size with shape 2xHxW or HxWx2, got {sizes.shape}.")
 
     objectness = 1.0 / (1.0 + np.exp(-logits))
-    candidates = _topk_candidates(objectness, top_k=max(1, int(top_k)), threshold=float(response_threshold), nms_radius=int(nms_radius))
+    candidates = _topk_candidates(
+        objectness,
+        top_k=max(1, int(top_k)),
+        threshold=float(response_threshold),
+        nms_radius=int(nms_radius),
+        border_suppression_px=int(border_suppression_px),
+    )
     x, y, primary_score = candidates[0]
     box_w = max(float(min_box_side), float(size_channels[0, y, x]))
     box_h = max(float(min_box_side), float(size_channels[1, y, x]))
@@ -202,10 +239,13 @@ def decode_auto_prompt(
         "points": points,
         "point_labels": labels,
         "candidate_score": float(primary_score),
+        "candidate_points": [[float(px), float(py), float(score)] for px, py, score in candidates],
         "candidate_rank": 0,
         "candidate_count": len(candidates),
         "candidate_top_k": int(top_k),
         "candidate_nms_radius": int(nms_radius),
+        "border_suppression_px": int(border_suppression_px),
+        "primary_border_distance_px": _border_distance(int(x), int(y), int(image_width), int(image_height)),
         "positive_point_count": len(positive_candidates),
         "fallback": bool(float(primary_score) < float(response_threshold)),
         "response_threshold": float(response_threshold),
@@ -312,6 +352,7 @@ def predict_learned_auto_prompt_from_path(
     point_budget: int = 1,
     response_threshold: float = 0.0,
     nms_radius: int = 4,
+    border_suppression_px: int = 0,
     use_local_contrast: bool = True,
     use_top_hat: bool = True,
 ) -> LearnedAutoPrompt:
@@ -333,4 +374,5 @@ def predict_learned_auto_prompt_from_path(
         point_budget=point_budget,
         response_threshold=response_threshold,
         nms_radius=nms_radius,
+        border_suppression_px=border_suppression_px,
     )
