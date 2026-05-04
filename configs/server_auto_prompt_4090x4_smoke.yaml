@@ -1,4 +1,4 @@
-# SAM2-IR-QD M1 smoke config: fast learned IR auto prompt training + E2 connectivity check.
+# SAM2-IR-QD M3 smoke config: fast learned IR auto prompt training + rerank/calibration connectivity check.
 # Recommended server launch:
 #   tmux new -s irsam2_auto_prompt_smoke
 #   PYTHONPATH=src python scripts/run_4090x4_auto_prompt.py --config configs/server_auto_prompt_4090x4_smoke.yaml --stop-on-error
@@ -6,11 +6,11 @@
 
 benchmark:
   suite_name: "server_auto_prompt_4090x4_smoke"
-  artifact_subdir: "sam2_ir_qd_m1_auto_prompt_smoke"
+  artifact_subdir: "sam2_ir_qd_m3_prompt_rerank_smoke_v1"
 
 auto_prompt:
-  experiment_id: "sam2_ir_qd_m1_auto_prompt_smoke_v1"
-  artifact_subdir: "sam2_ir_qd_m1_auto_prompt_smoke"
+  experiment_id: "sam2_ir_qd_m3_prompt_rerank_smoke_v1"
+  artifact_subdir: "sam2_ir_qd_m3_prompt_rerank_smoke_v1"
   train_gpu: "0"
   eval_gpus: ["1", "6", "7", "0"]
   train_datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k"]
@@ -96,7 +96,7 @@ model_defaults:
 runtime_defaults:
   artifact_root: "artifacts"
   reference_results_root: "reference_results"
-  output_name: "sam2_ir_qd_m1_auto_prompt_smoke/default"
+  output_name: "sam2_ir_qd_m3_prompt_rerank_smoke_v1/default"
   device: "cuda"
   num_workers: 0
   smoke_test: false

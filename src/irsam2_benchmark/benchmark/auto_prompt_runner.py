@@ -26,6 +26,7 @@ PROJECT_ROOT = fr.PROJECT_ROOT
 TRAIN_AUTO_PROMPT_PY = PROJECT_ROOT / "scripts" / "train_auto_prompt.py"
 DEFAULT_AUTO_PROMPT_CONFIG = PROJECT_ROOT / "configs" / "server_auto_prompt_4090x4.local.yaml"
 DEFAULT_AUTO_PROMPT_EXAMPLE_CONFIG = PROJECT_ROOT / "configs" / "server_auto_prompt_4090x4.example.yaml"
+DEFAULT_AUTO_PROMPT_EXPERIMENT_ID = "sam2_ir_qd_m3_prompt_rerank_v1"
 PREFLIGHT_MODES = ("fast", "full", "off")
 DEFAULT_PREFLIGHT_SAMPLE_LIMIT = 256
 DEFAULT_PREFLIGHT_IMAGE_LIMIT = 256
@@ -127,8 +128,8 @@ def _default_config() -> Path:
 
 def _auto_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     config = copy.deepcopy(raw.get("auto_prompt", {}))
-    config.setdefault("experiment_id", "sam2_ir_qd_m1_auto_prompt")
-    config.setdefault("artifact_subdir", "sam2_ir_qd_m1_auto_prompt")
+    config.setdefault("experiment_id", DEFAULT_AUTO_PROMPT_EXPERIMENT_ID)
+    config.setdefault("artifact_subdir", DEFAULT_AUTO_PROMPT_EXPERIMENT_ID)
     config.setdefault("train_datasets", ["nuaa_sirst", "nudt_sirst", "irstd_1k", "rbgt_tiny_ir_box"])
     config.setdefault("eval_suites", ["auto_prompt"])
     config.setdefault("train_gpu", "0")
@@ -592,7 +593,7 @@ def _build_run_plan(
     run_plan = []
     analysis_records: list[dict[str, Any]] = []
     artifact_base = fr._artifact_base(paths)
-    artifact_subdir = str(suite_config.get("artifact_subdir", "sam2_ir_qd_m1_auto_prompt"))
+    artifact_subdir = str(suite_config.get("artifact_subdir", DEFAULT_AUTO_PROMPT_EXPERIMENT_ID))
     if smoke_test:
         artifact_subdir = f"{artifact_subdir}_smoke"
     for suite_key, suite_entry in fr._iter_requested_suites(suite_config, selected_suites):
@@ -885,7 +886,7 @@ def main(argv: List[str] | None = None) -> int:
     paths, suite_config, base_matrix, config_sources = fr._load_complete_benchmark_config(config_path)
     _ensure_auto_methods(base_matrix)
     artifact_base = fr._artifact_base(paths)
-    artifact_subdir = str(auto_config.get("artifact_subdir") or suite_config.get("artifact_subdir", "sam2_ir_qd_m1_auto_prompt"))
+    artifact_subdir = str(auto_config.get("artifact_subdir") or suite_config.get("artifact_subdir", DEFAULT_AUTO_PROMPT_EXPERIMENT_ID))
     if args.smoke_test:
         artifact_subdir = f"{artifact_subdir}_smoke"
     suite_config["artifact_subdir"] = artifact_subdir
