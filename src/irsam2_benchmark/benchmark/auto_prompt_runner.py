@@ -59,6 +59,30 @@ DEFAULT_LEARNED_METHODS: Dict[str, Dict[str, Any]] = {
             "prompt_policy": {"name": "learned_auto_box_point_neg", "prompt_type": "box+point", "prompt_source": "synthesized", "prompt_budget": 6},
         },
     },
+    "sam2_learned_auto_point_rerank": {
+        "baseline": "sam2_learned_auto_point_rerank_prompt",
+        "method": {"name": "sam2_learned_auto_point_rerank", "family": "sam2_learned_auto_prompt_m3", "modality": "ir"},
+        "evaluation": {
+            "inference_mode": "point",
+            "prompt_policy": {"name": "learned_auto_point_rerank", "prompt_type": "point", "prompt_source": "synthesized", "prompt_budget": 1},
+        },
+    },
+    "sam2_learned_auto_box_point_calibrated": {
+        "baseline": "sam2_learned_auto_box_point_calibrated_prompt",
+        "method": {"name": "sam2_learned_auto_box_point_calibrated", "family": "sam2_learned_auto_prompt_m3", "modality": "ir"},
+        "evaluation": {
+            "inference_mode": "box+point",
+            "prompt_policy": {"name": "learned_auto_box_point_calibrated", "prompt_type": "box+point", "prompt_source": "synthesized", "prompt_budget": 2},
+        },
+    },
+    "sam2_learned_auto_box_point_calibrated_neg": {
+        "baseline": "sam2_learned_auto_box_point_calibrated_neg_prompt",
+        "method": {"name": "sam2_learned_auto_box_point_calibrated_neg", "family": "sam2_learned_auto_prompt_m3", "modality": "ir"},
+        "evaluation": {
+            "inference_mode": "box+point",
+            "prompt_policy": {"name": "learned_auto_box_point_calibrated_neg", "prompt_type": "box+point", "prompt_source": "synthesized", "prompt_budget": 6},
+        },
+    },
 }
 
 DEFAULT_HEURISTIC_METHODS: Dict[str, Dict[str, Any]] = {
@@ -175,6 +199,8 @@ def _inject_learned_prompt_config(
         )
         method_payload["prompt_use_local_contrast"] = bool(auto_config.get("model", {}).get("use_local_contrast", True))
         method_payload["prompt_use_top_hat"] = bool(auto_config.get("model", {}).get("use_top_hat", True))
+        if auto_config.get("prompt_reranker"):
+            method_payload["prompt_reranker"] = copy.deepcopy(auto_config["prompt_reranker"])
         method_payload["heatmaps"] = {
             "enabled": bool(auto_config.get("heatmaps", {}).get("eval_enabled", True)),
             "root": str(heatmap_root),

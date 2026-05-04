@@ -18,7 +18,21 @@ from ..data.prompt_synthesis import (
     clamp_box_xyxy,
 )
 from ..data.sample import Sample
-from ..models import LEARNED_IR_AUTO_PROMPT_PROTOCOL, SAM2ModelAdapter, load_auto_prompt_model, load_image_rgb, predict_learned_auto_prompt_from_path
+from ..models import (
+    LEARNED_IR_AUTO_PROMPT_PROTOCOL,
+    SAM2ModelAdapter,
+    apply_mask_feedback,
+    box_calibration_metadata,
+    calibrate_box_from_results,
+    candidate_metadata,
+    feedback_metadata,
+    load_auto_prompt_model,
+    load_image_rgb,
+    make_scaled_boxes,
+    predict_learned_auto_prompt_from_path,
+    prompt_reranker_config_from_dict,
+    rank_prompt_candidates,
+)
 from ..evaluation.heatmaps import write_heatmap_artifact
 
 
@@ -481,11 +495,15 @@ class LearnedAutoPromptedSAM2(BaseMethod):
         prompt_mode: InferenceMode,
         *,
         use_negative_ring: bool = False,
+        rerank_candidates: bool = False,
+        calibrate_box: bool = False,
     ):
         self.adapter = adapter
         self.config = config
         self.inference_mode = prompt_mode
         self.use_negative_ring = use_negative_ring
+        self.rerank_candidates = bool(rerank_candidates)
+        self.calibrate_box = bool(calibrate_box)
         self.device = str(config.method.get("prompt_device") or getattr(config.runtime, "device", "cpu"))
         self.min_box_side = float(config.method.get("prompt_min_box_side", 2.0))
         self.negative_ring_offset = float(config.method.get("prompt_negative_ring_offset", 4.0))
@@ -496,6 +514,10 @@ class LearnedAutoPromptedSAM2(BaseMethod):
         self.border_suppression_px = int(config.method.get("prompt_border_suppression_px", 0))
         self.use_local_contrast = bool(config.method.get("prompt_use_local_contrast", True))
         self.use_top_hat = bool(config.method.get("prompt_use_top_hat", True))
+        reranker_payload = config.method.get("prompt_reranker", {})
+        reranker_payload = dict(reranker_payload) if isinstance(reranker_payload, dict) else {}
+        reranker_payload.setdefault("min_box_side", self.min_box_side)
+        self._reranker_config = prompt_reranker_config_from_dict(reranker_payload)
         heatmap_config = config.method.get("heatmaps", {})
         heatmap_config = heatmap_config if isinstance(heatmap_config, dict) else {}
         self._heatmap_enabled = bool(heatmap_config.get("enabled", False))
@@ -533,9 +555,9 @@ class LearnedAutoPromptedSAM2(BaseMethod):
             self._prompt_model, self._checkpoint_metadata = load_auto_prompt_model(self._checkpoint_path, device=self.device)
         return self._prompt_model
 
-    def _auto_prompt(self, sample: Sample) -> Dict[str, Any]:
+    def _auto_prompt_object(self, sample: Sample):
         model = self._ensure_prompt_model()
-        auto_prompt = predict_learned_auto_prompt_from_path(
+        return predict_learned_auto_prompt_from_path(
             model=model,
             image_path=sample.image_path,
             device=self.device,
@@ -550,6 +572,8 @@ class LearnedAutoPromptedSAM2(BaseMethod):
             use_local_contrast=self.use_local_contrast,
             use_top_hat=self.use_top_hat,
         )
+
+    def _prompt_from_auto_prompt(self, sample: Sample, auto_prompt) -> Dict[str, Any]:
         heatmap_paths = self._maybe_write_heatmap(sample, auto_prompt)
         prompt = {
             **auto_prompt.metadata,
@@ -563,6 +587,9 @@ class LearnedAutoPromptedSAM2(BaseMethod):
             "objectness_heatmap_overlay": heatmap_paths.get("overlay", ""),
         }
         return prompt
+
+    def _auto_prompt(self, sample: Sample) -> Dict[str, Any]:
+        return self._prompt_from_auto_prompt(sample, self._auto_prompt_object(sample))
 
     def _maybe_write_heatmap(self, sample: Sample, auto_prompt) -> dict[str, str]:
         if not self._heatmap_enabled:
@@ -593,8 +620,28 @@ class LearnedAutoPromptedSAM2(BaseMethod):
         self._saved_heatmaps += 1
         return paths
 
-    def _predict_kwargs_and_prompt(self, sample: Sample) -> tuple[Dict[str, Any], Dict[str, Any]]:
-        prompt = self._auto_prompt(sample)
+    def _point_labels_for_box(self, point: list[float], box: list[float], *, width: int, height: int) -> tuple[list[list[float]], list[int]]:
+        points = [[float(point[0]), float(point[1])]]
+        labels = [1]
+        if not self.use_negative_ring:
+            return points, labels
+        x1, y1, x2, y2 = [float(value) for value in box]
+        cx = 0.5 * (x1 + x2)
+        cy = 0.5 * (y1 + y2)
+        offset = float(self.negative_ring_offset)
+        raw_points = [
+            [cx, y1 - offset],
+            [cx, y2 + offset],
+            [x1 - offset, cy],
+            [x2 + offset, cy],
+        ]
+        max_x = max(0.0, float(width - 1))
+        max_y = max(0.0, float(height - 1))
+        points.extend([[float(min(max(0.0, x), max_x)), float(min(max(0.0, y), max_y))] for x, y in raw_points])
+        labels.extend([0] * len(raw_points))
+        return points, labels
+
+    def _kwargs_from_prompt(self, prompt: Dict[str, Any]) -> Dict[str, Any]:
         kwargs: Dict[str, Any] = {"multimask_output": self.inference_mode == InferenceMode.MULTI_MASK}
         if self.inference_mode == InferenceMode.POINT:
             kwargs["points"] = np.array(prompt["points"], dtype=np.float32)
@@ -607,7 +654,122 @@ class LearnedAutoPromptedSAM2(BaseMethod):
             kwargs["point_labels"] = np.array(prompt["point_labels"], dtype=np.int32)
         else:
             raise ValueError(f"Unsupported learned auto prompt mode: {self.inference_mode.value}")
-        return kwargs, prompt
+        return kwargs
+
+    def _apply_rerank_to_prompt(self, prompt: Dict[str, Any], rerank_result) -> Dict[str, Any]:
+        selected = rerank_result.selected
+        ranked_points = [
+            [float(item.point[0]), float(item.point[1]), float(item.final_score)]
+            for item in rerank_result.candidates
+        ]
+        prompt.update(
+            {
+                "point": [float(selected.point[0]), float(selected.point[1])],
+                "points": [[float(selected.point[0]), float(selected.point[1])]],
+                "point_labels": [1],
+                "candidate_score": float(selected.final_score),
+                "candidate_points": ranked_points,
+                "candidate_rank": int(selected.index),
+                "candidate_count": len(rerank_result.candidates),
+                "point_rule": "multi_cue_reranked_learned_objectness",
+                "rerank_policy": rerank_result.policy,
+                "rerank_selected_index": int(selected.index),
+                "rerank_prior_score": float(selected.prior_score),
+                "rerank_feedback_score": selected.feedback_score,
+                "rerank_objectness_score": float(selected.objectness),
+                "rerank_candidates_json": json.dumps(candidate_metadata(rerank_result.candidates), ensure_ascii=False),
+                "rerank_feedback_json": json.dumps(feedback_metadata(selected.feedback), ensure_ascii=False),
+            }
+        )
+        return prompt
+
+    def _rerank_prompt(self, sample: Sample, image_rgb: np.ndarray, auto_prompt, prompt: Dict[str, Any]):
+        rerank_result = rank_prompt_candidates(auto_prompt, sample.image_path, self._reranker_config)
+        feedback_limit = max(0, int(self._reranker_config.max_feedback_candidates))
+        feedback_candidates = rerank_result.candidates[:feedback_limit]
+        if self._reranker_config.use_mask_feedback and feedback_candidates:
+            feedback_results = self.adapter.predict_prompts_for_image(
+                image_rgb,
+                points=[np.array([candidate.point], dtype=np.float32) for candidate in feedback_candidates],
+                point_labels=[np.array([1], dtype=np.int32) for _ in feedback_candidates],
+                multimask_output=False,
+            )
+            rerank_result = apply_mask_feedback(
+                rerank_result.candidates,
+                image_path=sample.image_path,
+                sam_results=feedback_results,
+                config=self._reranker_config,
+            )
+        return self._apply_rerank_to_prompt(prompt, rerank_result), rerank_result
+
+    def _calibrated_box_prediction(
+        self,
+        *,
+        sample: Sample,
+        image_rgb: np.ndarray,
+        auto_prompt,
+        prompt: Dict[str, Any],
+        rerank_result,
+    ) -> Dict[str, Any]:
+        height, width = int(image_rgb.shape[0]), int(image_rgb.shape[1])
+        selected = rerank_result.selected
+        boxes = make_scaled_boxes(
+            point=selected.point,
+            base_box=auto_prompt.box,
+            image_width=width,
+            image_height=height,
+            min_box_side=self.min_box_side,
+            scales=self._reranker_config.box_scales,
+        )
+        if not boxes:
+            boxes = [(1.0, auto_prompt.box)]
+        points: list[np.ndarray | None] = []
+        point_labels: list[np.ndarray | None] = []
+        for _, box in boxes:
+            if self.inference_mode == InferenceMode.BOX:
+                points.append(None)
+                point_labels.append(None)
+                continue
+            candidate_points, candidate_labels = self._point_labels_for_box(selected.point, box, width=width, height=height)
+            points.append(np.array(candidate_points, dtype=np.float32))
+            point_labels.append(np.array(candidate_labels, dtype=np.int32))
+        sam_results = self.adapter.predict_prompts_for_image(
+            image_rgb,
+            boxes=[box for _, box in boxes],
+            points=points,
+            point_labels=point_labels,
+            multimask_output=False,
+        )
+        calibration = calibrate_box_from_results(
+            boxes=boxes,
+            image_path=sample.image_path,
+            point=selected.point,
+            sam_results=sam_results,
+            config=self._reranker_config,
+        )
+        selected_box = calibration.selected.box
+        final_points, final_labels = self._point_labels_for_box(selected.point, selected_box, width=width, height=height)
+        prompt.update(
+            {
+                "box": selected_box,
+                "points": final_points,
+                "point_labels": final_labels,
+                "box_variant": "calibrated_multi_scale",
+                "box_rule": "multi_cue_rerank_then_sam2_feedback_box_calibration",
+                "box_width": float(selected_box[2] - selected_box[0]),
+                "box_height": float(selected_box[3] - selected_box[1]),
+                "box_calibration_policy": calibration.policy,
+                "box_calibration_scale": float(calibration.selected.scale),
+                "box_calibration_score": float(calibration.selected.score),
+                "box_calibration_candidate_count": len(calibration.candidates),
+                "box_calibration_candidates_json": json.dumps(box_calibration_metadata(calibration.candidates), ensure_ascii=False),
+            }
+        )
+        return self._prediction_from_result(calibration.selected.sam_result, prompt)
+
+    def _predict_kwargs_and_prompt(self, sample: Sample) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        prompt = self._auto_prompt(sample)
+        return self._kwargs_from_prompt(prompt), prompt
 
     def _prediction_from_result(self, result: Dict[str, Any], prompt: Dict[str, Any]) -> Dict[str, Any]:
         masks = result["masks"]
@@ -617,11 +779,30 @@ class LearnedAutoPromptedSAM2(BaseMethod):
 
     def predict_sample(self, sample: Sample) -> Dict[str, Any]:
         image_rgb = load_image_rgb(sample.image_path)
+        if self.rerank_candidates or self.calibrate_box:
+            auto_prompt = self._auto_prompt_object(sample)
+            prompt = self._prompt_from_auto_prompt(sample, auto_prompt)
+            prompt, rerank_result = self._rerank_prompt(sample, image_rgb, auto_prompt, prompt)
+            if self.calibrate_box:
+                return self._calibrated_box_prediction(
+                    sample=sample,
+                    image_rgb=image_rgb,
+                    auto_prompt=auto_prompt,
+                    prompt=prompt,
+                    rerank_result=rerank_result,
+                )
+            selected_result = rerank_result.selected.sam_result
+            if selected_result is not None and self.inference_mode == InferenceMode.POINT:
+                return self._prediction_from_result(selected_result, prompt)
+            result = self.adapter.predict_image(image_rgb, **self._kwargs_from_prompt(prompt))
+            return self._prediction_from_result(result, prompt)
         kwargs, prompt = self._predict_kwargs_and_prompt(sample)
         result = self.adapter.predict_image(image_rgb, **kwargs)
         return self._prediction_from_result(result, prompt)
 
     def predict_samples(self, samples: List[Sample]) -> Dict[str, Dict[str, Any]]:
+        if self.rerank_candidates or self.calibrate_box:
+            return {sample.sample_id: self.predict_sample(sample) for sample in samples}
         return _predict_prompted_sam2_samples(
             samples,
             adapter=self.adapter,
@@ -647,6 +828,9 @@ CANONICAL_BASELINE_NAMES = (
     "sam2_learned_auto_box_prompt",
     "sam2_learned_auto_box_point_prompt",
     "sam2_learned_auto_box_point_neg_prompt",
+    "sam2_learned_auto_point_rerank_prompt",
+    "sam2_learned_auto_box_point_calibrated_prompt",
+    "sam2_learned_auto_box_point_calibrated_neg_prompt",
 )
 
 
@@ -676,5 +860,26 @@ def build_baseline_registry(config: AppConfig) -> Dict[str, BenchmarkMethodProto
             config,
             prompt_mode=InferenceMode.BOX_POINT,
             use_negative_ring=True,
+        ),
+        "sam2_learned_auto_point_rerank_prompt": LearnedAutoPromptedSAM2(
+            adapter,
+            config,
+            prompt_mode=InferenceMode.POINT,
+            rerank_candidates=True,
+        ),
+        "sam2_learned_auto_box_point_calibrated_prompt": LearnedAutoPromptedSAM2(
+            adapter,
+            config,
+            prompt_mode=InferenceMode.BOX_POINT,
+            rerank_candidates=True,
+            calibrate_box=True,
+        ),
+        "sam2_learned_auto_box_point_calibrated_neg_prompt": LearnedAutoPromptedSAM2(
+            adapter,
+            config,
+            prompt_mode=InferenceMode.BOX_POINT,
+            use_negative_ring=True,
+            rerank_candidates=True,
+            calibrate_box=True,
         ),
     }

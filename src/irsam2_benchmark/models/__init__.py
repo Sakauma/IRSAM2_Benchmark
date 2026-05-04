@@ -10,6 +10,23 @@ from .learned_auto_prompt import (
     predict_learned_auto_prompt_from_path,
     save_auto_prompt_checkpoint,
 )
+from .prompt_reranker import (
+    BoxCalibrationCandidate,
+    BoxCalibrationResult,
+    PromptCandidate,
+    PromptRerankerConfig,
+    RerankResult,
+    apply_mask_feedback,
+    box_calibration_metadata,
+    calibrate_box_from_results,
+    candidate_metadata,
+    feedback_metadata,
+    make_scaled_boxes,
+    prompt_reranker_config_from_dict,
+    rank_prompt_candidates,
+    score_mask_feedback,
+    select_best_mask,
+)
 from .sam2_adapter import SAM2ModelAdapter, load_image_rgb
 
 __all__ = [
@@ -23,6 +40,21 @@ __all__ = [
     "load_auto_prompt_model",
     "predict_learned_auto_prompt_from_path",
     "save_auto_prompt_checkpoint",
+    "BoxCalibrationCandidate",
+    "BoxCalibrationResult",
+    "PromptCandidate",
+    "PromptRerankerConfig",
+    "RerankResult",
+    "apply_mask_feedback",
+    "box_calibration_metadata",
+    "calibrate_box_from_results",
+    "candidate_metadata",
+    "feedback_metadata",
+    "make_scaled_boxes",
+    "prompt_reranker_config_from_dict",
+    "rank_prompt_candidates",
+    "score_mask_feedback",
+    "select_best_mask",
     "SAM2ModelAdapter",
     "load_image_rgb",
 ]

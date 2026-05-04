@@ -5,8 +5,8 @@
 ## 保留文件
 
 - `server_benchmark_full.example.yaml`：完整配置模板。它同时定义路径、模型、方法、数据集、seed、batch、suite 和分析参数。
-- `server_auto_prompt_4090x4.example.yaml`：SAM2-IR-QD M1 自动 prompt 训练和 E2 评估模板，默认使用 GPU `0,1,6,7`。当前默认是 no-RBGT 安全配置，只用 `NUAA-SIRST`、`NUDT-SIRST` 和 `IRSTD-1K` 训练 learned auto prompt，不扫描 `RBGT-Tiny`。
-- `server_auto_prompt_4090x4_smoke.yaml`：服务器可直接运行的 M1 smoke 配置。它将训练压缩到 1 epoch/64 samples，并只评估 2 个数据集和 5 个代表性模式。
+- `server_auto_prompt_4090x4.example.yaml`：SAM2-IR-QD M2/M3 自动 prompt 训练和 E2 评估模板，默认使用 GPU `0,1,6,7`。当前默认是 no-RBGT 安全配置，只用 `NUAA-SIRST`、`NUDT-SIRST` 和 `IRSTD-1K` 训练 learned auto prompt，不扫描 `RBGT-Tiny`；评估中包含 M3 multi-cue rerank 和 SAM2 feedback box calibration 方法。
+- `server_auto_prompt_4090x4_smoke.yaml`：服务器可直接运行的 smoke 配置。它将训练压缩到 1 epoch/64 samples，并只评估 2 个数据集和代表性 M2/M3 模式。
 
 ## 本地文件
 

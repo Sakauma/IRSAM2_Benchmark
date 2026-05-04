@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 from PIL import Image
@@ -11,6 +12,7 @@ from irsam2_benchmark.data.sample import Sample
 from irsam2_benchmark.models import (
     LEARNED_IR_AUTO_PROMPT_PROTOCOL,
     AutoPromptModelConfig,
+    LearnedAutoPrompt,
     build_ir_prompt_net,
     decode_auto_prompt,
     ir_prior_stack_from_path,
@@ -59,9 +61,11 @@ def _sample(path: Path, sample_id: str = "sample") -> Sample:
     )
 
 
-def _config(checkpoint_path: Path):
+def _config(checkpoint_path: Path, method_overrides: dict | None = None):
     config = type("Config", (), {})()
     config.method = {"prompt_checkpoint": str(checkpoint_path), "prompt_device": "cpu"}
+    if method_overrides:
+        config.method.update(method_overrides)
     config.runtime = type("Runtime", (), {"device": "cpu"})()
     config.root = checkpoint_path.parent
     config.config_path = checkpoint_path.parent / "config.yaml"
@@ -192,6 +196,66 @@ class LearnedAutoPromptTests(unittest.TestCase):
             self.assertEqual(adapter.prompt_batch_calls, 1)
             self.assertEqual(adapter.image_batch_calls, 0)
             self.assertEqual(len(adapter.kwargs["boxes"]), 2)
+
+    def test_learned_auto_prompted_sam2_calibrated_records_m3_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "sample.png"
+            checkpoint = root / "checkpoint.pt"
+            Image.fromarray(np.zeros((8, 8), dtype=np.uint8)).save(image_path)
+            save_auto_prompt_checkpoint(checkpoint, build_ir_prompt_net(AutoPromptModelConfig(hidden_channels=4)))
+            adapter = DummySAM2Adapter()
+            prompt = LearnedAutoPrompt(
+                point=[3.0, 3.0],
+                box=[2.0, 2.0, 5.0, 5.0],
+                points=[[3.0, 3.0]],
+                point_labels=[1],
+                metadata={
+                    "source": "learned_auto_prompt",
+                    "protocol": LEARNED_IR_AUTO_PROMPT_PROTOCOL,
+                    "point": [3.0, 3.0],
+                    "box": [2.0, 2.0, 5.0, 5.0],
+                    "points": [[3.0, 3.0]],
+                    "point_labels": [1],
+                    "candidate_score": 0.8,
+                    "candidate_points": [[3.0, 3.0, 0.8], [5.0, 5.0, 0.7]],
+                    "candidate_rank": 0,
+                    "candidate_count": 2,
+                    "candidate_top_k": 2,
+                    "candidate_nms_radius": 4,
+                    "negative_point_count": 0,
+                    "box_width": 3.0,
+                    "box_height": 3.0,
+                },
+                objectness=np.zeros((8, 8), dtype=np.float32),
+            )
+            config = _config(
+                checkpoint,
+                {
+                    "prompt_reranker": {
+                        "use_frequency": False,
+                        "max_feedback_candidates": 1,
+                        "box_scales": [1.0, 2.0],
+                    }
+                },
+            )
+            method = LearnedAutoPromptedSAM2(
+                adapter,
+                config,
+                prompt_mode=InferenceMode.BOX_POINT,
+                use_negative_ring=True,
+                rerank_candidates=True,
+                calibrate_box=True,
+            )
+
+            with patch("irsam2_benchmark.baselines.methods.predict_learned_auto_prompt_from_path", return_value=prompt):
+                pred = method.predict_sample(_sample(image_path))
+
+            self.assertEqual(adapter.prompt_batch_calls, 2)
+            self.assertEqual(pred["prompt"]["box_variant"], "calibrated_multi_scale")
+            self.assertEqual(pred["prompt"]["box_calibration_candidate_count"], 2)
+            self.assertEqual(pred["prompt"]["rerank_policy"], "prior_multi_cue_sam2_mask_feedback")
+            self.assertIn(0, pred["prompt"]["point_labels"])
 
 
 if __name__ == "__main__":

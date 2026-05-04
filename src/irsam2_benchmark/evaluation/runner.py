@@ -610,6 +610,18 @@ def build_segmentation_row(
             "PromptResponseThreshold": prompt.get("response_threshold"),
             "PromptObjectnessMapId": prompt.get("objectness_map_id"),
             "PromptObjectnessHeatmapOverlay": prompt.get("objectness_heatmap_overlay"),
+            "PromptRerankPolicy": prompt.get("rerank_policy"),
+            "PromptRerankSelectedIndex": prompt.get("rerank_selected_index"),
+            "PromptRerankPriorScore": prompt.get("rerank_prior_score"),
+            "PromptRerankFeedbackScore": prompt.get("rerank_feedback_score"),
+            "PromptRerankObjectnessScore": prompt.get("rerank_objectness_score"),
+            "PromptRerankCandidatesJson": prompt.get("rerank_candidates_json"),
+            "PromptRerankFeedbackJson": prompt.get("rerank_feedback_json"),
+            "PromptBoxCalibrationPolicy": prompt.get("box_calibration_policy"),
+            "PromptBoxCalibrationScale": prompt.get("box_calibration_scale"),
+            "PromptBoxCalibrationScore": prompt.get("box_calibration_score"),
+            "PromptBoxCalibrationCandidateCount": prompt.get("box_calibration_candidate_count"),
+            "PromptBoxCalibrationCandidatesJson": prompt.get("box_calibration_candidates_json"),
         }
     elif item.metadata.get("prompt_generation"):
         prompt_generation = item.metadata["prompt_generation"]

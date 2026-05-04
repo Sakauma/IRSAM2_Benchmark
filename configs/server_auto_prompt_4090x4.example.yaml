@@ -27,6 +27,14 @@ auto_prompt:
   response_threshold: 0.15
   nms_radius: 4
   border_suppression_px: 4
+  prompt_reranker:
+    window_sizes: [9, 17, 33]
+    use_frequency: true
+    use_mask_feedback: true
+    max_feedback_candidates: 5
+    box_scales: [1.0, 1.5, 2.0, 3.0]
+    min_area_ratio: 0.000001
+    max_area_ratio: 0.02
   train:
     device: "cuda"
     seed: 42
@@ -303,10 +311,16 @@ modes:
     alias: "learned_box_point"
   - method: "sam2_learned_auto_box_point_neg"
     alias: "learned_neg"
+  - method: "sam2_learned_auto_point_rerank"
+    alias: "m3_point_rerank"
+  - method: "sam2_learned_auto_box_point_calibrated"
+    alias: "m3_box_point_calibrated"
+  - method: "sam2_learned_auto_box_point_calibrated_neg"
+    alias: "m3_calibrated_neg"
 
 analysis:
   primary_metric: "mIoU"
-  metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "LatencyMs"]
+  metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "PromptRerankPriorScore", "PromptRerankFeedbackScore", "PromptRerankObjectnessScore", "PromptBoxCalibrationScale", "PromptBoxCalibrationScore", "LatencyMs"]
   lower_is_better: ["FalseAlarmPixelsPerMP", "FalseAlarmComponents", "LatencyMs"]
   case_selection:
     top_k: 8
@@ -315,7 +329,7 @@ analysis:
       metrics: ["mIoU", "TargetRecallIoU25"]
       no_prompt_method: "sam2_no_prompt_auto_mask"
       oracle_box_method: "sam2_box_oracle"
-      auto_methods: ["sam2_heuristic_auto_box_point", "sam2_learned_auto_box_point", "sam2_learned_auto_box_point_neg"]
+      auto_methods: ["sam2_heuristic_auto_box_point", "sam2_learned_auto_box_point", "sam2_learned_auto_box_point_neg", "sam2_learned_auto_box_point_calibrated", "sam2_learned_auto_box_point_calibrated_neg"]
     pmcr:
       thresholds: [0.25, 0.5]
     fab_tr:
@@ -335,6 +349,12 @@ analysis:
       - name: "learned_neg_vs_heuristic"
         baseline: "sam2_heuristic_auto_box_point"
         candidate: "sam2_learned_auto_box_point_neg"
+      - name: "m3_calibrated_vs_learned_box_point"
+        baseline: "sam2_learned_auto_box_point"
+        candidate: "sam2_learned_auto_box_point_calibrated"
+      - name: "m3_calibrated_neg_vs_learned_neg"
+        baseline: "sam2_learned_auto_box_point_neg"
+        candidate: "sam2_learned_auto_box_point_calibrated_neg"
 
 suites:
   auto_prompt:
@@ -355,8 +375,11 @@ suites:
       - "sam2_learned_auto_box"
       - "sam2_learned_auto_box_point"
       - "sam2_learned_auto_box_point_neg"
+      - "sam2_learned_auto_point_rerank"
+      - "sam2_learned_auto_box_point_calibrated"
+      - "sam2_learned_auto_box_point_calibrated_neg"
     datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal"]
     run_analysis: true
     primary_metric: "mIoU"
-    metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "LatencyMs"]
+    metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "PromptRerankPriorScore", "PromptRerankFeedbackScore", "PromptRerankObjectnessScore", "PromptBoxCalibrationScale", "PromptBoxCalibrationScore", "LatencyMs"]
     lower_is_better: ["FalseAlarmPixelsPerMP", "FalseAlarmComponents", "LatencyMs"]

@@ -71,6 +71,8 @@ def _write_auto_prompt_config(path: Path, artifact_root: Path, *, write_samples:
         dataset_root.mkdir(parents=True)
     if write_samples:
         _write_sample_dataset(dataset_roots["nuaa_sirst"])
+    payload["benchmark"]["artifact_subdir"] = "sam2_ir_qd_m1_auto_prompt"
+    payload["auto_prompt"]["artifact_subdir"] = "sam2_ir_qd_m1_auto_prompt"
     payload["auto_prompt"]["train_datasets"] = ["nuaa_sirst"]
     payload["suites"]["auto_prompt"]["datasets"] = ["nuaa_sirst"]
     payload["paths"] = {
