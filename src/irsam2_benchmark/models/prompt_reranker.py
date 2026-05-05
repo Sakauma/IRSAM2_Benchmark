@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -33,6 +33,8 @@ class PromptRerankerConfig:
     min_area_ratio: float = 1e-6
     max_area_ratio: float = 0.02
     center_sigma_fraction: float = 0.08
+    box_enable_margin: float = 0.02
+    box_enable_min_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,8 @@ def prompt_reranker_config_from_dict(raw: dict[str, Any] | None) -> PromptRerank
     if not raw:
         return PromptRerankerConfig()
     payload = dict(raw)
+    allowed = {item.name for item in fields(PromptRerankerConfig)}
+    payload = {key: value for key, value in payload.items() if key in allowed}
     if "window_sizes" in payload:
         payload["window_sizes"] = tuple(int(value) for value in payload["window_sizes"])
     if "box_scales" in payload:

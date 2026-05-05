@@ -43,6 +43,26 @@ class DummySAM2Adapter:
         return [{"masks": np.ones((1, 8, 8), dtype=np.float32), "scores": np.array([1.0], dtype=np.float32)} for _ in range(prompt_count)]
 
 
+class GatedBoxSAM2Adapter:
+    def __init__(self):
+        self.prompt_batch_calls = 0
+
+    def predict_image(self, image_rgb, **kwargs):
+        mask = np.zeros((1, 8, 8), dtype=np.float32)
+        mask[:, 3:5, 3:5] = 1.0
+        return {"masks": mask, "scores": np.array([1.0], dtype=np.float32)}
+
+    def predict_prompts_for_image(self, image_rgb, *, boxes=None, points=None, point_labels=None, multimask_output=False):
+        self.prompt_batch_calls += 1
+        if boxes is None:
+            count = len(points or [])
+            mask = np.zeros((1, 8, 8), dtype=np.float32)
+            mask[:, 3:5, 3:5] = 1.0
+            return [{"masks": mask.copy(), "scores": np.array([1.0], dtype=np.float32)} for _ in range(count)]
+        mask = np.ones((1, 8, 8), dtype=np.float32)
+        return [{"masks": mask.copy(), "scores": np.array([0.1], dtype=np.float32)} for _ in range(len(boxes))]
+
+
 def _sample(path: Path, sample_id: str = "sample") -> Sample:
     return Sample(
         image_path=path,
@@ -256,6 +276,69 @@ class LearnedAutoPromptTests(unittest.TestCase):
             self.assertEqual(pred["prompt"]["box_calibration_candidate_count"], 2)
             self.assertEqual(pred["prompt"]["rerank_policy"], "prior_multi_cue_sam2_mask_feedback")
             self.assertIn(0, pred["prompt"]["point_labels"])
+
+    def test_learned_auto_prompted_sam2_gated_box_can_fall_back_to_point_result(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "sample.png"
+            checkpoint = root / "checkpoint.pt"
+            image = np.zeros((8, 8), dtype=np.uint8)
+            image[3:5, 3:5] = 255
+            Image.fromarray(image).save(image_path)
+            save_auto_prompt_checkpoint(checkpoint, build_ir_prompt_net(AutoPromptModelConfig(hidden_channels=4)))
+            adapter = GatedBoxSAM2Adapter()
+            prompt = LearnedAutoPrompt(
+                point=[4.0, 4.0],
+                box=[2.0, 2.0, 6.0, 6.0],
+                points=[[4.0, 4.0]],
+                point_labels=[1],
+                metadata={
+                    "source": "learned_auto_prompt",
+                    "protocol": LEARNED_IR_AUTO_PROMPT_PROTOCOL,
+                    "point": [4.0, 4.0],
+                    "box": [2.0, 2.0, 6.0, 6.0],
+                    "points": [[4.0, 4.0]],
+                    "point_labels": [1],
+                    "candidate_score": 0.9,
+                    "candidate_points": [[4.0, 4.0, 0.9]],
+                    "candidate_rank": 0,
+                    "candidate_count": 1,
+                    "candidate_top_k": 1,
+                    "candidate_nms_radius": 4,
+                    "negative_point_count": 0,
+                    "box_width": 4.0,
+                    "box_height": 4.0,
+                },
+                objectness=np.zeros((8, 8), dtype=np.float32),
+            )
+            config = _config(
+                checkpoint,
+                {
+                    "prompt_reranker": {
+                        "use_frequency": False,
+                        "max_feedback_candidates": 1,
+                        "box_scales": [1.0, 2.0],
+                        "box_enable_margin": 0.02,
+                    }
+                },
+            )
+            method = LearnedAutoPromptedSAM2(
+                adapter,
+                config,
+                prompt_mode=InferenceMode.BOX_POINT,
+                rerank_candidates=True,
+                calibrate_box=True,
+                box_calibration_policy="gated",
+            )
+
+            with patch("irsam2_benchmark.baselines.methods.predict_learned_auto_prompt_from_path", return_value=prompt):
+                pred = method.predict_sample(_sample(image_path))
+
+            self.assertEqual(adapter.prompt_batch_calls, 2)
+            self.assertEqual(pred["prompt"]["box_variant"], "gated_box_skipped")
+            self.assertEqual(pred["prompt"]["box_calibration_policy"], "gated_sam2_feedback")
+            self.assertEqual(pred["prompt"]["box_calibration_applied"], 0.0)
+            self.assertEqual(float((pred["mask"] > 0.5).sum()), 4.0)
 
 
 if __name__ == "__main__":

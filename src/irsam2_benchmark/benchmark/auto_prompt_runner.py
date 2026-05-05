@@ -26,7 +26,7 @@ PROJECT_ROOT = fr.PROJECT_ROOT
 TRAIN_AUTO_PROMPT_PY = PROJECT_ROOT / "scripts" / "train_auto_prompt.py"
 DEFAULT_AUTO_PROMPT_CONFIG = PROJECT_ROOT / "configs" / "server_auto_prompt_4090x4.local.yaml"
 DEFAULT_AUTO_PROMPT_EXAMPLE_CONFIG = PROJECT_ROOT / "configs" / "server_auto_prompt_4090x4.example.yaml"
-DEFAULT_AUTO_PROMPT_EXPERIMENT_ID = "sam2_ir_qd_m3_prompt_rerank_v1"
+DEFAULT_AUTO_PROMPT_EXPERIMENT_ID = "sam2_ir_qd_m3_rerank_ablation_v1"
 PREFLIGHT_MODES = ("fast", "full", "off")
 DEFAULT_PREFLIGHT_SAMPLE_LIMIT = 256
 DEFAULT_PREFLIGHT_IMAGE_LIMIT = 256
@@ -68,6 +68,71 @@ DEFAULT_LEARNED_METHODS: Dict[str, Dict[str, Any]] = {
             "prompt_policy": {"name": "learned_auto_point_rerank", "prompt_type": "point", "prompt_source": "synthesized", "prompt_budget": 1},
         },
     },
+    "sam2_learned_auto_point_rerank_prior": {
+        "baseline": "sam2_learned_auto_point_rerank_prompt",
+        "method": {
+            "name": "sam2_learned_auto_point_rerank_prior",
+            "family": "sam2_learned_auto_prompt_m3_ablation",
+            "modality": "ir",
+            "prompt_reranker": {"use_mask_feedback": False},
+        },
+        "evaluation": {
+            "inference_mode": "point",
+            "prompt_policy": {"name": "learned_auto_point_rerank_prior", "prompt_type": "point", "prompt_source": "synthesized", "prompt_budget": 1},
+        },
+    },
+    "sam2_learned_auto_point_rerank_no_frequency": {
+        "baseline": "sam2_learned_auto_point_rerank_prompt",
+        "method": {
+            "name": "sam2_learned_auto_point_rerank_no_frequency",
+            "family": "sam2_learned_auto_prompt_m3_ablation",
+            "modality": "ir",
+            "prompt_reranker": {"use_frequency": False},
+        },
+        "evaluation": {
+            "inference_mode": "point",
+            "prompt_policy": {"name": "learned_auto_point_rerank_no_frequency", "prompt_type": "point", "prompt_source": "synthesized", "prompt_budget": 1},
+        },
+    },
+    "sam2_learned_auto_point_rerank_no_tophat": {
+        "baseline": "sam2_learned_auto_point_rerank_prompt",
+        "method": {
+            "name": "sam2_learned_auto_point_rerank_no_tophat",
+            "family": "sam2_learned_auto_prompt_m3_ablation",
+            "modality": "ir",
+            "prompt_reranker": {"prior_weight_top_hat": 0.0},
+        },
+        "evaluation": {
+            "inference_mode": "point",
+            "prompt_policy": {"name": "learned_auto_point_rerank_no_tophat", "prompt_type": "point", "prompt_source": "synthesized", "prompt_budget": 1},
+        },
+    },
+    "sam2_learned_auto_point_rerank_no_local_contrast": {
+        "baseline": "sam2_learned_auto_point_rerank_prompt",
+        "method": {
+            "name": "sam2_learned_auto_point_rerank_no_local_contrast",
+            "family": "sam2_learned_auto_prompt_m3_ablation",
+            "modality": "ir",
+            "prompt_reranker": {"prior_weight_local_contrast": 0.0},
+        },
+        "evaluation": {
+            "inference_mode": "point",
+            "prompt_policy": {"name": "learned_auto_point_rerank_no_local_contrast", "prompt_type": "point", "prompt_source": "synthesized", "prompt_budget": 1},
+        },
+    },
+    "sam2_learned_auto_point_rerank_mask_feedback_only": {
+        "baseline": "sam2_learned_auto_point_rerank_prompt",
+        "method": {
+            "name": "sam2_learned_auto_point_rerank_mask_feedback_only",
+            "family": "sam2_learned_auto_prompt_m3_ablation",
+            "modality": "ir",
+            "prompt_reranker": {"final_weight_prior": 0.0, "final_weight_feedback": 1.0},
+        },
+        "evaluation": {
+            "inference_mode": "point",
+            "prompt_policy": {"name": "learned_auto_point_rerank_mask_feedback_only", "prompt_type": "point", "prompt_source": "synthesized", "prompt_budget": 1},
+        },
+    },
     "sam2_learned_auto_box_point_calibrated": {
         "baseline": "sam2_learned_auto_box_point_calibrated_prompt",
         "method": {"name": "sam2_learned_auto_box_point_calibrated", "family": "sam2_learned_auto_prompt_m3", "modality": "ir"},
@@ -82,6 +147,14 @@ DEFAULT_LEARNED_METHODS: Dict[str, Dict[str, Any]] = {
         "evaluation": {
             "inference_mode": "box+point",
             "prompt_policy": {"name": "learned_auto_box_point_calibrated_neg", "prompt_type": "box+point", "prompt_source": "synthesized", "prompt_budget": 6},
+        },
+    },
+    "sam2_learned_auto_box_point_gated": {
+        "baseline": "sam2_learned_auto_box_point_gated_prompt",
+        "method": {"name": "sam2_learned_auto_box_point_gated", "family": "sam2_learned_auto_prompt_m3", "modality": "ir"},
+        "evaluation": {
+            "inference_mode": "box+point",
+            "prompt_policy": {"name": "learned_auto_box_point_gated", "prompt_type": "box+point", "prompt_source": "synthesized", "prompt_budget": 2},
         },
     },
 }
@@ -200,8 +273,15 @@ def _inject_learned_prompt_config(
         )
         method_payload["prompt_use_local_contrast"] = bool(auto_config.get("model", {}).get("use_local_contrast", True))
         method_payload["prompt_use_top_hat"] = bool(auto_config.get("model", {}).get("use_top_hat", True))
-        if auto_config.get("prompt_reranker"):
-            method_payload["prompt_reranker"] = copy.deepcopy(auto_config["prompt_reranker"])
+        global_reranker = auto_config.get("prompt_reranker")
+        method_reranker = method_payload.get("prompt_reranker")
+        if isinstance(global_reranker, dict) or isinstance(method_reranker, dict):
+            merged_reranker: Dict[str, Any] = {}
+            if isinstance(global_reranker, dict):
+                merged_reranker = copy.deepcopy(global_reranker)
+            if isinstance(method_reranker, dict):
+                merged_reranker = fr._deep_merge(merged_reranker, method_reranker)
+            method_payload["prompt_reranker"] = merged_reranker
         method_payload["heatmaps"] = {
             "enabled": bool(auto_config.get("heatmaps", {}).get("eval_enabled", True)),
             "root": str(heatmap_root),
@@ -843,7 +923,7 @@ def _run_eval_plan(
 
 
 def main(argv: List[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run SAM2-IR-QD M1 learned auto prompt training and E2 evaluation on 4x4090.")
+    parser = argparse.ArgumentParser(description="Run SAM2-IR-QD learned auto prompt training and M3/M3.1 evaluation on 4x4090.")
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--suites", help="Comma-separated suite keys. Default: auto_prompt from config.")
     parser.add_argument("--checkpoints", help="Comma-separated checkpoint aliases. Default: suite-selected checkpoints.")

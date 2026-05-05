@@ -75,6 +75,7 @@ def _write_auto_prompt_config(path: Path, artifact_root: Path, *, write_samples:
     payload["auto_prompt"]["artifact_subdir"] = "sam2_ir_qd_m1_auto_prompt"
     payload["auto_prompt"]["train_datasets"] = ["nuaa_sirst"]
     payload["suites"]["auto_prompt"]["datasets"] = ["nuaa_sirst"]
+    payload["suites"]["auto_prompt_rerank_ablation"]["datasets"] = ["nuaa_sirst"]
     payload["paths"] = {
         "sam2": {"repo": str(sam2_repo), "checkpoint_root": str(checkpoint_root)},
         "artifacts": {"root": str(artifact_root)},
@@ -178,6 +179,43 @@ class AutoPromptRunnerTests(unittest.TestCase):
             self.assertTrue(first_run_config["method"]["heatmaps"]["enabled"])
             self.assertFalse(first_run_config["runtime"]["show_progress"])
             self.assertEqual(first_run_config["runtime"]["progress_backend"], "none")
+
+    def test_method_specific_reranker_overrides_survive_global_defaults(self):
+        runner = _load_runner()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "server_auto_prompt_4090x4.local.yaml"
+            _write_auto_prompt_config(config_path, root / "artifacts")
+            output = io.StringIO()
+            progress_output = io.StringIO()
+
+            with redirect_stdout(output), redirect_stderr(progress_output):
+                self.assertEqual(
+                    runner.main(
+                        [
+                            "--config",
+                            str(config_path),
+                            "--suites",
+                            "auto_prompt_rerank_ablation",
+                            "--checkpoints",
+                            "large",
+                            "--modes",
+                            "m3_no_frequency",
+                            "--dry-run",
+                            "--no-analysis",
+                            "--python-bin",
+                            "python",
+                        ]
+                    ),
+                    0,
+                )
+
+            manifest_path = root / "artifacts" / "sam2_ir_qd_m1_auto_prompt" / "benchmark_manifest_latest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            first_run_config = yaml.safe_load(Path(manifest["records"][0]["config_path"]).read_text(encoding="utf-8"))
+            reranker = first_run_config["method"]["prompt_reranker"]
+            self.assertFalse(reranker["use_frequency"])
+            self.assertTrue(reranker["use_mask_feedback"])
 
     def test_dataset_preflight_failure_stops_runner_before_train(self):
         runner = _load_runner()

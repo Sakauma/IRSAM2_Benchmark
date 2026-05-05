@@ -1,4 +1,4 @@
-# SAM2-IR-QD M3 smoke config: fast learned IR auto prompt training + rerank/calibration connectivity check.
+# SAM2-IR-QD M3.1 smoke config: fast learned IR auto prompt training + reranker/gated-box connectivity check.
 # Recommended server launch:
 #   tmux new -s irsam2_auto_prompt_smoke
 #   PYTHONPATH=src python scripts/run_4090x4_auto_prompt.py --config configs/server_auto_prompt_4090x4_smoke.yaml --stop-on-error
@@ -6,11 +6,11 @@
 
 benchmark:
   suite_name: "server_auto_prompt_4090x4_smoke"
-  artifact_subdir: "sam2_ir_qd_m3_prompt_rerank_smoke_v1"
+  artifact_subdir: "sam2_ir_qd_m3_rerank_ablation_smoke_v1"
 
 auto_prompt:
-  experiment_id: "sam2_ir_qd_m3_prompt_rerank_smoke_v1"
-  artifact_subdir: "sam2_ir_qd_m3_prompt_rerank_smoke_v1"
+  experiment_id: "sam2_ir_qd_m3_rerank_ablation_smoke_v1"
+  artifact_subdir: "sam2_ir_qd_m3_rerank_ablation_smoke_v1"
   train_gpu: "0"
   eval_gpus: ["1", "6", "7", "0"]
   train_datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k"]
@@ -31,6 +31,8 @@ auto_prompt:
     box_scales: [1.0, 1.5, 2.0]
     min_area_ratio: 0.000001
     max_area_ratio: 0.02
+    box_enable_margin: 0.02
+    box_enable_min_score: 0.0
   train:
     device: "cuda"
     seed: 42
@@ -96,7 +98,7 @@ model_defaults:
 runtime_defaults:
   artifact_root: "artifacts"
   reference_results_root: "reference_results"
-  output_name: "sam2_ir_qd_m3_prompt_rerank_smoke_v1/default"
+  output_name: "sam2_ir_qd_m3_rerank_ablation_smoke_v1/default"
   device: "cuda"
   num_workers: 0
   smoke_test: false
@@ -303,12 +305,18 @@ modes:
     alias: "learned_neg"
   - method: "sam2_learned_auto_point_rerank"
     alias: "m3_point_rerank"
+  - method: "sam2_learned_auto_point_rerank_no_frequency"
+    alias: "m3_no_frequency"
+  - method: "sam2_learned_auto_point_rerank_mask_feedback_only"
+    alias: "m3_mask_feedback_only"
   - method: "sam2_learned_auto_box_point_calibrated_neg"
     alias: "m3_calibrated_neg"
+  - method: "sam2_learned_auto_box_point_gated"
+    alias: "m3_gated_box"
 
 analysis:
   primary_metric: "mIoU"
-  metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "PromptRerankPriorScore", "PromptRerankFeedbackScore", "PromptRerankObjectnessScore", "PromptBoxCalibrationScale", "PromptBoxCalibrationScore", "LatencyMs"]
+  metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "PromptRerankPriorScore", "PromptRerankFeedbackScore", "PromptRerankObjectnessScore", "PromptBoxCalibrationApplied", "PromptBoxCalibrationScale", "PromptBoxCalibrationScore", "PromptBoxCalibrationPointFeedbackScore", "LatencyMs"]
   lower_is_better: ["FalseAlarmPixelsPerMP", "FalseAlarmComponents", "LatencyMs"]
   case_selection:
     top_k: 8
@@ -317,7 +325,7 @@ analysis:
       metrics: ["mIoU", "TargetRecallIoU25"]
       no_prompt_method: "sam2_no_prompt_auto_mask"
       oracle_box_method: "sam2_box_oracle"
-      auto_methods: ["sam2_heuristic_auto_box_point", "sam2_learned_auto_box_point", "sam2_learned_auto_box_point_neg", "sam2_learned_auto_box_point_calibrated_neg"]
+      auto_methods: ["sam2_heuristic_auto_box_point", "sam2_learned_auto_box_point", "sam2_learned_auto_box_point_neg", "sam2_learned_auto_point_rerank", "sam2_learned_auto_box_point_gated", "sam2_learned_auto_box_point_calibrated_neg"]
     pmcr:
       thresholds: [0.25, 0.5]
     fab_tr:
@@ -351,9 +359,12 @@ suites:
       - "sam2_learned_auto_box_point"
       - "sam2_learned_auto_box_point_neg"
       - "sam2_learned_auto_point_rerank"
+      - "sam2_learned_auto_point_rerank_no_frequency"
+      - "sam2_learned_auto_point_rerank_mask_feedback_only"
+      - "sam2_learned_auto_box_point_gated"
       - "sam2_learned_auto_box_point_calibrated_neg"
     datasets: ["nuaa_sirst", "multimodal"]
     run_analysis: false
     primary_metric: "mIoU"
-    metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "PromptRerankPriorScore", "PromptRerankFeedbackScore", "PromptRerankObjectnessScore", "PromptBoxCalibrationScale", "PromptBoxCalibrationScore", "LatencyMs"]
+    metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "PromptRerankPriorScore", "PromptRerankFeedbackScore", "PromptRerankObjectnessScore", "PromptBoxCalibrationApplied", "PromptBoxCalibrationScale", "PromptBoxCalibrationScore", "PromptBoxCalibrationPointFeedbackScore", "LatencyMs"]
     lower_is_better: ["FalseAlarmPixelsPerMP", "FalseAlarmComponents", "LatencyMs"]

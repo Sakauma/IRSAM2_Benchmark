@@ -497,6 +497,7 @@ class LearnedAutoPromptedSAM2(BaseMethod):
         use_negative_ring: bool = False,
         rerank_candidates: bool = False,
         calibrate_box: bool = False,
+        box_calibration_policy: str = "always",
     ):
         self.adapter = adapter
         self.config = config
@@ -504,6 +505,7 @@ class LearnedAutoPromptedSAM2(BaseMethod):
         self.use_negative_ring = use_negative_ring
         self.rerank_candidates = bool(rerank_candidates)
         self.calibrate_box = bool(calibrate_box)
+        self.box_calibration_policy = str(box_calibration_policy or "always").strip().lower()
         self.device = str(config.method.get("prompt_device") or getattr(config.runtime, "device", "cpu"))
         self.min_box_side = float(config.method.get("prompt_min_box_side", 2.0))
         self.negative_ring_offset = float(config.method.get("prompt_negative_ring_offset", 4.0))
@@ -747,6 +749,40 @@ class LearnedAutoPromptedSAM2(BaseMethod):
             sam_results=sam_results,
             config=self._reranker_config,
         )
+        point_feedback_score = 0.0 if selected.feedback_score is None else float(selected.feedback_score)
+        point_result = selected.sam_result
+        apply_box = True
+        if self.box_calibration_policy == "gated":
+            apply_box = (
+                float(calibration.selected.score) >= point_feedback_score + float(self._reranker_config.box_enable_margin)
+                and float(calibration.selected.score) >= float(self._reranker_config.box_enable_min_score)
+            )
+            if not apply_box:
+                if point_result is None:
+                    point_result = self.adapter.predict_image(
+                        image_rgb,
+                        points=np.array([[float(selected.point[0]), float(selected.point[1])]], dtype=np.float32),
+                        point_labels=np.array([1], dtype=np.int32),
+                        multimask_output=False,
+                    )
+                prompt.update(
+                    {
+                        "box": None,
+                        "box_variant": "gated_box_skipped",
+                        "box_rule": "multi_cue_rerank_then_gated_box_skipped",
+                        "box_width": None,
+                        "box_height": None,
+                        "box_calibration_policy": "gated_sam2_feedback",
+                        "box_calibration_applied": 0.0,
+                        "box_calibration_scale": float(calibration.selected.scale),
+                        "box_calibration_score": float(calibration.selected.score),
+                        "box_calibration_point_feedback_score": point_feedback_score,
+                        "box_calibration_margin": float(self._reranker_config.box_enable_margin),
+                        "box_calibration_candidate_count": len(calibration.candidates),
+                        "box_calibration_candidates_json": json.dumps(box_calibration_metadata(calibration.candidates), ensure_ascii=False),
+                    }
+                )
+                return self._prediction_from_result(point_result, prompt)
         selected_box = calibration.selected.box
         final_points, final_labels = self._point_labels_for_box(selected.point, selected_box, width=width, height=height)
         prompt.update(
@@ -758,9 +794,12 @@ class LearnedAutoPromptedSAM2(BaseMethod):
                 "box_rule": "multi_cue_rerank_then_sam2_feedback_box_calibration",
                 "box_width": float(selected_box[2] - selected_box[0]),
                 "box_height": float(selected_box[3] - selected_box[1]),
-                "box_calibration_policy": calibration.policy,
+                "box_calibration_policy": "gated_sam2_feedback" if self.box_calibration_policy == "gated" else calibration.policy,
+                "box_calibration_applied": 1.0,
                 "box_calibration_scale": float(calibration.selected.scale),
                 "box_calibration_score": float(calibration.selected.score),
+                "box_calibration_point_feedback_score": point_feedback_score,
+                "box_calibration_margin": float(self._reranker_config.box_enable_margin),
                 "box_calibration_candidate_count": len(calibration.candidates),
                 "box_calibration_candidates_json": json.dumps(box_calibration_metadata(calibration.candidates), ensure_ascii=False),
             }
@@ -831,6 +870,7 @@ CANONICAL_BASELINE_NAMES = (
     "sam2_learned_auto_point_rerank_prompt",
     "sam2_learned_auto_box_point_calibrated_prompt",
     "sam2_learned_auto_box_point_calibrated_neg_prompt",
+    "sam2_learned_auto_box_point_gated_prompt",
 )
 
 
@@ -881,5 +921,13 @@ def build_baseline_registry(config: AppConfig) -> Dict[str, BenchmarkMethodProto
             use_negative_ring=True,
             rerank_candidates=True,
             calibrate_box=True,
+        ),
+        "sam2_learned_auto_box_point_gated_prompt": LearnedAutoPromptedSAM2(
+            adapter,
+            config,
+            prompt_mode=InferenceMode.BOX_POINT,
+            rerank_candidates=True,
+            calibrate_box=True,
+            box_calibration_policy="gated",
         ),
     }

@@ -618,8 +618,11 @@ def build_segmentation_row(
             "PromptRerankCandidatesJson": prompt.get("rerank_candidates_json"),
             "PromptRerankFeedbackJson": prompt.get("rerank_feedback_json"),
             "PromptBoxCalibrationPolicy": prompt.get("box_calibration_policy"),
+            "PromptBoxCalibrationApplied": prompt.get("box_calibration_applied"),
             "PromptBoxCalibrationScale": prompt.get("box_calibration_scale"),
             "PromptBoxCalibrationScore": prompt.get("box_calibration_score"),
+            "PromptBoxCalibrationPointFeedbackScore": prompt.get("box_calibration_point_feedback_score"),
+            "PromptBoxCalibrationMargin": prompt.get("box_calibration_margin"),
             "PromptBoxCalibrationCandidateCount": prompt.get("box_calibration_candidate_count"),
             "PromptBoxCalibrationCandidatesJson": prompt.get("box_calibration_candidates_json"),
         }

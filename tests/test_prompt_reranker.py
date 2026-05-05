@@ -10,6 +10,7 @@ from irsam2_benchmark.models.prompt_reranker import (
     PromptRerankerConfig,
     calibrate_box_from_results,
     make_scaled_boxes,
+    prompt_reranker_config_from_dict,
     rank_prompt_candidates,
     score_mask_feedback,
 )
@@ -20,6 +21,18 @@ def _write_gray(path: Path, arr: np.ndarray) -> None:
 
 
 class PromptRerankerTests(unittest.TestCase):
+    def test_config_parser_supports_gated_box_fields_and_ignores_unknown_keys(self):
+        config = prompt_reranker_config_from_dict(
+            {
+                "box_enable_margin": 0.05,
+                "box_enable_min_score": 0.2,
+                "unknown_note": "kept out of runtime config",
+            }
+        )
+
+        self.assertEqual(config.box_enable_margin, 0.05)
+        self.assertEqual(config.box_enable_min_score, 0.2)
+
     def test_rank_prompt_candidates_can_override_raw_objectness_with_ir_cues(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             image_path = Path(temp_dir) / "sample.png"
