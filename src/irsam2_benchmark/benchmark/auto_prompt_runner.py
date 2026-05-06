@@ -915,6 +915,29 @@ def _build_run_plan(
     return run_plan, analysis_records
 
 
+def _eval_run_cost(item: tuple[Any, ...]) -> float:
+    # Longest-first scheduling keeps the four-GPU eval pool from ending with one slow straggler.
+    dataset_id = str(item[2]).lower()
+    method_id = str(item[3]).lower()
+    train_seed = item[9]
+    cost = 1.0
+    if "multimodal" in dataset_id:
+        cost += 8.0
+    if "gated" in method_id:
+        cost += 8.0
+    elif "calibrated" in method_id:
+        cost += 6.0
+    elif "rerank" in method_id:
+        cost += 5.0
+    elif "no_prompt" in method_id:
+        cost += 4.0
+    elif "learned" in method_id:
+        cost += 2.0
+    if train_seed is not None:
+        cost += 1.0
+    return cost
+
+
 def _run_eval_plan(
     *,
     run_plan: list[tuple[Any, ...]],
@@ -930,7 +953,7 @@ def _run_eval_plan(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     records: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
-    queue = list(run_plan)
+    queue = [item for _, item in sorted(enumerate(run_plan), key=lambda pair: (-_eval_run_cost(pair[1]), pair[0]))]
     active: list[dict[str, Any]] = []
     free_gpus = list(eval_gpus)
     total = len(queue)

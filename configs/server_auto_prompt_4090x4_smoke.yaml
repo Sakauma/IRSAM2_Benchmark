@@ -112,18 +112,22 @@ runtime_defaults:
   seeds: [42]
   image_batch_size: 1
   reuse_image_embedding: true
+  max_prompts_per_image_batch: 128
   auto_mask_points_per_batch: 32
   batch_oom_fallback: true
   show_progress: true
   progress_update_interval_s: 1.0
+  profile_eval: true
 
 runtime:
   device: "cuda"
   seeds: [42]
   reuse_image_embedding: true
+  max_prompts_per_image_batch: 128
   save_visuals: true
   visual_limit: 4
   update_reference_results: false
+  profile_eval: true
 
 smoke_test_runtime:
   smoke_test: true
@@ -278,6 +282,7 @@ models:
     ckpt: "checkpoints/sam2.1_hiera_large.pt"
     runtime:
       image_batch_size: 1
+      max_prompts_per_image_batch: 128
       auto_mask_points_per_batch: 128
 
 modes:

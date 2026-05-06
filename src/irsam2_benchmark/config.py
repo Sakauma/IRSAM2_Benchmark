@@ -79,6 +79,7 @@ class RuntimeConfig:
     progress_backend: str = "auto"
     progress_position: int = 0
     progress_update_interval_s: float = 1.0
+    profile_eval: bool = False
 
 
 @dataclass

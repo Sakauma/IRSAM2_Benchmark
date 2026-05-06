@@ -107,6 +107,17 @@ class SAM2AdapterImageBatchTests(unittest.TestCase):
         self.assertEqual(adapter.image_predictor.predict_calls[0]["box"].tolist(), [0.0, 0.0, 2.0, 2.0])
         self.assertEqual(float(results[1]["masks"][0, 0, 0]), 2.0)
 
+    def test_predict_current_image_prompts_reuses_existing_image(self):
+        adapter = DummyImageBatchAdapter()
+        image = np.zeros((4, 4, 3), dtype=np.uint8)
+        adapter.set_image(image)
+
+        results = adapter.predict_current_image_prompts(boxes=[[0, 0, 2, 2], [1, 1, 3, 3]])
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(adapter.image_predictor.set_image_calls, 1)
+        self.assertEqual(len(adapter.image_predictor.predict_calls), 2)
+
     def test_auto_mask_generator_receives_points_per_batch(self):
         adapter = DummyAutoMaskAdapter()
 

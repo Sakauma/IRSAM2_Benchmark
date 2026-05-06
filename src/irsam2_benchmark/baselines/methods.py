@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
@@ -689,13 +690,80 @@ class LearnedAutoPromptedSAM2(BaseMethod):
         )
         return prompt
 
-    def _rerank_prompt(self, sample: Sample, image_rgb: np.ndarray, auto_prompt, prompt: Dict[str, Any]):
+    def _predict_prompt_results(
+        self,
+        image_rgb: np.ndarray,
+        *,
+        image_is_set: bool,
+        boxes: list[Any] | None = None,
+        points: list[np.ndarray | None] | None = None,
+        point_labels: list[np.ndarray | None] | None = None,
+        multimask_output: bool = False,
+    ) -> list[Dict[str, Any]]:
+        if image_is_set:
+            return self.adapter.predict_current_image_prompts(
+                boxes=boxes,
+                points=points,
+                point_labels=point_labels,
+                multimask_output=multimask_output,
+            )
+        return self.adapter.predict_prompts_for_image(
+            image_rgb,
+            boxes=boxes,
+            points=points,
+            point_labels=point_labels,
+            multimask_output=multimask_output,
+        )
+
+    def _predict_single_prompt_result(
+        self,
+        image_rgb: np.ndarray,
+        *,
+        image_is_set: bool,
+        box: Any = None,
+        points: np.ndarray | None = None,
+        point_labels: np.ndarray | None = None,
+        multimask_output: bool = False,
+    ) -> Dict[str, Any]:
+        if image_is_set:
+            return self.adapter.predict_current_image_prompts(
+                boxes=[box],
+                points=[points],
+                point_labels=[point_labels],
+                multimask_output=multimask_output,
+            )[0]
+        return self.adapter.predict_image(
+            image_rgb,
+            box=box,
+            points=points,
+            point_labels=point_labels,
+            multimask_output=multimask_output,
+        )
+
+    def _attach_eval_profile(self, prediction: Dict[str, Any], profile: Dict[str, Any]) -> Dict[str, Any]:
+        if not bool(getattr(getattr(self.config, "runtime", None), "profile_eval", False)):
+            return prediction
+        metadata = dict(prediction.get("metadata", {}))
+        metadata.update(profile)
+        prediction["metadata"] = metadata
+        return prediction
+
+    def _rerank_prompt(
+        self,
+        sample: Sample,
+        image_rgb: np.ndarray,
+        auto_prompt,
+        prompt: Dict[str, Any],
+        *,
+        image_is_set: bool = False,
+    ):
         rerank_result = rank_prompt_candidates(auto_prompt, sample.image_path, self._reranker_config)
         feedback_limit = max(0, int(self._reranker_config.max_feedback_candidates))
         feedback_candidates = rerank_result.candidates[:feedback_limit]
         if self._reranker_config.use_mask_feedback and feedback_candidates:
-            feedback_results = self.adapter.predict_prompts_for_image(
+            feedback_results = self._predict_prompt_results(
                 image_rgb,
+                image_is_set=image_is_set,
                 points=[np.array([candidate.point], dtype=np.float32) for candidate in feedback_candidates],
                 point_labels=[np.array([1], dtype=np.int32) for _ in feedback_candidates],
                 multimask_output=False,
@@ -708,15 +776,15 @@ class LearnedAutoPromptedSAM2(BaseMethod):
             )
         return self._apply_rerank_to_prompt(prompt, rerank_result), rerank_result
 
-    def _calibrated_box_prediction(
+    def _box_calibration_components(
         self,
         *,
         sample: Sample,
         image_rgb: np.ndarray,
         auto_prompt,
-        prompt: Dict[str, Any],
         rerank_result,
-    ) -> Dict[str, Any]:
+        image_is_set: bool = False,
+    ) -> tuple[Any, bool, Dict[str, Any] | None, float]:
         height, width = int(image_rgb.shape[0]), int(image_rgb.shape[1])
         selected = rerank_result.selected
         boxes = make_scaled_boxes(
@@ -739,8 +807,9 @@ class LearnedAutoPromptedSAM2(BaseMethod):
             candidate_points, candidate_labels = self._point_labels_for_box(selected.point, box, width=width, height=height)
             points.append(np.array(candidate_points, dtype=np.float32))
             point_labels.append(np.array(candidate_labels, dtype=np.int32))
-        sam_results = self.adapter.predict_prompts_for_image(
+        sam_results = self._predict_prompt_results(
             image_rgb,
+            image_is_set=image_is_set,
             boxes=[box for _, box in boxes],
             points=points,
             point_labels=point_labels,
@@ -765,31 +834,50 @@ class LearnedAutoPromptedSAM2(BaseMethod):
             )
             if not apply_box:
                 if point_result is None:
-                    point_result = self.adapter.predict_image(
+                    point_result = self._predict_single_prompt_result(
                         image_rgb,
+                        image_is_set=image_is_set,
                         points=np.array([[float(selected.point[0]), float(selected.point[1])]], dtype=np.float32),
                         point_labels=np.array([1], dtype=np.int32),
                         multimask_output=False,
                     )
-                prompt.update(
-                    {
-                        "box": None,
-                        "box_variant": "gated_box_skipped",
-                        "box_rule": "multi_cue_rerank_then_gated_box_skipped",
-                        "box_width": None,
-                        "box_height": None,
-                        "box_calibration_policy": "gated_sam2_feedback",
-                        "box_calibration_applied": 0.0,
-                        "box_calibration_scale": float(calibration.selected.scale),
-                        "box_calibration_score": float(calibration.selected.score),
-                        "box_calibration_point_feedback_score": point_feedback_score,
-                        "box_calibration_margin": float(self._reranker_config.box_enable_margin),
-                        "box_calibration_min_point_feedback_score": float(self._reranker_config.box_enable_min_point_feedback_score),
-                        "box_calibration_candidate_count": len(calibration.candidates),
-                        "box_calibration_candidates_json": json.dumps(box_calibration_metadata(calibration.candidates), ensure_ascii=False),
-                    }
-                )
-                return self._prediction_from_result(point_result, prompt)
+        return calibration, apply_box, point_result, point_feedback_score
+
+    def _prediction_from_box_calibration(
+        self,
+        *,
+        prompt: Dict[str, Any],
+        rerank_result,
+        calibration,
+        apply_box: bool,
+        point_result: Dict[str, Any] | None,
+        point_feedback_score: float,
+        image_rgb: np.ndarray,
+    ) -> Dict[str, Any]:
+        height, width = int(image_rgb.shape[0]), int(image_rgb.shape[1])
+        selected = rerank_result.selected
+        if not apply_box:
+            if point_result is None:
+                raise RuntimeError("Gated box calibration skipped but no point prediction is available.")
+            prompt.update(
+                {
+                    "box": None,
+                    "box_variant": "gated_box_skipped",
+                    "box_rule": "multi_cue_rerank_then_gated_box_skipped",
+                    "box_width": None,
+                    "box_height": None,
+                    "box_calibration_policy": "gated_sam2_feedback",
+                    "box_calibration_applied": 0.0,
+                    "box_calibration_scale": float(calibration.selected.scale),
+                    "box_calibration_score": float(calibration.selected.score),
+                    "box_calibration_point_feedback_score": point_feedback_score,
+                    "box_calibration_margin": float(self._reranker_config.box_enable_margin),
+                    "box_calibration_min_point_feedback_score": float(self._reranker_config.box_enable_min_point_feedback_score),
+                    "box_calibration_candidate_count": len(calibration.candidates),
+                    "box_calibration_candidates_json": json.dumps(box_calibration_metadata(calibration.candidates), ensure_ascii=False),
+                }
+            )
+            return self._prediction_from_result(point_result, prompt)
         selected_box = calibration.selected.box
         final_points, final_labels = self._point_labels_for_box(selected.point, selected_box, width=width, height=height)
         prompt.update(
@@ -814,6 +902,51 @@ class LearnedAutoPromptedSAM2(BaseMethod):
         )
         return self._prediction_from_result(calibration.selected.sam_result, prompt)
 
+    def _calibrated_box_prediction(
+        self,
+        *,
+        sample: Sample,
+        image_rgb: np.ndarray,
+        auto_prompt,
+        prompt: Dict[str, Any],
+        rerank_result,
+        image_is_set: bool = False,
+    ) -> Dict[str, Any]:
+        calibration, apply_box, point_result, point_feedback_score = self._box_calibration_components(
+            sample=sample,
+            image_rgb=image_rgb,
+            auto_prompt=auto_prompt,
+            rerank_result=rerank_result,
+            image_is_set=image_is_set,
+        )
+        return self._prediction_from_box_calibration(
+            prompt=prompt,
+            rerank_result=rerank_result,
+            calibration=calibration,
+            apply_box=apply_box,
+            point_result=point_result,
+            point_feedback_score=point_feedback_score,
+            image_rgb=image_rgb,
+        )
+
+    def _prediction_from_rerank_result(
+        self,
+        *,
+        image_rgb: np.ndarray,
+        prompt: Dict[str, Any],
+        rerank_result,
+        image_is_set: bool = False,
+    ) -> Dict[str, Any]:
+        selected_result = rerank_result.selected.sam_result
+        if selected_result is not None and self.inference_mode == InferenceMode.POINT:
+            return self._prediction_from_result(selected_result, prompt)
+        result = self._predict_single_prompt_result(
+            image_rgb,
+            image_is_set=image_is_set,
+            **self._kwargs_from_prompt(prompt),
+        )
+        return self._prediction_from_result(result, prompt)
+
     def _predict_kwargs_and_prompt(self, sample: Sample) -> tuple[Dict[str, Any], Dict[str, Any]]:
         prompt = self._auto_prompt(sample)
         return self._kwargs_from_prompt(prompt), prompt
@@ -823,6 +956,113 @@ class LearnedAutoPromptedSAM2(BaseMethod):
         scores = result["scores"]
         best_idx = int(np.argmax(scores))
         return {"mask": masks[best_idx].astype(np.float32), "score": float(scores[best_idx]), "prompt": prompt}
+
+    def _adapter_profile_snapshot(self) -> dict[str, int]:
+        profile = getattr(self.adapter, "profile_counters", None)
+        if not callable(profile):
+            return {}
+        return {key: int(value) for key, value in profile().items()}
+
+    @staticmethod
+    def _profile_delta(before: dict[str, int], after: dict[str, int], key: str) -> int:
+        return int(after.get(key, 0)) - int(before.get(key, 0))
+
+    def _predict_reranked_image_group(self, samples: List[Sample]) -> Dict[str, Dict[str, Any]]:
+        if not samples:
+            return {}
+        group_start = time.perf_counter()
+        image_start = time.perf_counter()
+        representative = samples[0]
+        image_rgb = load_image_rgb(representative.image_path)
+        image_load_ms = (time.perf_counter() - image_start) * 1000.0
+
+        auto_start = time.perf_counter()
+        auto_prompt = self._auto_prompt_object(representative)
+        auto_prompt_ms = (time.perf_counter() - auto_start) * 1000.0
+
+        adapter_before = self._adapter_profile_snapshot()
+        set_image_start = time.perf_counter()
+        self.adapter.set_image(image_rgb)
+        sam_set_image_ms = (time.perf_counter() - set_image_start) * 1000.0
+
+        prompt = self._prompt_from_auto_prompt(representative, auto_prompt)
+        rerank_start = time.perf_counter()
+        prompt, rerank_result = self._rerank_prompt(
+            representative,
+            image_rgb,
+            auto_prompt,
+            prompt,
+            image_is_set=True,
+        )
+        rerank_ms = (time.perf_counter() - rerank_start) * 1000.0
+
+        predictions: Dict[str, Dict[str, Any]] = {}
+        calibration_ms = 0.0
+        final_prompt_ms = 0.0
+        if self.calibrate_box:
+            calibration_start = time.perf_counter()
+            calibration, apply_box, point_result, point_feedback_score = self._box_calibration_components(
+                sample=representative,
+                image_rgb=image_rgb,
+                auto_prompt=auto_prompt,
+                rerank_result=rerank_result,
+                image_is_set=True,
+            )
+            calibration_ms = (time.perf_counter() - calibration_start) * 1000.0
+            for idx, sample in enumerate(samples):
+                sample_prompt = prompt if idx == 0 else self._apply_rerank_to_prompt(
+                    self._prompt_from_auto_prompt(sample, auto_prompt),
+                    rerank_result,
+                )
+                predictions[sample.sample_id] = self._prediction_from_box_calibration(
+                    prompt=sample_prompt,
+                    rerank_result=rerank_result,
+                    calibration=calibration,
+                    apply_box=apply_box,
+                    point_result=point_result,
+                    point_feedback_score=point_feedback_score,
+                    image_rgb=image_rgb,
+                )
+        else:
+            final_start = time.perf_counter()
+            selected_result = rerank_result.selected.sam_result
+            if selected_result is not None and self.inference_mode == InferenceMode.POINT:
+                final_result = selected_result
+            else:
+                final_result = self._predict_single_prompt_result(
+                    image_rgb,
+                    image_is_set=True,
+                    **self._kwargs_from_prompt(prompt),
+                )
+            final_prompt_ms = (time.perf_counter() - final_start) * 1000.0
+            for idx, sample in enumerate(samples):
+                sample_prompt = prompt if idx == 0 else self._apply_rerank_to_prompt(
+                    self._prompt_from_auto_prompt(sample, auto_prompt),
+                    rerank_result,
+                )
+                predictions[sample.sample_id] = self._prediction_from_result(final_result, sample_prompt)
+
+        adapter_after = self._adapter_profile_snapshot()
+        group_elapsed_ms = (time.perf_counter() - group_start) * 1000.0
+        profile = {
+            "EvalOptimizationPath": "image_grouped_rerank_v1",
+            "EvalImageGroupSize": float(len(samples)),
+            "EvalImageLoadMs": float(image_load_ms),
+            "EvalAutoPromptMs": float(auto_prompt_ms),
+            "EvalSamSetImageMs": float(sam_set_image_ms),
+            "EvalRerankMs": float(rerank_ms),
+            "EvalCalibrationMs": float(calibration_ms),
+            "EvalFinalPromptMs": float(final_prompt_ms),
+            "EvalGroupLatencyMs": float(group_elapsed_ms),
+            "EvalSamSetImageCalls": float(self._profile_delta(adapter_before, adapter_after, "set_image")),
+            "EvalSamPromptPredictCalls": float(self._profile_delta(adapter_before, adapter_after, "prompt_predict")),
+            "EvalFeedbackCandidateCount": float(
+                max(0, min(int(self._reranker_config.max_feedback_candidates), len(rerank_result.candidates)))
+                if self._reranker_config.use_mask_feedback
+                else 0
+            ),
+        }
+        return {sample_id: self._attach_eval_profile(prediction, profile) for sample_id, prediction in predictions.items()}
 
     def predict_sample(self, sample: Sample) -> Dict[str, Any]:
         image_rgb = load_image_rgb(sample.image_path)
@@ -838,18 +1078,20 @@ class LearnedAutoPromptedSAM2(BaseMethod):
                     prompt=prompt,
                     rerank_result=rerank_result,
                 )
-            selected_result = rerank_result.selected.sam_result
-            if selected_result is not None and self.inference_mode == InferenceMode.POINT:
-                return self._prediction_from_result(selected_result, prompt)
-            result = self.adapter.predict_image(image_rgb, **self._kwargs_from_prompt(prompt))
-            return self._prediction_from_result(result, prompt)
+            return self._prediction_from_rerank_result(image_rgb=image_rgb, prompt=prompt, rerank_result=rerank_result)
         kwargs, prompt = self._predict_kwargs_and_prompt(sample)
         result = self.adapter.predict_image(image_rgb, **kwargs)
         return self._prediction_from_result(result, prompt)
 
     def predict_samples(self, samples: List[Sample]) -> Dict[str, Dict[str, Any]]:
         if self.rerank_candidates or self.calibrate_box:
-            return {sample.sample_id: self.predict_sample(sample) for sample in samples}
+            predictions: Dict[str, Dict[str, Any]] = {}
+            image_groups: Dict[str, List[Sample]] = {}
+            for sample in samples:
+                image_groups.setdefault(str(sample.image_path), []).append(sample)
+            for group in image_groups.values():
+                predictions.update(self._predict_reranked_image_group(group))
+            return predictions
         return _predict_prompted_sam2_samples(
             samples,
             adapter=self.adapter,

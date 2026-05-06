@@ -52,6 +52,7 @@ class SAM2ModelAdapter:
         self.model: Any | None = None
         self.image_predictor: Any | None = None
         self.auto_mask_generator: Any | None = None
+        self._profile_counters: dict[str, int] = {"set_image": 0, "prompt_predict": 0, "set_image_batch": 0}
         self.capabilities = ModelCapabilities(
             supports_auto_mask=True,
         )
@@ -122,6 +123,19 @@ class SAM2ModelAdapter:
             raise RuntimeError("SAM2 image predictor did not initialize.")
         return self.image_predictor
 
+    def reset_profile_counters(self) -> None:
+        self._profile_counters = {"set_image": 0, "prompt_predict": 0, "set_image_batch": 0}
+
+    def profile_counters(self) -> dict[str, int]:
+        return dict(getattr(self, "_profile_counters", {}))
+
+    def set_image(self, image_rgb: np.ndarray) -> None:
+        image_predictor = self._require_image_predictor()
+        image_predictor.set_image(image_rgb)
+        counters = getattr(self, "_profile_counters", None)
+        if counters is not None:
+            counters["set_image"] = int(counters.get("set_image", 0)) + 1
+
     @staticmethod
     def _prediction_payload(masks: Any, scores: Any, logits: Any) -> dict[str, Any]:
         return {
@@ -154,16 +168,13 @@ class SAM2ModelAdapter:
         multimask_output: bool = False,
     ) -> dict[str, Any]:
         # 单图 prompted SAM2 推理。所有 box/point 坐标都已由上层按原图像素坐标生成。
-        image_predictor = self._require_image_predictor()
-        image_predictor.set_image(image_rgb)
-        masks, scores, logits = image_predictor.predict(
-            box=None if box is None else np.array(box, dtype=np.float32),
-            point_coords=points,
-            point_labels=point_labels,
+        self.set_image(image_rgb)
+        return self.predict_current_image_prompts(
+            boxes=[box],
+            points=[points],
+            point_labels=[point_labels],
             multimask_output=multimask_output,
-            return_logits=True,
-        )
-        return self._prediction_payload(masks, scores, logits)
+        )[0]
 
     def predict_prompts_for_image(
         self,
@@ -175,9 +186,25 @@ class SAM2ModelAdapter:
         multimask_output: bool = False,
     ) -> list[dict[str, Any]]:
         # 同一张图的多个 prompt 共享一次 image embedding，避免重复 set_image。
+        self.set_image(image_rgb)
+        return self.predict_current_image_prompts(
+            boxes=boxes,
+            points=points,
+            point_labels=point_labels,
+            multimask_output=multimask_output,
+        )
+
+    def predict_current_image_prompts(
+        self,
+        *,
+        boxes: list[Optional[Iterable[float]]] | None = None,
+        points: list[Optional[np.ndarray]] | None = None,
+        point_labels: list[Optional[np.ndarray]] | None = None,
+        multimask_output: bool = False,
+    ) -> list[dict[str, Any]]:
+        # 调用方已经 set_image 后可用这个接口继续复用同一 image embedding。
         image_predictor = self._require_image_predictor()
         prompt_count = self._prompt_count(boxes=boxes, points=points, point_labels=point_labels)
-        image_predictor.set_image(image_rgb)
         results: list[dict[str, Any]] = []
         for idx in range(prompt_count):
             box = None if boxes is None or boxes[idx] is None else np.array(boxes[idx], dtype=np.float32)
@@ -188,6 +215,9 @@ class SAM2ModelAdapter:
                 multimask_output=multimask_output,
                 return_logits=True,
             )
+            counters = getattr(self, "_profile_counters", None)
+            if counters is not None:
+                counters["prompt_predict"] = int(counters.get("prompt_predict", 0)) + 1
             results.append(self._prediction_payload(masks, scores, logits))
         return results
 
@@ -219,6 +249,10 @@ class SAM2ModelAdapter:
         point_batch = None if points is None else points
         label_batch = None if point_labels is None else point_labels
         image_predictor.set_image_batch(image_rgbs)
+        counters = getattr(self, "_profile_counters", None)
+        if counters is not None:
+            counters["set_image_batch"] = int(counters.get("set_image_batch", 0)) + 1
+            counters["set_image"] = int(counters.get("set_image", 0)) + len(image_rgbs)
         masks, scores, logits = image_predictor.predict_batch(
             point_coords_batch=point_batch,
             point_labels_batch=label_batch,
@@ -226,6 +260,8 @@ class SAM2ModelAdapter:
             multimask_output=multimask_output,
             return_logits=True,
         )
+        if counters is not None:
+            counters["prompt_predict"] = int(counters.get("prompt_predict", 0)) + len(image_rgbs)
         return [
             self._prediction_payload(masks[idx], scores[idx], logits[idx])
             for idx in range(len(image_rgbs))
