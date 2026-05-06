@@ -1,4 +1,4 @@
-# SAM2-IR-QD M3.1 smoke config: fast learned IR auto prompt training + reranker/gated-box connectivity check.
+# SAM2-IR-QD M4 smoke config: fast multi-seed runner connectivity check for FA rerank and strict gated box.
 # Recommended server launch:
 #   tmux new -s irsam2_auto_prompt_smoke
 #   PYTHONPATH=src python scripts/run_4090x4_auto_prompt.py --config configs/server_auto_prompt_4090x4_smoke.yaml --stop-on-error
@@ -6,17 +6,18 @@
 
 benchmark:
   suite_name: "server_auto_prompt_4090x4_smoke"
-  artifact_subdir: "sam2_ir_qd_m3_rerank_ablation_smoke_v1"
+  artifact_subdir: "sam2_ir_qd_m4_fa_rerank_smoke_v1"
 
 auto_prompt:
-  experiment_id: "sam2_ir_qd_m3_rerank_ablation_smoke_v1"
-  artifact_subdir: "sam2_ir_qd_m3_rerank_ablation_smoke_v1"
+  experiment_id: "sam2_ir_qd_m4_fa_rerank_smoke_v1"
+  artifact_subdir: "sam2_ir_qd_m4_fa_rerank_smoke_v1"
   train_gpu: "0"
   eval_gpus: ["1", "6", "7", "0"]
+  train_seeds: [42]
   train_datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k"]
   gpu_cache_datasets: []
   light_cache_datasets: []
-  eval_suites: ["auto_prompt"]
+  eval_suites: ["auto_prompt_m4_smoke"]
   checkpoint_name: "checkpoint.pt"
   top_k: 5
   point_budget: 1
@@ -33,6 +34,7 @@ auto_prompt:
     max_area_ratio: 0.02
     box_enable_margin: 0.02
     box_enable_min_score: 0.0
+    box_enable_min_point_feedback_score: 0.0
   train:
     device: "cuda"
     seed: 42
@@ -98,7 +100,7 @@ model_defaults:
 runtime_defaults:
   artifact_root: "artifacts"
   reference_results_root: "reference_results"
-  output_name: "sam2_ir_qd_m3_rerank_ablation_smoke_v1/default"
+  output_name: "sam2_ir_qd_m4_fa_rerank_smoke_v1/default"
   device: "cuda"
   num_workers: 0
   smoke_test: false
@@ -313,10 +315,16 @@ modes:
     alias: "m3_calibrated_neg"
   - method: "sam2_learned_auto_box_point_gated"
     alias: "m3_gated_box"
+  - method: "sam2_ir_fa_rerank"
+    alias: "m4_fa_rerank"
+  - method: "sam2_ir_fa_rerank_feedback_only"
+    alias: "m4_feedback_only"
+  - method: "sam2_ir_fa_rerank_gated_box_strict"
+    alias: "m4_gated_box_strict"
 
 analysis:
   primary_metric: "mIoU"
-  metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "PromptRerankPriorScore", "PromptRerankFeedbackScore", "PromptRerankObjectnessScore", "PromptBoxCalibrationApplied", "PromptBoxCalibrationScale", "PromptBoxCalibrationScore", "PromptBoxCalibrationPointFeedbackScore", "LatencyMs"]
+  metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "PromptRerankPriorScore", "PromptRerankFeedbackScore", "PromptRerankObjectnessScore", "PromptBoxCalibrationApplied", "PromptBoxCalibrationScale", "PromptBoxCalibrationScore", "PromptBoxCalibrationPointFeedbackScore", "PromptBoxCalibrationMinPointFeedbackScore", "LatencyMs"]
   lower_is_better: ["FalseAlarmPixelsPerMP", "FalseAlarmComponents", "LatencyMs"]
   case_selection:
     top_k: 8
@@ -325,7 +333,7 @@ analysis:
       metrics: ["mIoU", "TargetRecallIoU25"]
       no_prompt_method: "sam2_no_prompt_auto_mask"
       oracle_box_method: "sam2_box_oracle"
-      auto_methods: ["sam2_heuristic_auto_box_point", "sam2_learned_auto_box_point", "sam2_learned_auto_box_point_neg", "sam2_learned_auto_point_rerank", "sam2_learned_auto_box_point_gated", "sam2_learned_auto_box_point_calibrated_neg"]
+      auto_methods: ["sam2_heuristic_auto_box_point", "sam2_learned_auto_point", "sam2_learned_auto_point_rerank", "sam2_ir_fa_rerank", "sam2_ir_fa_rerank_gated_box_strict"]
     pmcr:
       thresholds: [0.25, 0.5]
     fab_tr:
@@ -347,24 +355,21 @@ analysis:
         candidate: "sam2_learned_auto_box_point_neg"
 
 suites:
-  auto_prompt:
+  auto_prompt_m4_smoke:
     enabled: true
-    experiment_id: "E2_auto_prompt_smoke"
-    purpose: "Fast smoke test for learned IR auto prompt training, heuristic/oracle comparison, and MultiModal adapter."
+    experiment_id: "E4_fa_rerank_smoke"
+    purpose: "Fast smoke test for M4 FA rerank, strict gated box, heuristic/oracle references, and MultiModal adapter."
     checkpoints: ["large"]
     modes:
-      - "sam2_heuristic_auto_box"
       - "sam2_heuristic_auto_box_point"
       - "sam2_box_oracle"
-      - "sam2_learned_auto_box_point"
-      - "sam2_learned_auto_box_point_neg"
+      - "sam2_box_point_oracle"
+      - "sam2_learned_auto_point"
       - "sam2_learned_auto_point_rerank"
-      - "sam2_learned_auto_point_rerank_no_frequency"
-      - "sam2_learned_auto_point_rerank_mask_feedback_only"
-      - "sam2_learned_auto_box_point_gated"
-      - "sam2_learned_auto_box_point_calibrated_neg"
+      - "sam2_ir_fa_rerank"
+      - "sam2_ir_fa_rerank_gated_box_strict"
     datasets: ["nuaa_sirst", "multimodal"]
     run_analysis: false
     primary_metric: "mIoU"
-    metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "PromptRerankPriorScore", "PromptRerankFeedbackScore", "PromptRerankObjectnessScore", "PromptBoxCalibrationApplied", "PromptBoxCalibrationScale", "PromptBoxCalibrationScore", "PromptBoxCalibrationPointFeedbackScore", "LatencyMs"]
+    metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "PromptRerankPriorScore", "PromptRerankFeedbackScore", "PromptRerankObjectnessScore", "PromptBoxCalibrationApplied", "PromptBoxCalibrationScale", "PromptBoxCalibrationScore", "PromptBoxCalibrationPointFeedbackScore", "PromptBoxCalibrationMinPointFeedbackScore", "LatencyMs"]
     lower_is_better: ["FalseAlarmPixelsPerMP", "FalseAlarmComponents", "LatencyMs"]

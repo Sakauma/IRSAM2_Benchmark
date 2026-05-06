@@ -342,21 +342,28 @@ def _build_generated_matrix(
     suite_entry: Dict[str, Any],
     checkpoint: Dict[str, Any],
     method_ids: List[str],
+    experiments: List[Dict[str, Any]] | None = None,
+    experiment_groups: List[str] | None = None,
 ) -> Dict[str, Any]:
     # 分析脚本仍按 paper matrix 读取输入。每个 checkpoint 生成一个裁剪后的 matrix，
     # 只包含当前 suite 会产生的 datasets/methods，避免分析误报缺失 run。
     selected_datasets = {dataset_id: copy.deepcopy(base_matrix["datasets"][dataset_id]) for dataset_id in suite_entry["datasets"]}
     selected_methods = {method_id: copy.deepcopy(base_matrix["methods"][method_id]) for method_id in method_ids}
-    experiment = {
-        "experiment_id": suite_entry["experiment_id"],
-        "status": "planned",
-        "datasets": list(suite_entry["datasets"]),
-        "methods": list(method_ids),
-        "metrics": list(suite_entry.get("metrics", [])),
-        "purpose": suite_entry.get("purpose", ""),
-        "suite": suite_key,
-        "checkpoint": checkpoint["alias"],
-    }
+    if experiments is None:
+        experiments = [
+            {
+                "experiment_id": suite_entry["experiment_id"],
+                "status": "planned",
+                "datasets": list(suite_entry["datasets"]),
+                "methods": list(method_ids),
+                "metrics": list(suite_entry.get("metrics", [])),
+                "purpose": suite_entry.get("purpose", ""),
+                "suite": suite_key,
+                "checkpoint": checkpoint["alias"],
+            }
+        ]
+    if experiment_groups is None:
+        experiment_groups = [suite_entry["experiment_id"]]
     model_defaults = copy.deepcopy(checkpoint)
     model_defaults.pop("alias", None)
     model_defaults.pop("runtime", None)
@@ -366,8 +373,8 @@ def _build_generated_matrix(
         "evaluation_defaults": copy.deepcopy(base_matrix.get("evaluation_defaults", {})),
         "datasets": selected_datasets,
         "methods": selected_methods,
-        "groups": {suite_key: [suite_entry["experiment_id"]]},
-        "experiments": [experiment],
+        "groups": {suite_key: list(experiment_groups)},
+        "experiments": copy.deepcopy(experiments),
     }
 
 
@@ -380,6 +387,7 @@ def _analysis_config(
     artifact_root: Path,
     analysis_root: Path,
     analysis_defaults: Dict[str, Any],
+    experiment_groups: List[str] | None = None,
 ) -> Dict[str, Any]:
     # 每个 checkpoint 单独分析，统计比较在同一 checkpoint 内做 sample-level paired test。
     primary_metric = suite_entry.get("primary_metric", analysis_defaults.get("primary_metric", "mIoU"))
@@ -399,7 +407,7 @@ def _analysis_config(
         "artifact_root": str(artifact_root),
         "output_dir": str(analysis_root / suite_key / checkpoint_alias),
         "matrix": str(matrix_path),
-        "experiment_groups": [suite_entry["experiment_id"]],
+        "experiment_groups": list(experiment_groups or [suite_entry["experiment_id"]]),
         "primary_metric": primary_metric,
         "metrics": list(suite_entry.get("metrics", analysis_defaults.get("metrics", ["mIoU", "Dice", "LatencyMs"]))),
         "lower_is_better": list(suite_entry.get("lower_is_better", analysis_defaults.get("lower_is_better", ["LatencyMs"]))),

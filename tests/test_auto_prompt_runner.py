@@ -73,9 +73,11 @@ def _write_auto_prompt_config(path: Path, artifact_root: Path, *, write_samples:
         _write_sample_dataset(dataset_roots["nuaa_sirst"])
     payload["benchmark"]["artifact_subdir"] = "sam2_ir_qd_m1_auto_prompt"
     payload["auto_prompt"]["artifact_subdir"] = "sam2_ir_qd_m1_auto_prompt"
+    payload["auto_prompt"]["train_seeds"] = [42]
     payload["auto_prompt"]["train_datasets"] = ["nuaa_sirst"]
     payload["suites"]["auto_prompt"]["datasets"] = ["nuaa_sirst"]
     payload["suites"]["auto_prompt_rerank_ablation"]["datasets"] = ["nuaa_sirst"]
+    payload["suites"]["auto_prompt_m4_seeded"]["datasets"] = ["nuaa_sirst"]
     payload["paths"] = {
         "sam2": {"repo": str(sam2_repo), "checkpoint_root": str(checkpoint_root)},
         "artifacts": {"root": str(artifact_root)},
@@ -139,7 +141,7 @@ class AutoPromptRunnerTests(unittest.TestCase):
 
             text = output.getvalue()
             progress_text = progress_output.getvalue()
-            self.assertIn("[train] dry_run CUDA_VISIBLE_DEVICES=0", text)
+            self.assertIn("[train seed=42] dry_run CUDA_VISIBLE_DEVICES=0", text)
             self.assertIn("gpu=1", text)
             self.assertNotIn("dataset=nuaa_sirst", progress_text)
             manifest_path = root / "artifacts" / "sam2_ir_qd_m1_auto_prompt" / "benchmark_manifest_latest.json"
@@ -147,6 +149,8 @@ class AutoPromptRunnerTests(unittest.TestCase):
             self.assertEqual(manifest["run_count"], 1)
             self.assertEqual(manifest["failed_count"], 0)
             self.assertEqual(manifest["train"]["status"], "dry_run")
+            self.assertEqual(manifest["train_seed_count"], 1)
+            self.assertEqual(manifest["train_seeds"], [42])
             preflight_path = Path(manifest["dataset_preflight"]["path"])
             self.assertTrue(preflight_path.exists())
             self.assertTrue(manifest["dataset_preflight"]["summary"]["overall"]["valid"])
@@ -175,6 +179,9 @@ class AutoPromptRunnerTests(unittest.TestCase):
             self.assertEqual(train_config["gpu_cache_dataset_configs"], [train_config["dataset_configs"][0]])
             first_run_config = yaml.safe_load(Path(manifest["records"][0]["config_path"]).read_text(encoding="utf-8"))
             self.assertEqual(first_run_config["method"]["prompt_checkpoint"], manifest["train"]["checkpoint_path"])
+            self.assertEqual(first_run_config["method"]["prompt_train_seed"], 42)
+            self.assertEqual(first_run_config["runtime"]["seeds"], [42])
+            self.assertEqual(manifest["records"][0]["train_seed"], 42)
             self.assertEqual(first_run_config["method"]["prompt_top_k"], 5)
             self.assertTrue(first_run_config["method"]["heatmaps"]["enabled"])
             self.assertFalse(first_run_config["runtime"]["show_progress"])
@@ -216,6 +223,50 @@ class AutoPromptRunnerTests(unittest.TestCase):
             reranker = first_run_config["method"]["prompt_reranker"]
             self.assertFalse(reranker["use_frequency"])
             self.assertTrue(reranker["use_mask_feedback"])
+
+    def test_multi_seed_training_expands_learned_eval_runs_only(self):
+        runner = _load_runner()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "server_auto_prompt_4090x4.local.yaml"
+            _write_auto_prompt_config(config_path, root / "artifacts")
+            payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            payload["auto_prompt"]["train_seeds"] = [42, 123]
+            config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                self.assertEqual(
+                    runner.main(
+                        [
+                            "--config",
+                            str(config_path),
+                            "--suites",
+                            "auto_prompt",
+                            "--checkpoints",
+                            "large",
+                            "--modes",
+                            "heuristic_box,learned_point",
+                            "--dry-run",
+                            "--no-analysis",
+                            "--python-bin",
+                            "python",
+                        ]
+                    ),
+                    0,
+                )
+
+            manifest_path = root / "artifacts" / "sam2_ir_qd_m1_auto_prompt" / "benchmark_manifest_latest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["train_seed_count"], 2)
+            self.assertEqual(manifest["train_seeds"], [42, 123])
+            self.assertEqual(manifest["run_count"], 3)
+            records_by_seed = {item["train_seed"]: item for item in manifest["records"] if item["method"] == "sam2_learned_auto_point"}
+            self.assertEqual(sorted(records_by_seed), [42, 123])
+            self.assertEqual(len([item for item in manifest["records"] if item["train_seed"] is None]), 1)
+            seed123_config = yaml.safe_load(Path(records_by_seed[123]["config_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(seed123_config["method"]["prompt_train_seed"], 123)
+            self.assertTrue(seed123_config["method"]["prompt_checkpoint"].endswith("_seed123/checkpoint.pt"))
+            self.assertEqual(seed123_config["runtime"]["seeds"], [123])
 
     def test_dataset_preflight_failure_stops_runner_before_train(self):
         runner = _load_runner()
@@ -289,7 +340,7 @@ class AutoPromptRunnerTests(unittest.TestCase):
 
             text = output.getvalue()
             self.assertIn("[preflight] skip", text)
-            self.assertIn("[train] dry_run", text)
+            self.assertIn("[train seed=42] dry_run", text)
             manifest_path = root / "artifacts" / "sam2_ir_qd_m1_auto_prompt" / "benchmark_manifest_latest.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             summary = manifest["dataset_preflight"]["summary"]

@@ -26,7 +26,7 @@ PROJECT_ROOT = fr.PROJECT_ROOT
 TRAIN_AUTO_PROMPT_PY = PROJECT_ROOT / "scripts" / "train_auto_prompt.py"
 DEFAULT_AUTO_PROMPT_CONFIG = PROJECT_ROOT / "configs" / "server_auto_prompt_4090x4.local.yaml"
 DEFAULT_AUTO_PROMPT_EXAMPLE_CONFIG = PROJECT_ROOT / "configs" / "server_auto_prompt_4090x4.example.yaml"
-DEFAULT_AUTO_PROMPT_EXPERIMENT_ID = "sam2_ir_qd_m3_rerank_ablation_v1"
+DEFAULT_AUTO_PROMPT_EXPERIMENT_ID = "sam2_ir_qd_m4_fa_rerank_seeded_v1"
 PREFLIGHT_MODES = ("fast", "full", "off")
 DEFAULT_PREFLIGHT_SAMPLE_LIMIT = 256
 DEFAULT_PREFLIGHT_IMAGE_LIMIT = 256
@@ -157,6 +157,50 @@ DEFAULT_LEARNED_METHODS: Dict[str, Dict[str, Any]] = {
             "prompt_policy": {"name": "learned_auto_box_point_gated", "prompt_type": "box+point", "prompt_source": "synthesized", "prompt_budget": 2},
         },
     },
+    "sam2_ir_fa_rerank": {
+        "baseline": "sam2_learned_auto_point_rerank_prompt",
+        "method": {
+            "name": "sam2_ir_fa_rerank",
+            "family": "sam2_ir_fa_rerank_m4",
+            "modality": "ir",
+            "prompt_reranker": {"prior_weight_local_contrast": 0.0},
+        },
+        "evaluation": {
+            "inference_mode": "point",
+            "prompt_policy": {"name": "sam2_ir_fa_rerank", "prompt_type": "point", "prompt_source": "synthesized", "prompt_budget": 1},
+        },
+    },
+    "sam2_ir_fa_rerank_feedback_only": {
+        "baseline": "sam2_learned_auto_point_rerank_prompt",
+        "method": {
+            "name": "sam2_ir_fa_rerank_feedback_only",
+            "family": "sam2_ir_fa_rerank_m4_ablation",
+            "modality": "ir",
+            "prompt_reranker": {"prior_weight_local_contrast": 0.0, "final_weight_prior": 0.0, "final_weight_feedback": 1.0},
+        },
+        "evaluation": {
+            "inference_mode": "point",
+            "prompt_policy": {"name": "sam2_ir_fa_rerank_feedback_only", "prompt_type": "point", "prompt_source": "synthesized", "prompt_budget": 1},
+        },
+    },
+    "sam2_ir_fa_rerank_gated_box_strict": {
+        "baseline": "sam2_learned_auto_box_point_gated_prompt",
+        "method": {
+            "name": "sam2_ir_fa_rerank_gated_box_strict",
+            "family": "sam2_ir_fa_rerank_m4_ablation",
+            "modality": "ir",
+            "prompt_reranker": {
+                "prior_weight_local_contrast": 0.0,
+                "box_enable_margin": 0.03,
+                "box_enable_min_score": 0.72,
+                "box_enable_min_point_feedback_score": 0.70,
+            },
+        },
+        "evaluation": {
+            "inference_mode": "box+point",
+            "prompt_policy": {"name": "sam2_ir_fa_rerank_gated_box_strict", "prompt_type": "box+point", "prompt_source": "synthesized", "prompt_budget": 2},
+        },
+    },
 }
 
 DEFAULT_HEURISTIC_METHODS: Dict[str, Dict[str, Any]] = {
@@ -215,6 +259,27 @@ def _auto_config(raw: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
+def _train_seed_values(auto_config: Dict[str, Any]) -> list[int]:
+    raw_seeds = auto_config.get("train_seeds")
+    if raw_seeds is None:
+        raw_seeds = [auto_config.get("train", {}).get("seed", 42)]
+    if not isinstance(raw_seeds, list):
+        raw_seeds = [raw_seeds]
+    seeds: list[int] = []
+    for item in raw_seeds:
+        seed = int(item)
+        if seed not in seeds:
+            seeds.append(seed)
+    if not seeds:
+        seeds.append(int(auto_config.get("train", {}).get("seed", 42)))
+    return seeds
+
+
+def _method_is_learned(base_matrix: Dict[str, Any], method_id: str) -> bool:
+    method_entry = fr._resolve_method(base_matrix["methods"], method_id)
+    return str(method_entry.get("baseline", "")).startswith("sam2_learned_auto_")
+
+
 def _apply_train_cli_overrides(auto_config: Dict[str, Any], args: argparse.Namespace) -> None:
     train_config = auto_config.setdefault("train", {})
     overrides = {
@@ -249,6 +314,7 @@ def _inject_learned_prompt_config(
     *,
     base_matrix: Dict[str, Any],
     checkpoint_path: Path,
+    train_seed: int,
     auto_config: Dict[str, Any],
     heatmap_root: Path,
 ) -> None:
@@ -259,6 +325,7 @@ def _inject_learned_prompt_config(
             continue
         method_payload = method_entry.setdefault("method", {})
         method_payload["prompt_checkpoint"] = str(checkpoint_path)
+        method_payload["prompt_train_seed"] = int(train_seed)
         method_payload["prompt_device"] = "cuda"
         method_payload["prompt_top_k"] = int(prompt_runtime.get("top_k", auto_config.get("top_k", 1)))
         method_payload["prompt_point_budget"] = int(prompt_runtime.get("point_budget", auto_config.get("point_budget", 1)))
@@ -285,7 +352,8 @@ def _inject_learned_prompt_config(
         method_payload["heatmaps"] = {
             "enabled": bool(auto_config.get("heatmaps", {}).get("eval_enabled", True)),
             "root": str(heatmap_root),
-            "experiment_id": str(auto_config["experiment_id"]),
+            "experiment_id": f"{auto_config['experiment_id']}_seed{int(train_seed)}",
+            "train_seed": int(train_seed),
             "sample_limit": int(auto_config.get("heatmaps", {}).get("eval_sample_limit", 16)),
         }
 
@@ -330,7 +398,7 @@ def _write_training_configs(
     output_root: Path,
     show_progress: bool,
     progress_backend: str,
-) -> tuple[Path, Path]:
+) -> list[dict[str, Any]]:
     dataset_config_dir = generated_dir / "training_dataset_configs"
     checkpoints = suite_config.get("checkpoints", [])
     if not checkpoints:
@@ -357,31 +425,51 @@ def _write_training_configs(
         if str(dataset_id) in light_cache_dataset_ids:
             light_cache_dataset_config_paths.append(str(dataset_config_path))
 
-    train_settings = copy.deepcopy(auto_config.get("train", {}))
-    train_payload = {
-        "experiment_id": auto_config["experiment_id"],
-        "output_root": str(output_root),
-        "dataset_configs": dataset_config_paths,
-        "train": train_settings,
-        "model": copy.deepcopy(auto_config.get("model", {})),
-        "target": copy.deepcopy(auto_config.get("target", {})),
-        "heatmaps": copy.deepcopy(auto_config.get("heatmaps", {})),
-        "source_config": str(config_path.resolve()),
-        "source_config_sha256": sha256_file(config_path),
-    }
-    if gpu_cache_dataset_config_paths:
-        train_payload["gpu_cache_dataset_configs"] = gpu_cache_dataset_config_paths
-    if light_cache_dataset_config_paths:
-        train_payload["light_cache_dataset_configs"] = light_cache_dataset_config_paths
-    if raw.get("auto_prompt_training"):
-        train_payload = fr._deep_merge(train_payload, copy.deepcopy(raw["auto_prompt_training"]))
-    train_payload.setdefault("train", {})
-    train_payload["train"]["show_progress"] = bool(show_progress)
-    train_payload["train"]["progress_backend"] = progress_backend if show_progress else "none"
-    train_payload["train"].setdefault("progress_update_interval_s", 1.0)
-    train_config_path = generated_dir / "auto_prompt_train.yaml"
-    fr._write_yaml(train_config_path, train_payload)
-    return train_config_path, output_root / str(auto_config["experiment_id"]) / str(auto_config["checkpoint_name"])
+    train_contexts: list[dict[str, Any]] = []
+    source_sha256 = sha256_file(config_path)
+    for train_seed in _train_seed_values(auto_config):
+        train_experiment_id = f"{auto_config['experiment_id']}_seed{train_seed}"
+        train_settings = copy.deepcopy(auto_config.get("train", {}))
+        train_settings["seed"] = int(train_seed)
+        train_payload = {
+            "experiment_id": train_experiment_id,
+            "base_experiment_id": auto_config["experiment_id"],
+            "train_seed": int(train_seed),
+            "output_root": str(output_root),
+            "dataset_configs": dataset_config_paths,
+            "train": train_settings,
+            "model": copy.deepcopy(auto_config.get("model", {})),
+            "target": copy.deepcopy(auto_config.get("target", {})),
+            "heatmaps": copy.deepcopy(auto_config.get("heatmaps", {})),
+            "source_config": str(config_path.resolve()),
+            "source_config_sha256": source_sha256,
+        }
+        if gpu_cache_dataset_config_paths:
+            train_payload["gpu_cache_dataset_configs"] = gpu_cache_dataset_config_paths
+        if light_cache_dataset_config_paths:
+            train_payload["light_cache_dataset_configs"] = light_cache_dataset_config_paths
+        if raw.get("auto_prompt_training"):
+            train_payload = fr._deep_merge(train_payload, copy.deepcopy(raw["auto_prompt_training"]))
+        train_payload["experiment_id"] = train_experiment_id
+        train_payload["base_experiment_id"] = auto_config["experiment_id"]
+        train_payload["train_seed"] = int(train_seed)
+        train_payload.setdefault("train", {})
+        train_payload["train"]["seed"] = int(train_seed)
+        train_payload["train"]["show_progress"] = bool(show_progress)
+        train_payload["train"]["progress_backend"] = progress_backend if show_progress else "none"
+        train_payload["train"].setdefault("progress_update_interval_s", 1.0)
+        train_config_path = generated_dir / f"auto_prompt_train_seed{train_seed}.yaml"
+        checkpoint_path = output_root / train_experiment_id / str(auto_config["checkpoint_name"])
+        fr._write_yaml(train_config_path, train_payload)
+        train_contexts.append(
+            {
+                "seed": int(train_seed),
+                "experiment_id": train_experiment_id,
+                "config_path": train_config_path,
+                "checkpoint_path": checkpoint_path,
+            }
+        )
+    return train_contexts
 
 
 def _env_for_gpu(paths: Dict[str, Any], gpu: str) -> Dict[str, str]:
@@ -598,11 +686,13 @@ def _preflight_section(reports: list[dict[str, Any]], *, mode: str) -> dict[str,
     }
 
 
-def _dataset_preflight_summary(*, train_config_path: Path, run_plan: list[tuple[Any, ...]], mode: str) -> dict[str, Any]:
-    train_payload = _load_yaml(train_config_path)
-    train_config_paths = [Path(item) for item in train_payload.get("dataset_configs", [])]
+def _dataset_preflight_summary(*, train_config_paths: list[Path], run_plan: list[tuple[Any, ...]], mode: str) -> dict[str, Any]:
+    dataset_config_paths: list[Path] = []
+    for train_config_path in train_config_paths:
+        train_payload = _load_yaml(train_config_path)
+        dataset_config_paths.extend(Path(item) for item in train_payload.get("dataset_configs", []))
     eval_config_paths = [Path(item[5]) for item in run_plan]
-    train_reports = _preflight_config_paths(train_config_paths, role="train", mode=mode)
+    train_reports = _preflight_config_paths(dataset_config_paths, role="train", mode=mode)
     eval_reports = _preflight_config_paths(eval_config_paths, role="eval", mode=mode)
     train_summary = _preflight_section(train_reports, mode=mode)
     eval_summary = _preflight_section(eval_reports, mode=mode)
@@ -656,6 +746,8 @@ def _build_run_plan(
     base_matrix: Dict[str, Any],
     suite_config: Dict[str, Any],
     paths: Dict[str, Any],
+    auto_config: Dict[str, Any],
+    train_contexts: list[dict[str, Any]],
     config_dir: Path,
     matrix_dir: Path,
     analysis_config_dir: Path,
@@ -679,14 +771,56 @@ def _build_run_plan(
     for suite_key, suite_entry in fr._iter_requested_suites(suite_config, selected_suites):
         suite_checkpoints = fr._suite_checkpoints(checkpoints, suite_entry)
         method_ids = fr._suite_method_ids(mode_entries, suite_entry)
+        reference_method_ids = [method_id for method_id in method_ids if not _method_is_learned(base_matrix, method_id)]
+        learned_method_ids = [method_id for method_id in method_ids if _method_is_learned(base_matrix, method_id)]
         for checkpoint in suite_checkpoints:
             artifact_root = fr._run_artifact_root(artifact_base, artifact_subdir, suite_key, checkpoint["alias"])
+            experiment_contexts: list[dict[str, Any]] = []
+            if reference_method_ids:
+                experiment_contexts.append(
+                    {
+                        "experiment_id": f"{suite_entry['experiment_id']}_reference",
+                        "method_ids": reference_method_ids,
+                        "train_seed": None,
+                        "checkpoint_path": None,
+                    }
+                )
+            for train_context in train_contexts:
+                if learned_method_ids:
+                    seed = int(train_context["seed"])
+                    experiment_contexts.append(
+                        {
+                            "experiment_id": f"{suite_entry['experiment_id']}_seed{seed}",
+                            "method_ids": learned_method_ids,
+                            "train_seed": seed,
+                            "checkpoint_path": Path(train_context["checkpoint_path"]),
+                        }
+                    )
+            if not experiment_contexts:
+                continue
+            experiment_ids = [str(item["experiment_id"]) for item in experiment_contexts]
+            experiments = [
+                {
+                    "experiment_id": str(item["experiment_id"]),
+                    "status": "planned",
+                    "datasets": list(suite_entry["datasets"]),
+                    "methods": list(item["method_ids"]),
+                    "metrics": list(suite_entry.get("metrics", [])),
+                    "purpose": suite_entry.get("purpose", ""),
+                    "suite": suite_key,
+                    "checkpoint": checkpoint["alias"],
+                    "train_seed": item["train_seed"],
+                }
+                for item in experiment_contexts
+            ]
             generated_matrix = fr._build_generated_matrix(
                 base_matrix=base_matrix,
                 suite_key=suite_key,
                 suite_entry=suite_entry,
                 checkpoint=checkpoint,
                 method_ids=method_ids,
+                experiments=experiments,
+                experiment_groups=experiment_ids,
             )
             matrix_path = matrix_dir / suite_key / f"{checkpoint['alias']}.yaml"
             fr._write_yaml(matrix_path, generated_matrix)
@@ -702,6 +836,7 @@ def _build_run_plan(
                         artifact_root=artifact_root,
                         analysis_root=analysis_root,
                         analysis_defaults=suite_config.get("analysis", {}),
+                        experiment_groups=experiment_ids,
                     ),
                 )
                 analysis_records.append(
@@ -712,45 +847,71 @@ def _build_run_plan(
                         "analysis_output_dir": str(analysis_root / suite_key / checkpoint["alias"]),
                         "log_path": str(fr._log_path(artifact_base / artifact_subdir, suite_key, checkpoint["alias"], "analysis")),
                         "status": "planned",
+                        "experiment_groups": experiment_ids,
                     }
                 )
-            for dataset_id in suite_entry.get("datasets", []):
-                for method_id in method_ids:
-                    method_entry = fr._resolve_method(base_matrix["methods"], method_id)
-                    output_dir = fr._run_output_dir(artifact_root, suite_entry["experiment_id"], dataset_id, method_id)
-                    app_config_path = config_dir / suite_key / checkpoint["alias"] / f"{dataset_id}_{method_id}.yaml"
-                    app_config = fr._build_app_config(
-                        base_matrix=base_matrix,
-                        suite_config=suite_config,
-                        paths=paths,
-                        suite_key=suite_key,
-                        suite_entry=suite_entry,
-                        checkpoint=checkpoint,
-                        dataset_id=dataset_id,
-                        method_id=method_id,
-                        artifact_root=artifact_root,
-                        smoke_test=smoke_test,
-                        show_progress=False,
-                        progress_backend="none",
-                        source_config_path=source_config_path,
-                        source_config_sha256=source_config_sha256,
+            for experiment_context in experiment_contexts:
+                context_matrix = copy.deepcopy(base_matrix)
+                train_seed = experiment_context["train_seed"]
+                if train_seed is not None:
+                    _inject_learned_prompt_config(
+                        base_matrix=context_matrix,
+                        checkpoint_path=Path(experiment_context["checkpoint_path"]),
+                        train_seed=int(train_seed),
+                        auto_config=auto_config,
+                        heatmap_root=artifact_base / artifact_subdir / "heatmaps",
                     )
-                    fr._write_yaml(app_config_path, app_config)
-                    command = fr._command_for(app_config_path, method_entry["baseline"], python_bin)
-                    log_path = fr._log_path(artifact_base / artifact_subdir, suite_key, checkpoint["alias"], f"{dataset_id}_{method_id}")
-                    run_plan.append(
-                        (
-                            suite_key,
-                            checkpoint,
-                            dataset_id,
-                            method_id,
-                            output_dir,
-                            app_config_path,
-                            sha256_file(app_config_path),
-                            command,
-                            log_path,
+                context_suite_entry = copy.deepcopy(suite_entry)
+                context_suite_entry["experiment_id"] = str(experiment_context["experiment_id"])
+                if train_seed is not None:
+                    context_runtime = copy.deepcopy(context_suite_entry.get("runtime", {}))
+                    context_runtime["seeds"] = [int(train_seed)]
+                    context_suite_entry["runtime"] = context_runtime
+                for dataset_id in suite_entry.get("datasets", []):
+                    for method_id in experiment_context["method_ids"]:
+                        method_entry = fr._resolve_method(context_matrix["methods"], method_id)
+                        output_dir = fr._run_output_dir(artifact_root, context_suite_entry["experiment_id"], dataset_id, method_id)
+                        seed_suffix = "reference" if train_seed is None else f"seed{train_seed}"
+                        app_config_path = config_dir / suite_key / checkpoint["alias"] / seed_suffix / f"{dataset_id}_{method_id}.yaml"
+                        app_config = fr._build_app_config(
+                            base_matrix=context_matrix,
+                            suite_config=suite_config,
+                            paths=paths,
+                            suite_key=suite_key,
+                            suite_entry=context_suite_entry,
+                            checkpoint=checkpoint,
+                            dataset_id=dataset_id,
+                            method_id=method_id,
+                            artifact_root=artifact_root,
+                            smoke_test=smoke_test,
+                            show_progress=False,
+                            progress_backend="none",
+                            source_config_path=source_config_path,
+                            source_config_sha256=source_config_sha256,
                         )
-                    )
+                        fr._write_yaml(app_config_path, app_config)
+                        command = fr._command_for(app_config_path, method_entry["baseline"], python_bin)
+                        log_path = fr._log_path(
+                            artifact_base / artifact_subdir,
+                            suite_key,
+                            checkpoint["alias"],
+                            f"{seed_suffix}_{dataset_id}_{method_id}",
+                        )
+                        run_plan.append(
+                            (
+                                suite_key,
+                                checkpoint,
+                                dataset_id,
+                                method_id,
+                                output_dir,
+                                app_config_path,
+                                sha256_file(app_config_path),
+                                command,
+                                log_path,
+                                train_seed,
+                                context_suite_entry["experiment_id"],
+                            )
+                        )
     return run_plan, analysis_records
 
 
@@ -778,27 +939,32 @@ def _run_eval_plan(
     progress_counts: Dict[str, int] = {"completed": 0, "skipped": 0, "failed": 0, "dry_run": 0}
     while queue or active:
         while queue and free_gpus and not (stop_on_error and failures):
-            suite_key, checkpoint, dataset_id, method_id, output_dir, config_path, config_sha256, command, log_path = queue.pop(0)
+            suite_key, checkpoint, dataset_id, method_id, output_dir, config_path, config_sha256, command, log_path, train_seed, experiment_id = queue.pop(0)
             gpu = free_gpus.pop(0)
-            prefix = f"[{completed_slots + len(active) + 1}/{total}] gpu={gpu} suite={suite_key} ckpt={checkpoint['alias']} dataset={dataset_id} mode={method_id}"
+            seed_label = "reference" if train_seed is None else f"seed={train_seed}"
+            prefix = (
+                f"[{completed_slots + len(active) + 1}/{total}] gpu={gpu} suite={suite_key} ckpt={checkpoint['alias']} "
+                f"dataset={dataset_id} mode={method_id} {seed_label}"
+            )
             _set_eval_progress(progress, counts=progress_counts, active=len(active), queued=len(queue))
             if not rerun and fr._run_is_complete(output_dir):
                 if progress is None:
                     print(f"{prefix} skipped_existing", flush=True)
-                records.append(
-                    fr._status_record(
-                        status="skipped_existing",
-                        suite_key=suite_key,
-                        checkpoint=checkpoint,
-                        dataset_id=dataset_id,
-                        method_id=method_id,
-                        output_dir=output_dir,
-                        config_path=config_path,
-                        config_sha256=config_sha256,
-                        command=command,
-                        log_path=log_path,
-                    )
+                record = fr._status_record(
+                    status="skipped_existing",
+                    suite_key=suite_key,
+                    checkpoint=checkpoint,
+                    dataset_id=dataset_id,
+                    method_id=method_id,
+                    output_dir=output_dir,
+                    config_path=config_path,
+                    config_sha256=config_sha256,
+                    command=command,
+                    log_path=log_path,
                 )
+                record["train_seed"] = train_seed
+                record["experiment_id"] = experiment_id
+                records.append(record)
                 completed_slots += 1
                 free_gpus.append(gpu)
                 fr._write_run_outputs(manifest_dir, records, failures, run_id)
@@ -806,20 +972,21 @@ def _run_eval_plan(
                 continue
             if dry_run:
                 print(f"{prefix} dry_run CUDA_VISIBLE_DEVICES={gpu} {' '.join(command)}", flush=True)
-                records.append(
-                    fr._status_record(
-                        status="dry_run",
-                        suite_key=suite_key,
-                        checkpoint=checkpoint,
-                        dataset_id=dataset_id,
-                        method_id=method_id,
-                        output_dir=output_dir,
-                        config_path=config_path,
-                        config_sha256=config_sha256,
-                        command=command,
-                        log_path=log_path,
-                    )
+                record = fr._status_record(
+                    status="dry_run",
+                    suite_key=suite_key,
+                    checkpoint=checkpoint,
+                    dataset_id=dataset_id,
+                    method_id=method_id,
+                    output_dir=output_dir,
+                    config_path=config_path,
+                    config_sha256=config_sha256,
+                    command=command,
+                    log_path=log_path,
                 )
+                record["train_seed"] = train_seed
+                record["experiment_id"] = experiment_id
+                records.append(record)
                 completed_slots += 1
                 free_gpus.append(gpu)
                 _advance_eval_progress(progress, status="dry_run", counts=progress_counts, active=len(active), queued=len(queue))
@@ -843,6 +1010,8 @@ def _run_eval_plan(
                     "config_sha256": config_sha256,
                     "command": command,
                     "log_path": log_path,
+                    "train_seed": train_seed,
+                    "experiment_id": experiment_id,
                 }
             )
         if dry_run:
@@ -861,21 +1030,22 @@ def _run_eval_plan(
             if returncode == 0 and validate_run_artifacts(item["output_dir"])["valid"]:
                 if progress is None:
                     print(f"{item['prefix']} completed", flush=True)
-                records.append(
-                    fr._status_record(
-                        status="completed",
-                        suite_key=item["suite_key"],
-                        checkpoint=item["checkpoint"],
-                        dataset_id=item["dataset_id"],
-                        method_id=item["method_id"],
-                        output_dir=item["output_dir"],
-                        config_path=item["config_path"],
-                        config_sha256=item["config_sha256"],
-                        command=item["command"],
-                        log_path=item["log_path"],
-                        returncode=returncode,
-                    )
+                record = fr._status_record(
+                    status="completed",
+                    suite_key=item["suite_key"],
+                    checkpoint=item["checkpoint"],
+                    dataset_id=item["dataset_id"],
+                    method_id=item["method_id"],
+                    output_dir=item["output_dir"],
+                    config_path=item["config_path"],
+                    config_sha256=item["config_sha256"],
+                    command=item["command"],
+                    log_path=item["log_path"],
+                    returncode=returncode,
                 )
+                record["train_seed"] = item["train_seed"]
+                record["experiment_id"] = item["experiment_id"]
+                records.append(record)
                 _advance_eval_progress(progress, status="completed", counts=progress_counts, active=len(active), queued=len(queue))
             else:
                 validation = validate_run_artifacts(item["output_dir"]) if returncode == 0 else {"errors": []}
@@ -897,6 +1067,8 @@ def _run_eval_plan(
                     log_tail=fr._tail_text(item["log_path"]),
                     validation_errors=list(validation.get("errors", [])),
                 )
+                failure["train_seed"] = item["train_seed"]
+                failure["experiment_id"] = item["experiment_id"]
                 records.append(failure)
                 failures.append(failure)
                 _advance_eval_progress(progress, status=status, counts=progress_counts, active=len(active), queued=len(queue))
@@ -923,7 +1095,7 @@ def _run_eval_plan(
 
 
 def main(argv: List[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Run SAM2-IR-QD learned auto prompt training and M3/M3.1 evaluation on 4x4090.")
+    parser = argparse.ArgumentParser(description="Run SAM2-IR-QD learned auto prompt training and M4 seeded evaluation on 4x4090.")
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument("--suites", help="Comma-separated suite keys. Default: auto_prompt from config.")
     parser.add_argument("--checkpoints", help="Comma-separated checkpoint aliases. Default: suite-selected checkpoints.")
@@ -973,7 +1145,7 @@ def main(argv: List[str] | None = None) -> int:
     manifest_dir = artifact_base / artifact_subdir
     generated_dir = manifest_dir / "generated"
     output_root = artifact_base / artifact_subdir / "train"
-    train_config_path, auto_checkpoint_path = _write_training_configs(
+    train_contexts = _write_training_configs(
         config_path=config_path,
         raw=raw,
         paths=paths,
@@ -985,12 +1157,8 @@ def main(argv: List[str] | None = None) -> int:
         show_progress=not args.no_progress,
         progress_backend=args.progress_backend,
     )
-    _inject_learned_prompt_config(
-        base_matrix=base_matrix,
-        checkpoint_path=auto_checkpoint_path,
-        auto_config=auto_config,
-        heatmap_root=artifact_base / artifact_subdir / "heatmaps",
-    )
+    primary_train_context = train_contexts[0]
+    auto_checkpoint_path = Path(primary_train_context["checkpoint_path"])
     selected_suites = fr._split_filter(args.suites) or set(str(item) for item in auto_config.get("eval_suites", ["auto_prompt"]))
     selected_checkpoints = fr._split_filter(args.checkpoints)
     selected_modes = fr._split_filter(args.modes)
@@ -1005,20 +1173,30 @@ def main(argv: List[str] | None = None) -> int:
 
     created_at = datetime.now(timezone.utc).isoformat()
     run_id = fr._manifest_run_id(created_at)
-    train_log = manifest_dir / "logs" / "auto_prompt_train.log"
-    train_command = _command_for_train(train_config_path, args.python_bin)
-    train_record = {
-        "status": "planned",
-        "config_path": str(train_config_path),
-        "checkpoint_path": str(auto_checkpoint_path),
-        "log_path": str(train_log),
-        "command": " ".join(train_command),
-        "gpu": str(auto_config.get("train_gpu", "0")),
-    }
+    train_records = []
+    for train_context in train_contexts:
+        train_config_path = Path(train_context["config_path"])
+        train_seed = int(train_context["seed"])
+        train_command = _command_for_train(train_config_path, args.python_bin)
+        train_records.append(
+            {
+                "status": "planned",
+                "seed": train_seed,
+                "experiment_id": str(train_context["experiment_id"]),
+                "config_path": str(train_config_path),
+                "checkpoint_path": str(train_context["checkpoint_path"]),
+                "log_path": str(manifest_dir / "logs" / f"auto_prompt_train_seed{train_seed}.log"),
+                "command": " ".join(train_command),
+                "gpu": str(auto_config.get("train_gpu", "0")),
+            }
+        )
+    train_record = train_records[0]
     run_plan, analysis_records = _build_run_plan(
         base_matrix=base_matrix,
         suite_config=suite_config,
         paths=paths,
+        auto_config=auto_config,
+        train_contexts=train_contexts,
         config_dir=generated_dir / "run_configs",
         matrix_dir=generated_dir / "matrices",
         analysis_config_dir=generated_dir / "analysis_configs",
@@ -1031,7 +1209,11 @@ def main(argv: List[str] | None = None) -> int:
         smoke_test=args.smoke_test,
         python_bin=args.python_bin,
     )
-    preflight_summary = _dataset_preflight_summary(train_config_path=train_config_path, run_plan=run_plan, mode=args.preflight_mode)
+    preflight_summary = _dataset_preflight_summary(
+        train_config_paths=[Path(item["config_path"]) for item in train_contexts],
+        run_plan=run_plan,
+        mode=args.preflight_mode,
+    )
     preflight_path = _write_dataset_preflight_summary(manifest_dir, preflight_summary)
     dataset_preflight = {"path": str(preflight_path), "summary": preflight_summary}
     _print_dataset_preflight_summary(preflight_summary)
@@ -1047,6 +1229,9 @@ def main(argv: List[str] | None = None) -> int:
             "dry_run": args.dry_run,
             "smoke_test": args.smoke_test,
             "train": train_record,
+            "train_runs": train_records,
+            "train_seed_count": len(train_records),
+            "train_seeds": [item["seed"] for item in train_records],
             "dataset_preflight": dataset_preflight,
             "run_count": len(run_plan),
             "completed_count": 0,
@@ -1060,39 +1245,51 @@ def main(argv: List[str] | None = None) -> int:
         print(f"[preflight] failed path={preflight_path}", flush=True)
         return 1
 
-    print(f"[train] checkpoint={auto_checkpoint_path}", flush=True)
-    if args.dry_run:
-        train_record["status"] = "dry_run"
-        print(f"[train] dry_run CUDA_VISIBLE_DEVICES={train_record['gpu']} {' '.join(train_command)}", flush=True)
-    elif args.skip_train:
-        train_record["status"] = "skipped_by_flag"
-        print("[train] skipped_by_flag", flush=True)
-    elif auto_checkpoint_path.exists() and not args.rerun_train:
-        train_record["status"] = "skipped_existing"
-        print("[train] skipped_existing", flush=True)
-    else:
-        result = _run_logged(
-            train_command,
-            env=_env_for_gpu(paths, str(auto_config.get("train_gpu", "0"))),
-            log_path=train_log,
-            stream_logs=args.stream_logs or not args.no_progress,
-        )
-        train_record["returncode"] = result.returncode
-        train_record["status"] = "completed" if result.returncode == 0 and auto_checkpoint_path.exists() else "failed"
-        if train_record["status"] != "completed":
-            train_record["log_tail"] = fr._tail_text(train_log)
-            manifest = {
-                "created_at": created_at,
-                "run_id": run_id,
-                "config": str(config_path),
-                "artifact_root": str(manifest_dir),
-                "train": train_record,
-                "dataset_preflight": dataset_preflight,
-                "records": [],
-                "failures": [train_record],
-            }
-            fr._write_final_manifest(manifest_dir, manifest)
-            return 1
+    train_failures = []
+    for item in train_records:
+        checkpoint_path = Path(str(item["checkpoint_path"]))
+        train_command = _command_for_train(Path(str(item["config_path"])), args.python_bin)
+        train_log = Path(str(item["log_path"]))
+        print(f"[train seed={item['seed']}] checkpoint={checkpoint_path}", flush=True)
+        if args.dry_run:
+            item["status"] = "dry_run"
+            print(f"[train seed={item['seed']}] dry_run CUDA_VISIBLE_DEVICES={item['gpu']} {' '.join(train_command)}", flush=True)
+        elif args.skip_train:
+            item["status"] = "skipped_by_flag"
+            print(f"[train seed={item['seed']}] skipped_by_flag", flush=True)
+        elif checkpoint_path.exists() and not args.rerun_train:
+            item["status"] = "skipped_existing"
+            print(f"[train seed={item['seed']}] skipped_existing", flush=True)
+        else:
+            result = _run_logged(
+                train_command,
+                env=_env_for_gpu(paths, str(auto_config.get("train_gpu", "0"))),
+                log_path=train_log,
+                stream_logs=args.stream_logs or not args.no_progress,
+            )
+            item["returncode"] = result.returncode
+            item["status"] = "completed" if result.returncode == 0 and checkpoint_path.exists() else "failed"
+            if item["status"] != "completed":
+                item["log_tail"] = fr._tail_text(train_log)
+                train_failures.append(item)
+                if args.stop_on_error:
+                    break
+    if train_failures:
+        manifest = {
+            "created_at": created_at,
+            "run_id": run_id,
+            "config": str(config_path),
+            "artifact_root": str(manifest_dir),
+            "train": train_record,
+            "train_runs": train_records,
+            "train_seed_count": len(train_records),
+            "train_seeds": [item["seed"] for item in train_records],
+            "dataset_preflight": dataset_preflight,
+            "records": [],
+            "failures": train_failures,
+        }
+        fr._write_final_manifest(manifest_dir, manifest)
+        return 1
 
     print(f"[plan] eval_runs={len(run_plan)} artifact_root={manifest_dir}", flush=True)
     records, failures = _run_eval_plan(
@@ -1137,6 +1334,9 @@ def main(argv: List[str] | None = None) -> int:
         "dry_run": args.dry_run,
         "smoke_test": args.smoke_test,
         "train": train_record,
+        "train_runs": train_records,
+        "train_seed_count": len(train_records),
+        "train_seeds": [item["seed"] for item in train_records],
         "dataset_preflight": dataset_preflight,
         "run_count": len(run_plan),
         "completed_count": len([item for item in records if item["status"] == "completed"]),

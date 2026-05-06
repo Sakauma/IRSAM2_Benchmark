@@ -338,6 +338,7 @@ class LearnedAutoPromptTests(unittest.TestCase):
             self.assertEqual(pred["prompt"]["box_variant"], "gated_box_skipped")
             self.assertEqual(pred["prompt"]["box_calibration_policy"], "gated_sam2_feedback")
             self.assertEqual(pred["prompt"]["box_calibration_applied"], 0.0)
+            self.assertEqual(pred["prompt"]["box_calibration_min_point_feedback_score"], 0.0)
             self.assertEqual(float((pred["mask"] > 0.5).sum()), 4.0)
 
 

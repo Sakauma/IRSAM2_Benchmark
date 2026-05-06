@@ -601,6 +601,8 @@ def build_segmentation_row(
             "PromptBoxWidth": prompt.get("box_width"),
             "PromptBoxHeight": prompt.get("box_height"),
             "PromptCheckpointPath": prompt.get("checkpoint_path"),
+            "PromptTrainSeed": prompt.get("prompt_train_seed"),
+            "TrainSeed": prompt.get("prompt_train_seed"),
             "PromptCandidateRank": prompt.get("candidate_rank"),
             "PromptCandidateCount": prompt.get("candidate_count"),
             "PromptCandidateTopK": prompt.get("candidate_top_k"),
@@ -623,6 +625,7 @@ def build_segmentation_row(
             "PromptBoxCalibrationScore": prompt.get("box_calibration_score"),
             "PromptBoxCalibrationPointFeedbackScore": prompt.get("box_calibration_point_feedback_score"),
             "PromptBoxCalibrationMargin": prompt.get("box_calibration_margin"),
+            "PromptBoxCalibrationMinPointFeedbackScore": prompt.get("box_calibration_min_point_feedback_score"),
             "PromptBoxCalibrationCandidateCount": prompt.get("box_calibration_candidate_count"),
             "PromptBoxCalibrationCandidatesJson": prompt.get("box_calibration_candidates_json"),
         }

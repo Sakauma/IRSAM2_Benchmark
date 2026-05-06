@@ -264,6 +264,20 @@ class AnalysisV2Tests(unittest.TestCase):
         )
         self.assertEqual(result[0]["status"], "skipped_eval_unit_mismatch")
 
+    def test_paired_stats_uses_train_seed_when_present(self):
+        rows = [
+            {"dataset": "d", "method": "a", "sample_id": "one", "seed": 42, "TrainSeed": 1, "eval_unit": "instance", "mIoU": 0.1},
+            {"dataset": "d", "method": "b", "sample_id": "one", "seed": 42, "TrainSeed": 2, "eval_unit": "instance", "mIoU": 0.2},
+        ]
+        result = run_paired_tests(
+            rows,
+            {
+                "metrics": ["mIoU"],
+                "statistics": {"comparisons": [{"baseline": "a", "candidate": "b"}], "n_bootstrap": 10},
+            },
+        )
+        self.assertEqual(result[0]["status"], "skipped_no_pairs")
+
     def test_script_dry_run(self):
         script_path = Path(__file__).resolve().parents[1] / "scripts" / "analyze_paper_results.py"
         spec = importlib.util.spec_from_file_location("analyze_paper_results_under_test", script_path)

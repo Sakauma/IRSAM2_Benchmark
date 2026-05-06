@@ -62,7 +62,7 @@ def bootstrap_ci(diff: np.ndarray, n_bootstrap: int, ci: float, seed: int) -> tu
 
 
 def _row_key(row: Dict[str, Any]) -> tuple[str, str]:
-    seed = str(row.get("seed", "__no_seed__"))
+    seed = str(row.get("TrainSeed", row.get("seed", "__no_seed__")))
     sample_id = str(row.get("sample_id", ""))
     return seed, sample_id
 

@@ -5,8 +5,8 @@
 ## 保留文件
 
 - `server_benchmark_full.example.yaml`：完整配置模板。它同时定义路径、模型、方法、数据集、seed、batch、suite 和分析参数。
-- `server_auto_prompt_4090x4.example.yaml`：SAM2-IR-QD M3.1 自动 prompt 训练、reranker 消融和 gated-box 评估模板，默认使用 GPU `0,1,6,7`。当前默认是 no-RBGT 安全配置，只用 `NUAA-SIRST`、`NUDT-SIRST` 和 `IRSTD-1K` 训练 learned auto prompt，不扫描 `RBGT-Tiny`；输出目录固定为 `artifacts/sam2_ir_qd_m3_rerank_ablation_v1`。
-- `server_auto_prompt_4090x4_smoke.yaml`：服务器可直接运行的 smoke 配置。它将训练压缩到 1 epoch/64 samples，并只评估 2 个数据集和代表性 M3.1 reranker / gated-box 模式。
+- `server_auto_prompt_4090x4.example.yaml`：SAM2-IR-QD M4 自动 prompt 多 seed 训练、FA rerank 和 strict gated-box 评估模板，默认使用 GPU `0,1,6,7`。当前默认是 no-RBGT 安全配置，只用 `NUAA-SIRST`、`NUDT-SIRST` 和 `IRSTD-1K` 训练 learned auto prompt，不扫描 `RBGT-Tiny`；输出目录固定为 `artifacts/sam2_ir_qd_m4_fa_rerank_seeded_v1`。
+- `server_auto_prompt_4090x4_smoke.yaml`：服务器可直接运行的 M4 smoke 配置。它将训练压缩到 1 epoch/64 samples，并只评估 2 个数据集和代表性 M4 reranker / strict gated-box 模式。
 
 ## 本地文件
 
@@ -61,7 +61,7 @@ PYTHONPATH=src python scripts/run_4090x4_auto_prompt.py \
 
 这个 example 不会把 `RBGT-Tiny` 加入训练。后续如果 no-RBGT 结果证明方向成立，再单独启用 RBGT-Tiny 弱监督配置。
 
-需要先验证 auto-prompt 训练、MultiModal 数据读取和 learned prompt E2 链路时，可以直接运行提交版 smoke 配置：
+需要先验证 auto-prompt 训练、MultiModal 数据读取和 M4 learned prompt 链路时，可以直接运行提交版 smoke 配置：
 
 ```bash
 PYTHONPATH=src python scripts/run_4090x4_auto_prompt.py \

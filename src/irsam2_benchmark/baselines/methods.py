@@ -516,6 +516,8 @@ class LearnedAutoPromptedSAM2(BaseMethod):
         self.border_suppression_px = int(config.method.get("prompt_border_suppression_px", 0))
         self.use_local_contrast = bool(config.method.get("prompt_use_local_contrast", True))
         self.use_top_hat = bool(config.method.get("prompt_use_top_hat", True))
+        raw_prompt_train_seed = config.method.get("prompt_train_seed")
+        self.prompt_train_seed = None if raw_prompt_train_seed is None else int(raw_prompt_train_seed)
         reranker_payload = config.method.get("prompt_reranker", {})
         reranker_payload = dict(reranker_payload) if isinstance(reranker_payload, dict) else {}
         reranker_payload.setdefault("min_box_side", self.min_box_side)
@@ -584,6 +586,7 @@ class LearnedAutoPromptedSAM2(BaseMethod):
             "point_rule": "argmax_learned_objectness",
             "box_rule": "learned_local_box_size",
             "checkpoint_path": str(self._checkpoint_path),
+            "prompt_train_seed": self.prompt_train_seed,
             "checkpoint_protocol": self._checkpoint_metadata.get("protocol", LEARNED_IR_AUTO_PROMPT_PROTOCOL),
             "objectness_map_id": heatmap_paths.get("raw", ""),
             "objectness_heatmap_overlay": heatmap_paths.get("overlay", ""),
@@ -611,6 +614,7 @@ class LearnedAutoPromptedSAM2(BaseMethod):
             meta={
                 "model": self.name,
                 "checkpoint_path": str(self._checkpoint_path),
+                "prompt_train_seed": self.prompt_train_seed,
                 "prompt_mode": self.inference_mode.value,
                 "point": auto_prompt.point,
                 "box": auto_prompt.box,
@@ -754,6 +758,8 @@ class LearnedAutoPromptedSAM2(BaseMethod):
         apply_box = True
         if self.box_calibration_policy == "gated":
             apply_box = (
+                point_feedback_score >= float(self._reranker_config.box_enable_min_point_feedback_score)
+                and
                 float(calibration.selected.score) >= point_feedback_score + float(self._reranker_config.box_enable_margin)
                 and float(calibration.selected.score) >= float(self._reranker_config.box_enable_min_score)
             )
@@ -778,6 +784,7 @@ class LearnedAutoPromptedSAM2(BaseMethod):
                         "box_calibration_score": float(calibration.selected.score),
                         "box_calibration_point_feedback_score": point_feedback_score,
                         "box_calibration_margin": float(self._reranker_config.box_enable_margin),
+                        "box_calibration_min_point_feedback_score": float(self._reranker_config.box_enable_min_point_feedback_score),
                         "box_calibration_candidate_count": len(calibration.candidates),
                         "box_calibration_candidates_json": json.dumps(box_calibration_metadata(calibration.candidates), ensure_ascii=False),
                     }
@@ -800,6 +807,7 @@ class LearnedAutoPromptedSAM2(BaseMethod):
                 "box_calibration_score": float(calibration.selected.score),
                 "box_calibration_point_feedback_score": point_feedback_score,
                 "box_calibration_margin": float(self._reranker_config.box_enable_margin),
+                "box_calibration_min_point_feedback_score": float(self._reranker_config.box_enable_min_point_feedback_score),
                 "box_calibration_candidate_count": len(calibration.candidates),
                 "box_calibration_candidates_json": json.dumps(box_calibration_metadata(calibration.candidates), ensure_ascii=False),
             }

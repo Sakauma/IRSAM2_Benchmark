@@ -35,6 +35,7 @@ class PromptRerankerConfig:
     center_sigma_fraction: float = 0.08
     box_enable_margin: float = 0.02
     box_enable_min_score: float = 0.0
+    box_enable_min_point_feedback_score: float = 0.0
 
 
 @dataclass(frozen=True)

@@ -149,6 +149,8 @@ class EvaluationRunnerTests(unittest.TestCase):
                 "candidate_score": 0.8,
                 "prompt_confidence": 0.7,
                 "negative_point_count": 4,
+                "prompt_train_seed": 123,
+                "box_calibration_min_point_feedback_score": 0.7,
             },
         )
 
@@ -164,6 +166,9 @@ class EvaluationRunnerTests(unittest.TestCase):
         self.assertEqual(row["PromptCandidateScore"], 0.8)
         self.assertEqual(row["PromptConfidence"], 0.7)
         self.assertEqual(row["PromptNegativePointCount"], 4)
+        self.assertEqual(row["PromptTrainSeed"], 123)
+        self.assertEqual(row["TrainSeed"], 123)
+        self.assertEqual(row["PromptBoxCalibrationMinPointFeedbackScore"], 0.7)
 
     def test_pred_mask_alignment_records_resize_metadata(self):
         gt_mask = box_to_area([0, 0, 4, 4], 4, 4)

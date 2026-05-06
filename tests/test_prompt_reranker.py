@@ -26,12 +26,14 @@ class PromptRerankerTests(unittest.TestCase):
             {
                 "box_enable_margin": 0.05,
                 "box_enable_min_score": 0.2,
+                "box_enable_min_point_feedback_score": 0.7,
                 "unknown_note": "kept out of runtime config",
             }
         )
 
         self.assertEqual(config.box_enable_margin, 0.05)
         self.assertEqual(config.box_enable_min_score, 0.2)
+        self.assertEqual(config.box_enable_min_point_feedback_score, 0.7)
 
     def test_rank_prompt_candidates_can_override_raw_objectness_with_ir_cues(self):
         with tempfile.TemporaryDirectory() as temp_dir:
