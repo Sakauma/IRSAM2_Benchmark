@@ -7,6 +7,10 @@
 - `server_5090_benchmark.md`：完整 benchmark 运行方案。
 - `server_benchmark_runbook.md`：服务器运行、验收和 artifact 归档清单。
 
+## 研究复盘
+
+- `research/2026-05-06--sam2-ir-qd--r04--experiment-review-and-paper-direction.md`：M2/M3/M3.1/M4 当前证据、论文方向和下一步实验计划。
+
 ## 规范文档
 
 - `artifact_schema_spec.md`：输出文件与报告 schema。
