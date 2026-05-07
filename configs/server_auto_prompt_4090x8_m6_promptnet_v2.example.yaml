@@ -54,7 +54,9 @@ auto_prompt:
     validation_ratio: 0.1
     validation_seed: 20260507
     best_checkpoint_name: "checkpoint_best.pt"
-    batch_size: 32
+    # V2 trains with a dense 512x512 GPU cache. On 24GB 4090 cards,
+    # batch 32 OOMs because expanded feature maps allocate ~4GB per block.
+    batch_size: 4
     learning_rate: 0.0003
     weight_decay: 0.0001
     objectness_loss: "balanced_focal"
