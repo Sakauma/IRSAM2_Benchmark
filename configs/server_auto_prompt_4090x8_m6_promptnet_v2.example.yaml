@@ -19,8 +19,8 @@ benchmark:
 auto_prompt:
   experiment_id: "sam2_ir_qd_m6_promptnet_v2_v1"
   artifact_subdir: "sam2_ir_qd_m6_promptnet_v2_v1"
-  train_gpu: "0"
-  train_gpus: ["0", "1", "2", "3", "4", "5", "6", "7"]
+  train_gpu: "5"
+  train_gpus: ["5", "6", "7"]
   eval_gpus: ["0", "1", "2", "3", "4", "5", "6", "7"]
   train_seeds: [42, 123, 456]
   train_datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k"]
@@ -54,7 +54,7 @@ auto_prompt:
     validation_ratio: 0.1
     validation_seed: 20260507
     best_checkpoint_name: "checkpoint_best.pt"
-    batch_size: 128
+    batch_size: 32
     learning_rate: 0.0003
     weight_decay: 0.0001
     objectness_loss: "balanced_focal"
