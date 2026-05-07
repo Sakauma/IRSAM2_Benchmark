@@ -435,6 +435,19 @@ def _write_training_configs(
         if str(dataset_id) in light_cache_dataset_ids:
             light_cache_dataset_config_paths.append(str(dataset_config_path))
 
+    validation_dataset_config_paths: list[str] = []
+    for dataset_id in auto_config.get("validation_datasets", []):
+        dataset_payload = _training_dataset_config(
+            base_matrix=base_matrix,
+            suite_config=suite_config,
+            paths=paths,
+            dataset_id=str(dataset_id),
+            checkpoint=checkpoint,
+        )
+        dataset_config_path = dataset_config_dir / f"validation_{dataset_id}.yaml"
+        fr._write_yaml(dataset_config_path, dataset_payload)
+        validation_dataset_config_paths.append(str(dataset_config_path))
+
     train_contexts: list[dict[str, Any]] = []
     source_sha256 = sha256_file(config_path)
     train_gpus = _train_gpu_values(auto_config)
@@ -455,6 +468,9 @@ def _write_training_configs(
             "source_config": str(config_path.resolve()),
             "source_config_sha256": source_sha256,
         }
+        if validation_dataset_config_paths:
+            train_payload["validation_dataset_configs"] = validation_dataset_config_paths
+            train_payload["validation_light_cache_dataset_configs"] = validation_dataset_config_paths
         if gpu_cache_dataset_config_paths:
             train_payload["gpu_cache_dataset_configs"] = gpu_cache_dataset_config_paths
         if light_cache_dataset_config_paths:
@@ -832,7 +848,14 @@ def _dataset_preflight_summary(*, train_config_paths: list[Path], run_plan: list
     dataset_config_paths: list[Path] = []
     for train_config_path in train_config_paths:
         train_payload = _load_yaml(train_config_path)
-        dataset_config_paths.extend(Path(item) for item in train_payload.get("dataset_configs", []))
+        for key in (
+            "dataset_configs",
+            "gpu_cache_dataset_configs",
+            "light_cache_dataset_configs",
+            "validation_dataset_configs",
+            "validation_light_cache_dataset_configs",
+        ):
+            dataset_config_paths.extend(Path(item) for item in train_payload.get(key, []))
     eval_config_paths = [Path(item[5]) for item in run_plan]
     train_reports = _preflight_config_paths(dataset_config_paths, role="train", mode=mode)
     eval_reports = _preflight_config_paths(eval_config_paths, role="eval", mode=mode)
@@ -1322,8 +1345,6 @@ def main(argv: List[str] | None = None) -> int:
         show_progress=not args.no_progress,
         progress_backend=args.progress_backend,
     )
-    primary_train_context = train_contexts[0]
-    auto_checkpoint_path = Path(primary_train_context["checkpoint_path"])
     selected_suites = fr._split_filter(args.suites) or set(str(item) for item in auto_config.get("eval_suites", ["auto_prompt"]))
     selected_checkpoints = fr._split_filter(args.checkpoints)
     selected_modes = fr._split_filter(args.modes)

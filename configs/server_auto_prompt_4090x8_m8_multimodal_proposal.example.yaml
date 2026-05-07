@@ -1,0 +1,569 @@
+# SAM2-IR-QD M8: MultiModal-small proposal adaptation with domain-balanced
+# sampling and area-balanced loss.
+# Run the export script once before this benchmark if the split COCO files do
+# not exist:
+#   python scripts/export_multimodal_small_target_coco.py \
+#     --root /project/IDIP/MAJ/dataset/data/MultiModal \
+#     --split \
+#     --overwrite
+# Recommended server launch:
+#   tmux new -s irsam2_m8
+#   PYTHONPATH=src python scripts/run_4090x4_auto_prompt.py \
+#     --config configs/server_auto_prompt_4090x8_m8_multimodal_proposal.example.yaml \
+#     --stop-on-error \
+#     --preflight-mode fast
+
+benchmark:
+  suite_name: "server_auto_prompt_4090x8_no_rbgt_m8_multimodal_proposal_v1"
+  artifact_subdir: "sam2_ir_qd_m8_multimodal_proposal_v1"
+
+auto_prompt:
+  experiment_id: "sam2_ir_qd_m8_multimodal_proposal_v1"
+  artifact_subdir: "sam2_ir_qd_m8_multimodal_proposal_v1"
+  train_gpu: "5"
+  train_gpus: ["5", "6", "7"]
+  eval_gpus: ["0", "1", "2", "3", "4", "5", "6", "7"]
+  train_seeds: [42, 123, 456]
+  train_datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal_small_train"]
+  validation_datasets: ["multimodal_small_val"]
+  gpu_cache_datasets: []
+  light_cache_datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal_small_train"]
+  eval_suites: ["auto_prompt_m8_multimodal_proposal"]
+  checkpoint_name: "checkpoint.pt"
+  top_k: 5
+  point_budget: 1
+  response_threshold: 0.15
+  nms_radius: 4
+  border_suppression_px: 4
+  prompt_reranker:
+    window_sizes: [9, 17, 33]
+    use_frequency: true
+    use_mask_feedback: true
+    max_feedback_candidates: 5
+    box_scales: [1.0, 1.5, 2.0, 3.0]
+    min_area_ratio: 0.000001
+    max_area_ratio: 0.02
+    box_enable_margin: 0.02
+    box_enable_min_score: 0.0
+    box_enable_min_point_feedback_score: 0.0
+  train:
+    device: "cuda"
+    seed: 42
+    epochs: 100
+    checkpoint_interval_epochs: 10
+    select_best_checkpoint: true
+    selection_metric: "val_loss"
+    validation_ratio: 0.0
+    validation_seed: 20260508
+    best_checkpoint_name: "checkpoint_best.pt"
+    # M8 keeps high-resolution 512x512 activations. Use a small physical
+    # micro-batch and gradient accumulation to keep the effective batch at 16.
+    batch_size: 4
+    light_cache_batch_size: 4
+    gradient_accumulation_steps: 4
+    light_cache_samples_per_epoch: 8192
+    domain_sampling_weights:
+      NUAA-SIRST: 0.1667
+      NUDT-SIRST: 0.1667
+      IRSTD-1K: 0.1666
+      MultiModal-SmallTarget-Train: 0.5
+    area_sampling_weights:
+      tiny_0_15: 4.0
+      tiny_16_63: 3.0
+      small_64_255: 2.0
+      small_256_1023: 1.0
+    area_loss_weights:
+      tiny_0_15: 4.0
+      tiny_16_63: 3.0
+      small_64_255: 2.0
+      small_256_1023: 1.0
+    learning_rate: 0.0003
+    weight_decay: 0.0001
+    objectness_loss: "balanced_focal"
+    focal_alpha: 0.75
+    focal_gamma: 2.0
+    max_positive_weight: 256.0
+    ranking_loss_weight: 0.25
+    ranking_margin: 1.0
+    ranking_negative_top_k: 32
+    heuristic_distill_weight: 0.05
+    box_loss_weight: 0.1
+    max_long_side: 512
+    max_samples: 0
+    num_workers: 0
+    cache_dtype: "float16"
+    use_amp: true
+    profile_interval_batches: 200
+    show_progress: true
+    progress_backend: "tqdm"
+    progress_update_interval_s: 1.0
+    heatmap_sample_limit: 16
+  model:
+    architecture: "ir_prompt_v2"
+    input_channels: 3
+    hidden_channels: 32
+    min_box_side: 2.0
+    negative_ring_offset: 4.0
+    use_local_contrast: true
+    use_top_hat: true
+  target:
+    gaussian_sigma: 2.0
+    positive_radius: 1
+    hard_negative_weight: 2.0
+    hard_negative_percentile: 95.0
+  heatmaps:
+    sample_limit: 16
+    eval_enabled: true
+    eval_sample_limit: 16
+
+paths:
+  sam2:
+    repo: "/project/IDIP/MAJ/code/sam2"
+    checkpoint_root: "/project/IDIP/MAJ/code/sam2/checkpoints"
+  artifacts:
+    root: "artifacts"
+  reference_results:
+    root: "reference_results"
+  datasets:
+    nuaa_sirst: "/project/IDIP/MAJ/dataset/data/NUAA-SIRST"
+    nudt_sirst: "/project/IDIP/MAJ/dataset/data/NUDT-SIRST"
+    irstd_1k: "/project/IDIP/MAJ/dataset/data/IRSTD-1k"
+    multimodal: "/project/IDIP/MAJ/dataset/data/MultiModal"
+    multimodal_small_train: "/project/IDIP/MAJ/dataset/data/MultiModal"
+    multimodal_small_val: "/project/IDIP/MAJ/dataset/data/MultiModal"
+    multimodal_small_test: "/project/IDIP/MAJ/dataset/data/MultiModal"
+    rbgt_tiny_ir_box: "/project/IDIP/Dataset/RBGT-Tiny"
+
+model_defaults:
+  model_id: "sam2.1_hiera_large"
+  family: "sam2"
+  cfg: "configs/sam2.1/sam2.1_hiera_l.yaml"
+  ckpt: "checkpoints/sam2.1_hiera_large.pt"
+  repo: ""
+
+runtime_defaults:
+  artifact_root: "artifacts"
+  reference_results_root: "reference_results"
+  output_name: "sam2_ir_qd_m8_multimodal_proposal_v1/default"
+  device: "cuda"
+  num_workers: 0
+  smoke_test: false
+  max_samples: 0
+  max_images: 0
+  save_visuals: true
+  visual_limit: 24
+  update_reference_results: false
+  seeds: [42]
+  image_batch_size: 1
+  reuse_image_embedding: true
+  max_prompts_per_image_batch: 128
+  auto_mask_points_per_batch: 128
+  batch_oom_fallback: true
+  show_progress: true
+  progress_update_interval_s: 1.0
+  profile_eval: true
+
+runtime:
+  device: "cuda"
+  seeds: [42]
+  reuse_image_embedding: true
+  max_prompts_per_image_batch: 128
+  save_visuals: true
+  visual_limit: 24
+  update_reference_results: false
+  profile_eval: true
+
+smoke_test_runtime:
+  smoke_test: true
+  max_samples: 10
+  max_images: 10
+  visual_limit: 4
+  seeds: [42]
+
+evaluation_defaults:
+  benchmark_version: "irsam2-paper-v1-auto-prompt"
+  track: "track_a_image_prompted"
+  protocol: "ir_auto_prompt_e2"
+  inference_mode: "box"
+  split_version: "paper_split_v1"
+  prompt_policy_version: "paper_prompt_policy_v1"
+  metric_schema_version: "paper_metric_schema_v1"
+  reference_result_version: "paper_reference_results_v1"
+  prompt_policy:
+    name: "paper_default_ir_prompt"
+    prompt_type: "box"
+    prompt_source: "gt"
+    prompt_budget: 1
+    refresh_interval: null
+    multi_mask: false
+    notes: "Default prompt policy; each method overrides it."
+
+datasets:
+  nuaa_sirst:
+    root_env: "NUAA_SIRST_ROOT"
+    config:
+      dataset_id: "NUAA-SIRST"
+      adapter: "generic_image_mask"
+      root: "datasets/NUAA-SIRST"
+      modality: "ir"
+      images_dir: "images"
+      masks_dir: "masks"
+      mask_mode: "binary"
+      class_map: {}
+  nudt_sirst:
+    root_env: "NUDT_SIRST_ROOT"
+    config:
+      dataset_id: "NUDT-SIRST"
+      adapter: "generic_image_mask"
+      root: "datasets/NUDT-SIRST"
+      modality: "ir"
+      images_dir: "images"
+      masks_dir: "masks"
+      mask_mode: "binary"
+      class_map: {}
+  irstd_1k:
+    root_env: "IRSTD_1K_ROOT"
+    config:
+      dataset_id: "IRSTD-1K"
+      adapter: "generic_image_mask"
+      root: "datasets/IRSTD-1K"
+      modality: "ir"
+      images_dir: "images"
+      masks_dir: "masks"
+      mask_mode: "binary"
+      class_map: {}
+  multimodal:
+    root_env: "MULTIMODAL_DATASET_ROOT"
+    config:
+      dataset_id: "MultiModal"
+      adapter: "multimodal_raw"
+      root: "datasets/MultiModal"
+      modality: "ir"
+      images_dir: "img"
+      mask_mode: "auto"
+      class_map: {}
+  multimodal_small_train:
+    root_env: "MULTIMODAL_DATASET_ROOT"
+    config:
+      dataset_id: "MultiModal-SmallTarget-Train"
+      adapter: "coco_like"
+      root: "datasets/MultiModal"
+      modality: "ir"
+      images_dir: "img"
+      annotations_dir: "annotations_coco_small_target_train"
+      annotations_file: "instances_multimodal_small_target_train.json"
+      mask_mode: "auto"
+      class_map: {}
+  multimodal_small_val:
+    root_env: "MULTIMODAL_DATASET_ROOT"
+    config:
+      dataset_id: "MultiModal-SmallTarget-Val"
+      adapter: "coco_like"
+      root: "datasets/MultiModal"
+      modality: "ir"
+      images_dir: "img"
+      annotations_dir: "annotations_coco_small_target_val"
+      annotations_file: "instances_multimodal_small_target_val.json"
+      mask_mode: "auto"
+      class_map: {}
+  multimodal_small_test:
+    root_env: "MULTIMODAL_DATASET_ROOT"
+    config:
+      dataset_id: "MultiModal-SmallTarget-Test"
+      adapter: "coco_like"
+      root: "datasets/MultiModal"
+      modality: "ir"
+      images_dir: "img"
+      annotations_dir: "annotations_coco_small_target_test"
+      annotations_file: "instances_multimodal_small_target_test.json"
+      mask_mode: "auto"
+      class_map: {}
+  rbgt_tiny_ir_box:
+    root_env: "RBGT_TINY_ROOT"
+    config:
+      dataset_id: "RBGT-Tiny"
+      adapter: "rbgt_tiny_ir_only"
+      root: "datasets/RBGT-Tiny"
+      modality: "ir"
+      images_dir: "image"
+      annotations_dir: "annotations_voc"
+      mask_mode: "auto"
+      class_map: {}
+
+methods:
+  sam2_box_oracle:
+    baseline: "sam2_pretrained_box_prompt"
+    method:
+      name: "sam2_box_oracle"
+      family: "sam2_oracle_prompt"
+      modality: "ir"
+      box_variant: "loose"
+    evaluation:
+      inference_mode: "box"
+      prompt_policy:
+        name: "mask_derived_loose_box"
+        prompt_type: "box"
+        prompt_source: "gt"
+        prompt_budget: 1
+        notes: "SAM2 with adaptive loose box derived from GT mask."
+  sam2_point_oracle:
+    baseline: "sam2_pretrained_point_prompt"
+    method:
+      name: "sam2_point_oracle"
+      family: "sam2_oracle_prompt"
+      modality: "ir"
+      point_variant: "foreground_centroid"
+    evaluation:
+      inference_mode: "point"
+      prompt_policy:
+        name: "mask_derived_centroid_point"
+        prompt_type: "point"
+        prompt_source: "gt"
+        prompt_budget: 1
+        notes: "SAM2 with GT-mask centroid point."
+  sam2_box_point_oracle:
+    baseline: "sam2_pretrained_box_point_prompt"
+    method:
+      name: "sam2_box_point_oracle"
+      family: "sam2_oracle_prompt"
+      modality: "ir"
+      box_variant: "loose"
+      point_variant: "foreground_centroid"
+    evaluation:
+      inference_mode: "box+point"
+      prompt_policy:
+        name: "mask_derived_loose_box_centroid_point"
+        prompt_type: "box+point"
+        prompt_source: "gt"
+        prompt_budget: 2
+        notes: "SAM2 with loose box and centroid point derived from GT mask."
+  sam2_no_prompt_auto_mask:
+    baseline: "sam2_no_prompt_auto_mask"
+    method:
+      name: "sam2_no_prompt_auto_mask"
+      family: "sam2_auto_mask"
+      modality: "ir"
+    evaluation:
+      track: "track_b_auto_mask"
+      inference_mode: "no_prompt_auto_mask"
+      prompt_policy:
+        name: "no_prompt_auto_mask"
+        prompt_type: "none"
+        prompt_source: "none"
+        prompt_budget: 0
+        multi_mask: true
+        notes: "SAM2 automatic mask generator without external prompts."
+
+models:
+  - alias: "large"
+    model_id: "sam2.1_hiera_large"
+    family: "sam2"
+    cfg: "configs/sam2.1/sam2.1_hiera_l.yaml"
+    ckpt: "checkpoints/sam2.1_hiera_large.pt"
+    runtime:
+      image_batch_size: 1
+      max_prompts_per_image_batch: 128
+      auto_mask_points_per_batch: 128
+
+modes:
+  - method: "sam2_no_prompt_auto_mask"
+    alias: "no_prompt"
+  - method: "sam2_heuristic_auto_point"
+    alias: "heuristic_point"
+  - method: "sam2_heuristic_auto_box"
+    alias: "heuristic_box"
+  - method: "sam2_heuristic_auto_box_point"
+    alias: "heuristic_box_point"
+  - method: "sam2_heuristic_auto_box_point_neg"
+    alias: "heuristic_neg"
+  - method: "sam2_box_oracle"
+    alias: "oracle_box"
+  - method: "sam2_point_oracle"
+    alias: "oracle_point"
+  - method: "sam2_box_point_oracle"
+    alias: "oracle_box_point"
+  - method: "sam2_learned_auto_point"
+    alias: "learned_point"
+  - method: "sam2_learned_auto_box"
+    alias: "learned_box"
+  - method: "sam2_learned_auto_box_point"
+    alias: "learned_box_point"
+  - method: "sam2_learned_auto_box_point_neg"
+    alias: "learned_neg"
+  - method: "sam2_learned_auto_point_rerank"
+    alias: "m3_point_rerank"
+  - method: "sam2_learned_auto_point_rerank_prior"
+    alias: "m3_prior_only"
+  - method: "sam2_learned_auto_point_rerank_no_frequency"
+    alias: "m3_no_frequency"
+  - method: "sam2_learned_auto_point_rerank_no_tophat"
+    alias: "m3_no_tophat"
+  - method: "sam2_learned_auto_point_rerank_no_local_contrast"
+    alias: "m3_no_local_contrast"
+  - method: "sam2_learned_auto_point_rerank_mask_feedback_only"
+    alias: "m3_mask_feedback_only"
+  - method: "sam2_learned_auto_box_point_calibrated"
+    alias: "m3_box_point_calibrated"
+  - method: "sam2_learned_auto_box_point_calibrated_neg"
+    alias: "m3_calibrated_neg"
+  - method: "sam2_learned_auto_box_point_gated"
+    alias: "m3_gated_box"
+  - method: "sam2_ir_fa_rerank"
+    alias: "m4_fa_rerank"
+  - method: "sam2_ir_fa_rerank_feedback_only"
+    alias: "m4_feedback_only"
+  - method: "sam2_ir_fa_rerank_gated_box_strict"
+    alias: "m4_gated_box_strict"
+
+analysis:
+  primary_metric: "mIoU"
+  metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "PromptRerankPriorScore", "PromptRerankFeedbackScore", "PromptRerankObjectnessScore", "PromptBoxCalibrationApplied", "PromptBoxCalibrationScale", "PromptBoxCalibrationScore", "PromptBoxCalibrationPointFeedbackScore", "PromptBoxCalibrationMinPointFeedbackScore", "LatencyMs"]
+  lower_is_better: ["FalseAlarmPixelsPerMP", "FalseAlarmComponents", "LatencyMs"]
+  case_selection:
+    top_k: 8
+  diagnostics:
+    aor:
+      metrics: ["mIoU", "TargetRecallIoU25"]
+      no_prompt_method: "sam2_no_prompt_auto_mask"
+      oracle_box_method: "sam2_box_oracle"
+      auto_methods: ["sam2_heuristic_auto_box_point", "sam2_learned_auto_box_point", "sam2_learned_auto_box_point_neg", "sam2_learned_auto_point_rerank", "sam2_learned_auto_box_point_gated", "sam2_learned_auto_box_point_calibrated", "sam2_learned_auto_box_point_calibrated_neg", "sam2_ir_fa_rerank", "sam2_ir_fa_rerank_feedback_only", "sam2_ir_fa_rerank_gated_box_strict"]
+    pmcr:
+      thresholds: [0.25, 0.5]
+    fab_tr:
+      budgets: [1000.0, 5000.0, 10000.0]
+    prompt_quality:
+      aggregate_metrics: ["PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid"]
+      hit_threshold: 1.0
+  statistics:
+    n_bootstrap: 10000
+    ci: 0.95
+    random_seed: 42
+    low_power_threshold: 20
+    comparisons:
+      - name: "learned_box_point_vs_heuristic"
+        baseline: "sam2_heuristic_auto_box_point"
+        candidate: "sam2_learned_auto_box_point"
+      - name: "learned_neg_vs_heuristic"
+        baseline: "sam2_heuristic_auto_box_point"
+        candidate: "sam2_learned_auto_box_point_neg"
+      - name: "m3_calibrated_vs_learned_box_point"
+        baseline: "sam2_learned_auto_box_point"
+        candidate: "sam2_learned_auto_box_point_calibrated"
+      - name: "m3_calibrated_neg_vs_learned_neg"
+        baseline: "sam2_learned_auto_box_point_neg"
+        candidate: "sam2_learned_auto_box_point_calibrated_neg"
+      - name: "m3_full_rerank_vs_learned_point"
+        baseline: "sam2_learned_auto_point"
+        candidate: "sam2_learned_auto_point_rerank"
+      - name: "m3_gated_box_vs_full_rerank"
+        baseline: "sam2_learned_auto_point_rerank"
+        candidate: "sam2_learned_auto_box_point_gated"
+
+suites:
+  auto_prompt_m8_multimodal_proposal:
+    enabled: true
+    experiment_id: "E8_multimodal_proposal"
+    purpose: "M8 evaluation for MultiModal-small domain-adaptive proposal training with public IR3 stability checks."
+    checkpoints: ["large"]
+    modes:
+      - "sam2_no_prompt_auto_mask"
+      - "sam2_heuristic_auto_box_point"
+      - "sam2_box_oracle"
+      - "sam2_box_point_oracle"
+      - "sam2_learned_auto_point"
+      - "sam2_learned_auto_point_rerank"
+      - "sam2_ir_fa_rerank"
+      - "sam2_ir_fa_rerank_feedback_only"
+    datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal_small_test"]
+    run_analysis: true
+    primary_metric: "mIoU"
+    comparisons:
+      - name: "m8_fa_rerank_vs_learned_point"
+        baseline: "sam2_learned_auto_point"
+        candidate: "sam2_ir_fa_rerank"
+      - name: "m8_fa_rerank_vs_m3_full"
+        baseline: "sam2_learned_auto_point_rerank"
+        candidate: "sam2_ir_fa_rerank"
+      - name: "m8_feedback_only_vs_fa_rerank"
+        baseline: "sam2_ir_fa_rerank"
+        candidate: "sam2_ir_fa_rerank_feedback_only"
+
+  auto_prompt_m4_seeded:
+    enabled: true
+    experiment_id: "E4_fa_rerank"
+    purpose: "M4 seeded evaluation for false-alarm-aware IR prompt reranking, with reference SAM2 prompt baselines."
+    checkpoints: ["large"]
+    modes:
+      - "sam2_no_prompt_auto_mask"
+      - "sam2_heuristic_auto_box_point"
+      - "sam2_box_oracle"
+      - "sam2_box_point_oracle"
+      - "sam2_learned_auto_point"
+      - "sam2_learned_auto_point_rerank"
+      - "sam2_ir_fa_rerank"
+      - "sam2_ir_fa_rerank_feedback_only"
+      - "sam2_ir_fa_rerank_gated_box_strict"
+    datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal"]
+    run_analysis: true
+    primary_metric: "mIoU"
+    comparisons:
+      - name: "m4_fa_rerank_vs_learned_point"
+        baseline: "sam2_learned_auto_point"
+        candidate: "sam2_ir_fa_rerank"
+      - name: "m4_fa_rerank_vs_m3_full"
+        baseline: "sam2_learned_auto_point_rerank"
+        candidate: "sam2_ir_fa_rerank"
+      - name: "m4_feedback_only_vs_fa_rerank"
+        baseline: "sam2_ir_fa_rerank"
+        candidate: "sam2_ir_fa_rerank_feedback_only"
+      - name: "m4_strict_gated_vs_fa_rerank"
+        baseline: "sam2_ir_fa_rerank"
+        candidate: "sam2_ir_fa_rerank_gated_box_strict"
+
+  auto_prompt_rerank_ablation:
+    enabled: false
+    experiment_id: "E3_rerank_ablation"
+    purpose: "M3.1 ablation for false-alarm-aware learned point reranking and gated box use."
+    checkpoints: ["large"]
+    modes:
+      - "sam2_learned_auto_point"
+      - "sam2_learned_auto_point_rerank_prior"
+      - "sam2_learned_auto_point_rerank_no_frequency"
+      - "sam2_learned_auto_point_rerank_no_tophat"
+      - "sam2_learned_auto_point_rerank_no_local_contrast"
+      - "sam2_learned_auto_point_rerank_mask_feedback_only"
+      - "sam2_learned_auto_point_rerank"
+      - "sam2_learned_auto_box_point_gated"
+    datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal"]
+    run_analysis: true
+    primary_metric: "mIoU"
+    metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "PromptRerankPriorScore", "PromptRerankFeedbackScore", "PromptRerankObjectnessScore", "PromptBoxCalibrationApplied", "PromptBoxCalibrationScale", "PromptBoxCalibrationScore", "PromptBoxCalibrationPointFeedbackScore", "PromptBoxCalibrationMinPointFeedbackScore", "LatencyMs"]
+    lower_is_better: ["FalseAlarmPixelsPerMP", "FalseAlarmComponents", "LatencyMs"]
+
+  auto_prompt:
+    enabled: true
+    experiment_id: "E2_auto_prompt_recovery"
+    purpose: "Learned IR auto prompt against no-prompt, heuristic prompt, and oracle prompt."
+    checkpoints: ["large"]
+    modes:
+      - "sam2_no_prompt_auto_mask"
+      - "sam2_heuristic_auto_point"
+      - "sam2_heuristic_auto_box"
+      - "sam2_heuristic_auto_box_point"
+      - "sam2_heuristic_auto_box_point_neg"
+      - "sam2_box_oracle"
+      - "sam2_point_oracle"
+      - "sam2_box_point_oracle"
+      - "sam2_learned_auto_point"
+      - "sam2_learned_auto_box"
+      - "sam2_learned_auto_box_point"
+      - "sam2_learned_auto_box_point_neg"
+      - "sam2_learned_auto_point_rerank"
+      - "sam2_learned_auto_box_point_gated"
+      - "sam2_learned_auto_box_point_calibrated"
+      - "sam2_learned_auto_box_point_calibrated_neg"
+    datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k", "multimodal"]
+    run_analysis: true
+    primary_metric: "mIoU"
+    metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "FalseAlarmComponents", "PromptHitRate", "PromptBoxCoverage", "PromptDistanceToCentroid", "PromptBorderRate", "PromptTopKHitRate", "PromptTopKDistanceToCentroid", "PromptRerankPriorScore", "PromptRerankFeedbackScore", "PromptRerankObjectnessScore", "PromptBoxCalibrationApplied", "PromptBoxCalibrationScale", "PromptBoxCalibrationScore", "PromptBoxCalibrationPointFeedbackScore", "PromptBoxCalibrationMinPointFeedbackScore", "LatencyMs"]
+    lower_is_better: ["FalseAlarmPixelsPerMP", "FalseAlarmComponents", "LatencyMs"]

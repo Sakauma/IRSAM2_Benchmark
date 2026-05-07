@@ -10,6 +10,8 @@
 ## 研究复盘
 
 - `research/2026-05-06--sam2-ir-qd--r04--experiment-review-and-paper-direction.md`：M2/M3/M3.1/M4 当前证据、论文方向和下一步实验计划。
+- `research/2026-05-08--comparison-evaluation-matrix.md`：第三方模型、通用 SAM、SAM2-IR-QD 当前结果的统一对比矩阵。
+- `research/2026-05-08--sam2-ir-qd--m8-multimodal-proposal-plan.md`：M8 MultiModal 小目标 proposal 训练计划、运行命令和判定标准。
 
 ## 规范文档
 

@@ -253,11 +253,61 @@ def _collate_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "objectness_weight": torch.from_numpy(np.stack([pad(item["objectness_weight"], 1) for item in batch])),
         "box_size": torch.from_numpy(np.stack([pad(item["box_size"], 2) for item in batch])),
         "box_weight": torch.from_numpy(np.stack([pad(item["box_weight"], 1) for item in batch])),
+        "sample_weight": torch.tensor([float(item.get("sample_weight", 1.0)) for item in batch], dtype=torch.float32),
         "sample_ids": [item["sample_id"] for item in batch],
         "dataset_ids": [item["dataset_id"] for item in batch],
+        "area_buckets": [item["area_bucket"] for item in batch],
         "supervision_types": [item["supervision_type"] for item in batch],
         "samples": [item["sample"] for item in batch],
     }
+
+
+def _box_area(sample: Sample) -> float:
+    box = sample.bbox_tight or sample.bbox_loose
+    if box is None:
+        return 0.0
+    return max(0.0, float(box[2]) - float(box[0])) * max(0.0, float(box[3]) - float(box[1]))
+
+
+def _sample_area_pixels(sample: Sample) -> float:
+    value = sample.metadata.get("gt_area_pixels")
+    if isinstance(value, bool):
+        return _box_area(sample)
+    if isinstance(value, (int, float)):
+        return float(value)
+    return _box_area(sample)
+
+
+def _area_bucket_from_pixels(area: float) -> str:
+    if area < 16:
+        return "tiny_0_15"
+    if area < 64:
+        return "tiny_16_63"
+    if area < 256:
+        return "small_64_255"
+    if area < 1024:
+        return "small_256_1023"
+    return "large_ge_1024"
+
+
+def _sample_area_bucket(sample: Sample) -> str:
+    value = sample.metadata.get("area_bucket")
+    if value:
+        return str(value)
+    return _area_bucket_from_pixels(_sample_area_pixels(sample))
+
+
+def _configured_sample_weight(sample: Sample, *, train_cfg: dict[str, Any]) -> float:
+    weight = 1.0
+    domain_weights = train_cfg.get("domain_loss_weights", {})
+    if isinstance(domain_weights, dict):
+        dataset_id = str(sample.metadata.get("dataset_id", "unknown"))
+        weight *= float(domain_weights.get(dataset_id, domain_weights.get(dataset_id.lower(), 1.0)))
+    area_weights = train_cfg.get("area_loss_weights", {})
+    if isinstance(area_weights, dict):
+        bucket = _sample_area_bucket(sample)
+        weight *= float(area_weights.get(bucket, 1.0))
+    return float(weight)
 
 
 def _sample_to_training_item(
@@ -266,6 +316,7 @@ def _sample_to_training_item(
     max_long_side: int,
     target_config: dict[str, Any],
     model_config: AutoPromptModelConfig,
+    train_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     gray, box = _load_resized_gray_and_box(sample, max_long_side)
     image = ir_prior_stack(gray, use_local_contrast=model_config.use_local_contrast, use_top_hat=model_config.use_top_hat)
@@ -289,6 +340,8 @@ def _sample_to_training_item(
         "box_weight": box_weight,
         "sample_id": sample.sample_id,
         "dataset_id": str(sample.metadata.get("dataset_id", "unknown")),
+        "area_bucket": _sample_area_bucket(sample),
+        "sample_weight": _configured_sample_weight(sample, train_cfg=train_config or {}),
         "supervision_type": sample.supervision_type,
         "sample": sample,
     }
@@ -716,8 +769,10 @@ class DenseGpuCache:
     objectness_weight: Any
     box_size: Any
     box_weight: Any
+    sample_weight: Any
     sample_ids: list[str]
     dataset_ids: list[str]
+    area_buckets: list[str]
     supervision_types: list[str]
     samples: list[Sample]
     cached_gb: float
@@ -733,8 +788,10 @@ class DenseGpuCache:
             "objectness_weight": self.objectness_weight[indices],
             "box_size": self.box_size[indices],
             "box_weight": self.box_weight[indices],
+            "sample_weight": self.sample_weight[indices],
             "sample_ids": [self.sample_ids[index] for index in index_list],
             "dataset_ids": [self.dataset_ids[index] for index in index_list],
+            "area_buckets": [self.area_buckets[index] for index in index_list],
             "supervision_types": [self.supervision_types[index] for index in index_list],
             "samples": [self.samples[index] for index in index_list],
             "source": "gpu_cache",
@@ -747,6 +804,8 @@ class LightGrayCache:
     boxes: list[list[float]]
     sample_ids: list[str]
     dataset_ids: list[str]
+    area_buckets: list[str]
+    sample_weights: list[float]
     supervision_types: list[str]
     samples: list[Sample]
     cached_gb: float
@@ -796,7 +855,13 @@ def _build_dense_gpu_cache(
     items: list[dict[str, Any]] = []
     for sample in _limit_samples(_iter_training_samples(config_path, dataset_configs=dataset_configs), limit=max_samples):
         items.append(
-            _sample_to_training_item(sample, max_long_side=max_long_side, target_config=target_cfg, model_config=model_cfg)
+            _sample_to_training_item(
+                sample,
+                max_long_side=max_long_side,
+                target_config=target_cfg,
+                model_config=model_cfg,
+                train_config=train_cfg,
+            )
         )
     if not items:
         return None
@@ -807,6 +872,7 @@ def _build_dense_gpu_cache(
     objectness_weight = torch.zeros((len(items), 1, max_h, max_w), device=device, dtype=cache_dtype)
     box_size = torch.zeros((len(items), 2, max_h, max_w), device=device, dtype=cache_dtype)
     box_weight = torch.zeros((len(items), 1, max_h, max_w), device=device, dtype=cache_dtype)
+    sample_weight = torch.ones((len(items),), device=device, dtype=torch.float32)
     for index, item in enumerate(items):
         h, w = int(item["image"].shape[1]), int(item["image"].shape[2])
         image[index, :, :h, :w] = torch.from_numpy(item["image"]).to(device=device, dtype=cache_dtype)
@@ -814,7 +880,8 @@ def _build_dense_gpu_cache(
         objectness_weight[index, :, :h, :w] = torch.from_numpy(item["objectness_weight"]).to(device=device, dtype=cache_dtype)
         box_size[index, :, :h, :w] = torch.from_numpy(item["box_size"]).to(device=device, dtype=cache_dtype)
         box_weight[index, :, :h, :w] = torch.from_numpy(item["box_weight"]).to(device=device, dtype=cache_dtype)
-    cached_gb = _tensor_gb(image, objectness, objectness_weight, box_size, box_weight)
+        sample_weight[index] = float(item.get("sample_weight", 1.0))
+    cached_gb = _tensor_gb(image, objectness, objectness_weight, box_size, box_weight, sample_weight)
     elapsed = time.perf_counter() - started_at
     dataset_counts: dict[str, int] = {}
     for item in items:
@@ -832,8 +899,10 @@ def _build_dense_gpu_cache(
         objectness_weight=objectness_weight,
         box_size=box_size,
         box_weight=box_weight,
+        sample_weight=sample_weight,
         sample_ids=[str(item["sample_id"]) for item in items],
         dataset_ids=[str(item["dataset_id"]) for item in items],
+        area_buckets=[str(item["area_bucket"]) for item in items],
         supervision_types=[str(item["supervision_type"]) for item in items],
         samples=[item["sample"] for item in items],
         cached_gb=cached_gb,
@@ -855,6 +924,8 @@ def _build_light_gray_cache(
     boxes: list[list[float]] = []
     sample_ids: list[str] = []
     dataset_ids: list[str] = []
+    area_buckets: list[str] = []
+    sample_weights: list[float] = []
     supervision_types: list[str] = []
     samples: list[Sample] = []
     for sample in _limit_samples(_iter_training_samples(config_path, dataset_configs=dataset_configs), limit=max_samples):
@@ -863,6 +934,8 @@ def _build_light_gray_cache(
         boxes.append(box)
         sample_ids.append(sample.sample_id)
         dataset_ids.append(str(sample.metadata.get("dataset_id", "unknown")))
+        area_buckets.append(_sample_area_bucket(sample))
+        sample_weights.append(_configured_sample_weight(sample, train_cfg=train_cfg))
         supervision_types.append(sample.supervision_type)
         samples.append(sample)
     if not grays:
@@ -883,6 +956,8 @@ def _build_light_gray_cache(
         boxes=boxes,
         sample_ids=sample_ids,
         dataset_ids=dataset_ids,
+        area_buckets=area_buckets,
+        sample_weights=sample_weights,
         supervision_types=supervision_types,
         samples=samples,
         cached_gb=cached_gb,
@@ -942,8 +1017,10 @@ def _light_cache_batch(
         "objectness_weight": objectness_weight,
         "box_size": box_size,
         "box_weight": box_weight,
+        "sample_weight": torch.tensor([float(cache.sample_weights[index]) for index in indices], device=device, dtype=torch.float32),
         "sample_ids": [cache.sample_ids[index] for index in indices],
         "dataset_ids": [cache.dataset_ids[index] for index in indices],
+        "area_buckets": [cache.area_buckets[index] for index in indices],
         "supervision_types": [cache.supervision_types[index] for index in indices],
         "samples": [cache.samples[index] for index in indices],
         "source": "light_cache",
@@ -981,6 +1058,11 @@ def _train_tensor_batch(
     objectness_weight = batch["objectness_weight"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
     box_size = batch["box_size"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
     box_weight = batch["box_weight"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+    sample_weight = batch.get("sample_weight")
+    if sample_weight is not None:
+        weight = sample_weight.to(device=device, dtype=torch.float32, non_blocking=non_blocking).view(-1, 1, 1, 1)
+        objectness_weight = objectness_weight * weight
+        box_weight = box_weight * weight
     if zero_grad:
         optimizer.zero_grad(set_to_none=True)
     with _autocast_context(torch, enabled=use_amp):
@@ -1033,6 +1115,11 @@ def _evaluate_tensor_batch(
     objectness_weight = batch["objectness_weight"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
     box_size = batch["box_size"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
     box_weight = batch["box_weight"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+    sample_weight = batch.get("sample_weight")
+    if sample_weight is not None:
+        weight = sample_weight.to(device=device, dtype=torch.float32, non_blocking=non_blocking).view(-1, 1, 1, 1)
+        objectness_weight = objectness_weight * weight
+        box_weight = box_weight * weight
     with torch.no_grad():
         with _autocast_context(torch, enabled=use_amp):
             outputs = model(image)
@@ -1137,9 +1224,86 @@ def _sample_light_indices(cache_size: int, *, limit: int, rng: random.Random) ->
     return rng.sample(range(cache_size), limit)
 
 
+def _normalized_mapping(value: Any) -> dict[str, float]:
+    if not isinstance(value, dict):
+        return {}
+    output: dict[str, float] = {}
+    for key, raw_weight in value.items():
+        try:
+            weight = float(raw_weight)
+        except (TypeError, ValueError):
+            continue
+        if weight <= 0.0:
+            continue
+        output[str(key)] = weight
+        output[str(key).lower()] = weight
+    return output
+
+
+def _weighted_choice(rng: random.Random, items: list[Any], weights: list[float]) -> Any:
+    total = sum(max(0.0, float(weight)) for weight in weights)
+    if total <= 0.0:
+        return rng.choice(items)
+    threshold = rng.random() * total
+    cumulative = 0.0
+    for item, weight in zip(items, weights):
+        cumulative += max(0.0, float(weight))
+        if cumulative >= threshold:
+            return item
+    return items[-1]
+
+
+def _sample_balanced_light_indices(
+    cache: LightGrayCache,
+    train_indices: list[int],
+    *,
+    limit: int,
+    rng: random.Random,
+    train_cfg: dict[str, Any],
+) -> list[int]:
+    domain_weights = _normalized_mapping(train_cfg.get("domain_sampling_weights", {}))
+    area_weights = _normalized_mapping(train_cfg.get("area_sampling_weights", {}))
+    if not domain_weights and not area_weights:
+        return [train_indices[position] for position in _sample_light_indices(len(train_indices), limit=limit, rng=rng)]
+    sample_count = len(train_indices) if limit <= 0 else int(limit)
+    if sample_count <= 0 or not train_indices:
+        return []
+
+    by_domain: dict[str, list[int]] = {}
+    for position, cache_index in enumerate(train_indices):
+        dataset_id = str(cache.dataset_ids[cache_index])
+        key = dataset_id if dataset_id in domain_weights else dataset_id.lower()
+        if domain_weights and key not in domain_weights:
+            continue
+        by_domain.setdefault(dataset_id, []).append(position)
+    if not by_domain:
+        return [train_indices[position] for position in _sample_light_indices(len(train_indices), limit=limit, rng=rng)]
+
+    domain_names = sorted(by_domain)
+    domain_choice_weights = [
+        domain_weights.get(name, domain_weights.get(name.lower(), 1.0)) if domain_weights else 1.0
+        for name in domain_names
+    ]
+    selected_positions: list[int] = []
+    for _ in range(sample_count):
+        domain = _weighted_choice(rng, domain_names, domain_choice_weights)
+        positions = by_domain[domain]
+        if area_weights:
+            weights = [
+                area_weights.get(cache.area_buckets[train_indices[position]], area_weights.get(cache.area_buckets[train_indices[position]].lower(), 1.0))
+                for position in positions
+            ]
+            selected_positions.append(_weighted_choice(rng, positions, weights))
+        else:
+            selected_positions.append(rng.choice(positions))
+    return [train_indices[position] for position in selected_positions]
+
+
 def _record_batch_counts(batch: dict[str, Any], counts: dict[str, int]) -> None:
     for dataset_id in batch["dataset_ids"]:
         counts[f"dataset:{dataset_id}"] = counts.get(f"dataset:{dataset_id}", 0) + 1
+    for area_bucket in batch.get("area_buckets", []):
+        counts[f"area_bucket:{area_bucket}"] = counts.get(f"area_bucket:{area_bucket}", 0) + 1
     for supervision_type in batch["supervision_types"]:
         key = f"supervision:{supervision_type}"
         counts[key] = counts.get(key, 0) + 1
@@ -1376,6 +1540,10 @@ def _train_auto_prompt_cached_from_config(
 
     gpu_cache_configs = [str(item) for item in raw.get("gpu_cache_dataset_configs", [])]
     light_cache_configs = [str(item) for item in raw.get("light_cache_dataset_configs", [])]
+    validation_light_cache_configs = [
+        str(item)
+        for item in raw.get("validation_light_cache_dataset_configs", raw.get("validation_dataset_configs", []))
+    ]
     dense_cache = _build_dense_gpu_cache(
         torch=torch,
         config_path=config_path,
@@ -1387,6 +1555,11 @@ def _train_auto_prompt_cached_from_config(
         cache_dtype=cache_dtype,
     )
     light_cache = _build_light_gray_cache(config_path=config_path, dataset_configs=light_cache_configs, train_cfg=train_cfg)
+    validation_light_cache = _build_light_gray_cache(
+        config_path=config_path,
+        dataset_configs=validation_light_cache_configs,
+        train_cfg=train_cfg,
+    )
     if dense_cache is None and light_cache is None:
         raise RuntimeError("No samples were found for auto prompt cached training.")
 
@@ -1429,6 +1602,12 @@ def _train_auto_prompt_cached_from_config(
         len(light_cache) if light_cache is not None else 0,
         validation_ratio=validation_ratio,
         seed=validation_seed + 17,
+    )
+    selection_light_cache = validation_light_cache if validation_light_cache is not None else light_cache
+    selection_light_indices = (
+        list(range(len(validation_light_cache)))
+        if validation_light_cache is not None
+        else light_val_indices
     )
     checkpoint_interval = max(0, int(train_cfg.get("checkpoint_interval_epochs", 0)))
     select_best_checkpoint = _bool_setting(train_cfg.get("select_best_checkpoint"), default=checkpoint_interval > 0)
@@ -1543,8 +1722,13 @@ def _train_auto_prompt_cached_from_config(
                         break
             if light_cache is not None and (max_steps_per_epoch <= 0 or batch_count < max_steps_per_epoch):
                 rng = random.Random(seed + epoch)
-                light_positions = _sample_light_indices(len(light_train_indices), limit=light_samples_per_epoch, rng=rng)
-                light_epoch_indices = [light_train_indices[position] for position in light_positions]
+                light_epoch_indices = _sample_balanced_light_indices(
+                    light_cache,
+                    light_train_indices,
+                    limit=light_samples_per_epoch,
+                    rng=rng,
+                    train_cfg=train_cfg,
+                )
                 for start in range(0, len(light_epoch_indices), max(1, light_batch_size)):
                     batch_indices = light_epoch_indices[start : start + max(1, light_batch_size)]
                     data_started = time.perf_counter()
@@ -1597,8 +1781,8 @@ def _train_auto_prompt_cached_from_config(
                 model=model,
                 dense_cache=dense_cache,
                 dense_indices=dense_val_indices,
-                light_cache=light_cache,
-                light_indices=light_val_indices,
+                light_cache=selection_light_cache,
+                light_indices=selection_light_indices,
                 batch_size=batch_size,
                 light_batch_size=light_batch_size,
                 train_cfg=train_cfg,
@@ -1673,7 +1857,9 @@ def _train_auto_prompt_cached_from_config(
                 "light_cache_samples": len(light_cache) if light_cache is not None else 0,
                 "light_cache_train_samples": len(light_train_indices),
                 "light_cache_validation_samples": len(light_val_indices),
+                "explicit_validation_light_cache_samples": len(validation_light_cache) if validation_light_cache is not None else 0,
                 "light_cache_cached_gb": light_cache.cached_gb if light_cache is not None else 0.0,
+                "explicit_validation_light_cache_cached_gb": validation_light_cache.cached_gb if validation_light_cache is not None else 0.0,
                 "light_cache_batch_size": light_batch_size,
                 "gradient_accumulation_steps": gradient_accumulation_steps,
                 "effective_light_cache_batch_size": light_batch_size * gradient_accumulation_steps,

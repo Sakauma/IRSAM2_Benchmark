@@ -213,8 +213,13 @@ def _build_sample_from_mask(
     tight = mask_to_tight_box(mask_array)
     loose = expand_box_xyxy(tight, width=width, height=height)
     point = mask_to_point_prompt(mask_array)
-    target_scale = _target_scale_from_area(float((mask_array > 0.5).sum()))
-    metadata: Dict[str, object] = {"prompt_generation": mask_derived_prompt_metadata()}
+    gt_area_pixels = float((mask_array > 0.5).sum())
+    target_scale = _target_scale_from_area(gt_area_pixels)
+    metadata: Dict[str, object] = {
+        "prompt_generation": mask_derived_prompt_metadata(),
+        "gt_area_pixels": gt_area_pixels,
+        "area_bucket": _target_area_bucket(gt_area_pixels),
+    }
     if mask_source is not None:
         metadata[MASK_SOURCE_KEY] = mask_source
     return Sample(
@@ -367,7 +372,10 @@ class CocoLikeAdapter(DatasetAdapter):
         root = _dataset_root(config)
         ann_dir = root / (config.dataset.annotations_dir or "annotations_coco")
         image_root = root / (config.dataset.images_dir or "image")
-        ann_files = sorted(ann_dir.glob("*.json"))
+        if config.dataset.annotations_file:
+            ann_files = [ann_dir / config.dataset.annotations_file]
+        else:
+            ann_files = sorted(ann_dir.glob("*.json"))
         samples: List[Sample] = []
         seen_images: set[str] = set()
         for ann_path in ann_files:
@@ -1038,6 +1046,18 @@ def _target_scale_from_area(area: float) -> str:
     if area < float(96 * 96):
         return "medium"
     return "large"
+
+
+def _target_area_bucket(area: float) -> str:
+    if area < 16:
+        return "tiny_0_15"
+    if area < 64:
+        return "tiny_16_63"
+    if area < 256:
+        return "small_64_255"
+    if area < 1024:
+        return "small_256_1023"
+    return "large_ge_1024"
 
 
 def build_dataset_adapter(config: AppConfig) -> DatasetAdapterProtocol:

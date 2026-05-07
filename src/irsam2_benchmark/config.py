@@ -46,6 +46,7 @@ class DatasetConfig:
     images_dir: Optional[str] = None
     masks_dir: Optional[str] = None
     annotations_dir: Optional[str] = None
+    annotations_file: Optional[str] = None
     mask_mode: str = "auto"
     class_map: Dict[str, str] = field(default_factory=dict)
     image_extensions: list[str] = field(default_factory=lambda: [".bmp", ".png", ".jpg", ".jpeg", ".tif", ".tiff"])

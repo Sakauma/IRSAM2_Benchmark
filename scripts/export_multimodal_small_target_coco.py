@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -33,6 +34,16 @@ class ExportSummary:
     skipped_invalid_polygon: int = 0
     skipped_too_small: int = 0
     skipped_too_large: int = 0
+
+
+@dataclass
+class SplitSummary:
+    name: str
+    output_dir: str
+    output_path: str
+    image_count: int
+    annotation_count: int
+    area_bins: dict[str, int]
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -214,6 +225,147 @@ def export_multimodal_small_target_coco(
     return summary
 
 
+def _area_bin(area: float) -> str:
+    if area < 16:
+        return "tiny_0_15"
+    if area < 64:
+        return "tiny_16_63"
+    if area < 256:
+        return "small_64_255"
+    if area < 1024:
+        return "small_256_1023"
+    return "large_ge_1024"
+
+
+def _split_image_ids(
+    image_ids: list[int],
+    *,
+    train_ratio: float,
+    val_ratio: float,
+    seed: int,
+) -> dict[str, set[int]]:
+    if not image_ids:
+        return {"train": set(), "val": set(), "test": set()}
+    rng = random.Random(int(seed))
+    shuffled = list(image_ids)
+    rng.shuffle(shuffled)
+    n = len(shuffled)
+    train_count = int(round(n * float(train_ratio)))
+    val_count = int(round(n * float(val_ratio)))
+    if n >= 3:
+        train_count = max(1, train_count)
+        val_count = max(1, val_count)
+        if train_count + val_count >= n:
+            train_count = max(1, n - 2)
+            val_count = 1
+    else:
+        train_count = max(1, min(n, train_count))
+        val_count = 0
+    test_count = max(0, n - train_count - val_count)
+    if n >= 3 and test_count <= 0:
+        train_count = max(1, train_count - 1)
+        test_count = n - train_count - val_count
+    train_ids = set(shuffled[:train_count])
+    val_ids = set(shuffled[train_count : train_count + val_count])
+    test_ids = set(shuffled[train_count + val_count :])
+    return {"train": train_ids, "val": val_ids, "test": test_ids}
+
+
+def _write_split_payload(
+    *,
+    root: Path,
+    base_output_dir: str,
+    base_output_file: str,
+    payload: dict[str, Any],
+    split_name: str,
+    image_ids: set[int],
+    overwrite: bool,
+) -> SplitSummary:
+    out_dir = root / f"{base_output_dir}_{split_name}"
+    output_path = out_dir / base_output_file.replace(".json", f"_{split_name}.json")
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output_path}. Pass --overwrite to replace it.")
+    images = [item for item in payload.get("images", []) if int(item["id"]) in image_ids]
+    annotations = [item for item in payload.get("annotations", []) if int(item["image_id"]) in image_ids]
+    split_payload = {
+        **payload,
+        "info": {**payload.get("info", {}), "split": split_name},
+        "images": images,
+        "annotations": annotations,
+    }
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(split_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    area_bins: dict[str, int] = {}
+    for annotation in annotations:
+        key = _area_bin(float(annotation.get("area", 0.0)))
+        area_bins[key] = area_bins.get(key, 0) + 1
+    summary = SplitSummary(
+        name=split_name,
+        output_dir=str(out_dir),
+        output_path=str(output_path),
+        image_count=len(images),
+        annotation_count=len(annotations),
+        area_bins=area_bins,
+    )
+    output_path.with_suffix(".summary.json").write_text(json.dumps(asdict(summary), ensure_ascii=False, indent=2), encoding="utf-8")
+    return summary
+
+
+def export_multimodal_small_target_coco_splits(
+    *,
+    root: Path,
+    images_dir: str = "img",
+    labels_dir: str = "label",
+    output_dir: str = "annotations_coco_small_target",
+    output_file: str = "instances_multimodal_small_target.json",
+    max_area_px: float = 1024.0,
+    min_area_px: float = 1.0,
+    multi_polygon: str = "first",
+    split_seed: int = 20260508,
+    train_ratio: float = 0.7,
+    val_ratio: float = 0.1,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    full_summary = export_multimodal_small_target_coco(
+        root=root,
+        images_dir=images_dir,
+        labels_dir=labels_dir,
+        output_dir=output_dir,
+        output_file=output_file,
+        max_area_px=max_area_px,
+        min_area_px=min_area_px,
+        multi_polygon=multi_polygon,
+        overwrite=overwrite,
+    )
+    full_payload = json.loads(Path(full_summary.output_path).read_text(encoding="utf-8"))
+    image_ids = [int(item["id"]) for item in full_payload.get("images", [])]
+    split_ids = _split_image_ids(image_ids, train_ratio=train_ratio, val_ratio=val_ratio, seed=split_seed)
+    split_summaries = [
+        _write_split_payload(
+            root=root.resolve(),
+            base_output_dir=output_dir,
+            base_output_file=output_file,
+            payload=full_payload,
+            split_name=split_name,
+            image_ids=ids,
+            overwrite=overwrite,
+        )
+        for split_name, ids in split_ids.items()
+    ]
+    summary = {
+        "full": asdict(full_summary),
+        "split_seed": int(split_seed),
+        "train_ratio": float(train_ratio),
+        "val_ratio": float(val_ratio),
+        "test_ratio": max(0.0, 1.0 - float(train_ratio) - float(val_ratio)),
+        "splits": [asdict(item) for item in split_summaries],
+    }
+    split_summary_path = root.resolve() / output_dir / "split_summary.json"
+    summary["split_summary_path"] = str(split_summary_path)
+    split_summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    return summary
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Export a COCO-format MultiModal small-target subset from raw polygon JSON labels.")
     parser.add_argument("--root", type=Path, required=True, help="MultiModal dataset root containing img/ and label/.")
@@ -224,8 +376,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-area-px", type=float, default=1024.0)
     parser.add_argument("--min-area-px", type=float, default=1.0)
     parser.add_argument("--multi-polygon", choices=("first", "all"), default="first")
+    parser.add_argument("--split", action="store_true", help="Also export deterministic train/val/test COCO directories.")
+    parser.add_argument("--split-seed", type=int, default=20260508)
+    parser.add_argument("--train-ratio", type=float, default=0.7)
+    parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args(argv)
+    if args.split:
+        summary = export_multimodal_small_target_coco_splits(
+            root=args.root,
+            images_dir=args.images_dir,
+            labels_dir=args.labels_dir,
+            output_dir=args.output_dir,
+            output_file=args.output_file,
+            max_area_px=args.max_area_px,
+            min_area_px=args.min_area_px,
+            multi_polygon=args.multi_polygon,
+            split_seed=args.split_seed,
+            train_ratio=args.train_ratio,
+            val_ratio=args.val_ratio,
+            overwrite=args.overwrite,
+        )
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
     summary = export_multimodal_small_target_coco(
         root=args.root,
         images_dir=args.images_dir,
