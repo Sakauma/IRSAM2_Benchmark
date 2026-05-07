@@ -159,6 +159,48 @@ class AutoPromptTrainingTests(unittest.TestCase):
             self.assertIn("2/2 batch", progress_text)
             self.assertEqual(summary["final_loss"], summary["history"][-1]["loss"])
 
+    def test_train_auto_prompt_saves_interval_and_best_checkpoints(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dataset_config = _write_dataset(root)
+            train_config = root / "auto_prompt_checkpoints.yaml"
+            train_config.write_text(
+                yaml.safe_dump(
+                    {
+                        "experiment_id": "unit_checkpoints",
+                        "output_root": str(root / "outputs"),
+                        "dataset_configs": [str(dataset_config)],
+                        "train": {
+                            "device": "cpu",
+                            "epochs": 2,
+                            "batch_size": 1,
+                            "learning_rate": 0.001,
+                            "max_long_side": 16,
+                            "max_samples": 2,
+                            "checkpoint_interval_epochs": 1,
+                            "select_best_checkpoint": True,
+                            "selection_metric": "loss",
+                            "show_progress": False,
+                        },
+                        "model": {"hidden_channels": 4},
+                        "target": {"gaussian_sigma": 1.0, "positive_radius": 1},
+                        "heatmaps": {"sample_limit": 0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            summary = train_auto_prompt_from_config(train_config)
+
+            output_dir = Path(summary["output_dir"])
+            self.assertTrue((output_dir / "checkpoint_epoch_001.pt").exists())
+            self.assertTrue((output_dir / "checkpoint_epoch_002.pt").exists())
+            self.assertTrue((output_dir / "checkpoint_best.pt").exists())
+            self.assertEqual(len(summary["checkpoint_history"]), 2)
+            self.assertEqual(Path(summary["selected_checkpoint_path"]).name, "checkpoint_best.pt")
+            self.assertEqual(Path(summary["best_checkpoint_path"]).name, "checkpoint_best.pt")
+            self.assertIn(summary["best_checkpoint_epoch"], [1, 2])
+
     def test_streaming_training_does_not_preconsume_full_adapter(self):
         class FakeStreamingAdapter:
             adapter_name = "fake_stream"

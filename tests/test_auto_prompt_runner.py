@@ -141,7 +141,7 @@ class AutoPromptRunnerTests(unittest.TestCase):
 
             text = output.getvalue()
             progress_text = progress_output.getvalue()
-            self.assertIn("[train seed=42] dry_run CUDA_VISIBLE_DEVICES=0", text)
+            self.assertIn("[train 1/1 seed=42 gpu=0] dry_run CUDA_VISIBLE_DEVICES=0", text)
             self.assertIn("gpu=1", text)
             self.assertNotIn("dataset=nuaa_sirst", progress_text)
             manifest_path = root / "artifacts" / "sam2_ir_qd_m1_auto_prompt" / "benchmark_manifest_latest.json"
@@ -232,6 +232,7 @@ class AutoPromptRunnerTests(unittest.TestCase):
             _write_auto_prompt_config(config_path, root / "artifacts")
             payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
             payload["auto_prompt"]["train_seeds"] = [42, 123]
+            payload["auto_prompt"]["train_gpus"] = ["3", "4"]
             config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
@@ -259,6 +260,7 @@ class AutoPromptRunnerTests(unittest.TestCase):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["train_seed_count"], 2)
             self.assertEqual(manifest["train_seeds"], [42, 123])
+            self.assertEqual([item["gpu"] for item in manifest["train_runs"]], ["3", "4"])
             self.assertEqual(manifest["run_count"], 3)
             records_by_seed = {item["train_seed"]: item for item in manifest["records"] if item["method"] == "sam2_learned_auto_point"}
             self.assertEqual(sorted(records_by_seed), [42, 123])
@@ -340,7 +342,7 @@ class AutoPromptRunnerTests(unittest.TestCase):
 
             text = output.getvalue()
             self.assertIn("[preflight] skip", text)
-            self.assertIn("[train seed=42] dry_run", text)
+            self.assertIn("[train 1/1 seed=42 gpu=0] dry_run", text)
             manifest_path = root / "artifacts" / "sam2_ir_qd_m1_auto_prompt" / "benchmark_manifest_latest.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             summary = manifest["dataset_preflight"]["summary"]

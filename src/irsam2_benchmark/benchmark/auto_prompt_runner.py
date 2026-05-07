@@ -275,6 +275,16 @@ def _train_seed_values(auto_config: Dict[str, Any]) -> list[int]:
     return seeds
 
 
+def _train_gpu_values(auto_config: Dict[str, Any]) -> list[str]:
+    raw_gpus = auto_config.get("train_gpus")
+    if raw_gpus is None:
+        raw_gpus = [auto_config.get("train_gpu", "0")]
+    if not isinstance(raw_gpus, list):
+        raw_gpus = [raw_gpus]
+    gpus = [str(item) for item in raw_gpus if str(item) != ""]
+    return gpus or [str(auto_config.get("train_gpu", "0"))]
+
+
 def _method_is_learned(base_matrix: Dict[str, Any], method_id: str) -> bool:
     method_entry = fr._resolve_method(base_matrix["methods"], method_id)
     return str(method_entry.get("baseline", "")).startswith("sam2_learned_auto_")
@@ -427,7 +437,8 @@ def _write_training_configs(
 
     train_contexts: list[dict[str, Any]] = []
     source_sha256 = sha256_file(config_path)
-    for train_seed in _train_seed_values(auto_config):
+    train_gpus = _train_gpu_values(auto_config)
+    for train_index, train_seed in enumerate(_train_seed_values(auto_config)):
         train_experiment_id = f"{auto_config['experiment_id']}_seed{train_seed}"
         train_settings = copy.deepcopy(auto_config.get("train", {}))
         train_settings["seed"] = int(train_seed)
@@ -459,7 +470,12 @@ def _write_training_configs(
         train_payload["train"]["progress_backend"] = progress_backend if show_progress else "none"
         train_payload["train"].setdefault("progress_update_interval_s", 1.0)
         train_config_path = generated_dir / f"auto_prompt_train_seed{train_seed}.yaml"
-        checkpoint_path = output_root / train_experiment_id / str(auto_config["checkpoint_name"])
+        final_checkpoint_path = output_root / train_experiment_id / str(auto_config["checkpoint_name"])
+        selected_checkpoint_name = str(train_settings.get("best_checkpoint_name", "checkpoint_best.pt"))
+        if bool(train_settings.get("select_best_checkpoint", False)):
+            checkpoint_path = output_root / train_experiment_id / selected_checkpoint_name
+        else:
+            checkpoint_path = final_checkpoint_path
         fr._write_yaml(train_config_path, train_payload)
         train_contexts.append(
             {
@@ -467,6 +483,8 @@ def _write_training_configs(
                 "experiment_id": train_experiment_id,
                 "config_path": train_config_path,
                 "checkpoint_path": checkpoint_path,
+                "final_checkpoint_path": final_checkpoint_path,
+                "gpu": train_gpus[train_index % len(train_gpus)],
             }
         )
     return train_contexts
@@ -557,6 +575,130 @@ def _advance_eval_progress(progress: Any | None, *, status: str, counts: Dict[st
 
 def _command_for_train(train_config_path: Path, python_bin: str) -> list[str]:
     return [python_bin, str(TRAIN_AUTO_PROMPT_PY), "--config", str(train_config_path)]
+
+
+def _selected_checkpoint_from_summary(final_checkpoint_path: Path) -> Path | None:
+    summary_path = final_checkpoint_path.parent / "train_summary.json"
+    if not summary_path.exists():
+        return None
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    for key in ("selected_checkpoint_path", "best_checkpoint_path", "checkpoint_path"):
+        value = summary.get(key)
+        if not value:
+            continue
+        candidate = Path(str(value))
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _run_train_records(
+    *,
+    train_records: list[dict[str, Any]],
+    paths: Dict[str, Any],
+    train_gpus: list[str],
+    dry_run: bool,
+    skip_train: bool,
+    rerun_train: bool,
+    stop_on_error: bool,
+    stream_logs: bool,
+) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    queue = list(train_records)
+    active: list[dict[str, Any]] = []
+    free_gpus = list(train_gpus) or ["0"]
+    total = len(queue)
+    completed = 0
+    while queue or active:
+        while queue and free_gpus and not (stop_on_error and failures):
+            item = queue.pop(0)
+            gpu = free_gpus.pop(0)
+            item["gpu"] = str(gpu)
+            checkpoint_path = Path(str(item["checkpoint_path"]))
+            final_checkpoint_path = Path(str(item.get("final_checkpoint_path", checkpoint_path)))
+            train_command = [str(part) for part in item["command"].split(" ")] if isinstance(item.get("command"), str) else item["command"]
+            train_command = _command_for_train(Path(str(item["config_path"])), train_command[0] if train_command else sys.executable)
+            train_log = Path(str(item["log_path"]))
+            prefix = f"[train {completed + len(active) + 1}/{total} seed={item['seed']} gpu={gpu}]"
+            print(f"{prefix} checkpoint={checkpoint_path}", flush=True)
+            if dry_run:
+                item["status"] = "dry_run"
+                print(f"{prefix} dry_run CUDA_VISIBLE_DEVICES={gpu} {' '.join(train_command)}", flush=True)
+                completed += 1
+                free_gpus.append(gpu)
+                continue
+            if skip_train:
+                item["status"] = "skipped_by_flag"
+                print(f"{prefix} skipped_by_flag", flush=True)
+                completed += 1
+                free_gpus.append(gpu)
+                continue
+            existing_selected = _selected_checkpoint_from_summary(final_checkpoint_path)
+            if existing_selected is not None:
+                item["checkpoint_path"] = str(existing_selected)
+                checkpoint_path = existing_selected
+            if not rerun_train and (checkpoint_path.exists() or final_checkpoint_path.exists()):
+                item["status"] = "skipped_existing"
+                print(f"{prefix} skipped_existing", flush=True)
+                completed += 1
+                free_gpus.append(gpu)
+                continue
+            process, handle, thread = _start_logged(
+                train_command,
+                env=_env_for_gpu(paths, str(gpu)),
+                log_path=train_log,
+                stream_logs=stream_logs,
+            )
+            active.append(
+                {
+                    "item": item,
+                    "gpu": gpu,
+                    "process": process,
+                    "handle": handle,
+                    "thread": thread,
+                    "prefix": prefix,
+                    "checkpoint_path": checkpoint_path,
+                    "final_checkpoint_path": final_checkpoint_path,
+                    "log_path": train_log,
+                }
+            )
+        if not active:
+            if stop_on_error and failures:
+                break
+            continue
+        time.sleep(0.5)
+        still_active: list[dict[str, Any]] = []
+        for running in active:
+            process = running["process"]
+            returncode = process.poll()
+            if returncode is None:
+                still_active.append(running)
+                continue
+            if running["thread"] is not None:
+                running["thread"].join(timeout=1.0)
+            running["handle"].close()
+            item = running["item"]
+            selected = _selected_checkpoint_from_summary(Path(running["final_checkpoint_path"]))
+            if selected is not None:
+                item["checkpoint_path"] = str(selected)
+                checkpoint_path = selected
+            else:
+                checkpoint_path = Path(str(item["checkpoint_path"]))
+            item["returncode"] = int(returncode)
+            item["status"] = "completed" if returncode == 0 and checkpoint_path.exists() else "failed"
+            if item["status"] != "completed":
+                item["log_tail"] = fr._tail_text(Path(running["log_path"]))
+                failures.append(item)
+                print(f"{running['prefix']} failed", flush=True)
+            else:
+                print(f"{running['prefix']} completed selected={item['checkpoint_path']}", flush=True)
+            completed += 1
+            free_gpus.append(str(running["gpu"]))
+        active = still_active
+    return failures
 
 
 def _is_heavy_preflight_dataset(*, dataset_id: str, config_path: Path) -> bool:
@@ -1208,9 +1350,10 @@ def main(argv: List[str] | None = None) -> int:
                 "experiment_id": str(train_context["experiment_id"]),
                 "config_path": str(train_config_path),
                 "checkpoint_path": str(train_context["checkpoint_path"]),
+                "final_checkpoint_path": str(train_context.get("final_checkpoint_path", train_context["checkpoint_path"])),
                 "log_path": str(manifest_dir / "logs" / f"auto_prompt_train_seed{train_seed}.log"),
                 "command": " ".join(train_command),
-                "gpu": str(auto_config.get("train_gpu", "0")),
+                "gpu": str(train_context.get("gpu", auto_config.get("train_gpu", "0"))),
             }
         )
     train_record = train_records[0]
@@ -1268,35 +1411,16 @@ def main(argv: List[str] | None = None) -> int:
         print(f"[preflight] failed path={preflight_path}", flush=True)
         return 1
 
-    train_failures = []
-    for item in train_records:
-        checkpoint_path = Path(str(item["checkpoint_path"]))
-        train_command = _command_for_train(Path(str(item["config_path"])), args.python_bin)
-        train_log = Path(str(item["log_path"]))
-        print(f"[train seed={item['seed']}] checkpoint={checkpoint_path}", flush=True)
-        if args.dry_run:
-            item["status"] = "dry_run"
-            print(f"[train seed={item['seed']}] dry_run CUDA_VISIBLE_DEVICES={item['gpu']} {' '.join(train_command)}", flush=True)
-        elif args.skip_train:
-            item["status"] = "skipped_by_flag"
-            print(f"[train seed={item['seed']}] skipped_by_flag", flush=True)
-        elif checkpoint_path.exists() and not args.rerun_train:
-            item["status"] = "skipped_existing"
-            print(f"[train seed={item['seed']}] skipped_existing", flush=True)
-        else:
-            result = _run_logged(
-                train_command,
-                env=_env_for_gpu(paths, str(auto_config.get("train_gpu", "0"))),
-                log_path=train_log,
-                stream_logs=args.stream_logs or not args.no_progress,
-            )
-            item["returncode"] = result.returncode
-            item["status"] = "completed" if result.returncode == 0 and checkpoint_path.exists() else "failed"
-            if item["status"] != "completed":
-                item["log_tail"] = fr._tail_text(train_log)
-                train_failures.append(item)
-                if args.stop_on_error:
-                    break
+    train_failures = _run_train_records(
+        train_records=train_records,
+        paths=paths,
+        train_gpus=_train_gpu_values(auto_config),
+        dry_run=args.dry_run,
+        skip_train=args.skip_train,
+        rerun_train=args.rerun_train,
+        stop_on_error=args.stop_on_error,
+        stream_logs=args.stream_logs or (len(train_records) == 1 and not args.no_progress),
+    )
     if train_failures:
         manifest = {
             "created_at": created_at,

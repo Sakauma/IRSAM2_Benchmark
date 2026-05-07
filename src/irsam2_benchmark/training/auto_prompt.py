@@ -1006,6 +1006,48 @@ def _train_tensor_batch(
     )
 
 
+def _evaluate_tensor_batch(
+    *,
+    torch: Any,
+    F: Any,
+    model: Any,
+    batch: dict[str, Any],
+    train_cfg: dict[str, Any],
+    device: str,
+    non_blocking: bool,
+    use_amp: bool,
+) -> tuple[float, float, float, float, float]:
+    image = batch["image"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+    objectness = batch["objectness"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+    objectness_weight = batch["objectness_weight"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+    box_size = batch["box_size"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+    box_weight = batch["box_weight"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
+    with torch.no_grad():
+        with _autocast_context(torch, enabled=use_amp):
+            outputs = model(image)
+            loss, loss_parts = _compute_auto_prompt_losses(
+                torch=torch,
+                F=F,
+                outputs=outputs,
+                batch={
+                    **batch,
+                    "image": image,
+                    "objectness": objectness,
+                    "objectness_weight": objectness_weight,
+                    "box_size": box_size,
+                    "box_weight": box_weight,
+                },
+                train_cfg=train_cfg,
+            )
+    return (
+        float(loss.detach().cpu()),
+        float(loss_parts["objectness_loss"].detach().cpu()),
+        float(loss_parts["box_loss"].detach().cpu()),
+        float(loss_parts["ranking_loss"].detach().cpu()),
+        float(loss_parts["heuristic_distill_loss"].detach().cpu()),
+    )
+
+
 def _is_oom_error(exc: RuntimeError) -> bool:
     text = str(exc).lower()
     return "out of memory" in text or "cuda oom" in text
@@ -1092,6 +1134,129 @@ def _record_batch_counts(batch: dict[str, Any], counts: dict[str, int]) -> None:
         counts[key] = counts.get(key, 0) + 1
 
 
+def _split_indices(count: int, *, validation_ratio: float, seed: int) -> tuple[list[int], list[int]]:
+    indices = list(range(max(0, int(count))))
+    if len(indices) <= 1 or validation_ratio <= 0.0:
+        return indices, []
+    rng = random.Random(seed)
+    rng.shuffle(indices)
+    validation_count = int(round(len(indices) * min(max(validation_ratio, 0.0), 0.9)))
+    validation_count = min(len(indices) - 1, max(1, validation_count))
+    validation_indices = sorted(indices[:validation_count])
+    train_indices = sorted(indices[validation_count:])
+    return train_indices, validation_indices
+
+
+def _cache_batches_from_indices(indices: list[int], *, batch_size: int) -> Iterator[list[int]]:
+    step = max(1, int(batch_size))
+    for start in range(0, len(indices), step):
+        yield indices[start : start + step]
+
+
+def _evaluate_cache_selection_metric(
+    *,
+    torch: Any,
+    F: Any,
+    model: Any,
+    dense_cache: DenseGpuCache | None,
+    dense_indices: list[int],
+    light_cache: LightGrayCache | None,
+    light_indices: list[int],
+    batch_size: int,
+    light_batch_size: int,
+    train_cfg: dict[str, Any],
+    target_cfg: dict[str, Any],
+    model_cfg: AutoPromptModelConfig,
+    device: str,
+    non_blocking: bool,
+    use_amp: bool,
+) -> dict[str, float]:
+    model.eval()
+    loss_sum = 0.0
+    objectness_sum = 0.0
+    box_sum = 0.0
+    ranking_sum = 0.0
+    distill_sum = 0.0
+    batch_count = 0
+    sample_count = 0
+    max_batches = max(0, int(train_cfg.get("validation_max_batches", 0)))
+
+    def consume(batch: dict[str, Any]) -> bool:
+        nonlocal loss_sum, objectness_sum, box_sum, ranking_sum, distill_sum, batch_count, sample_count
+        if max_batches > 0 and batch_count >= max_batches:
+            return False
+        loss_value, objectness_value, box_value, ranking_value, distill_value = _evaluate_tensor_batch(
+            torch=torch,
+            F=F,
+            model=model,
+            batch=batch,
+            train_cfg=train_cfg,
+            device=device,
+            non_blocking=non_blocking,
+            use_amp=use_amp,
+        )
+        loss_sum += loss_value
+        objectness_sum += objectness_value
+        box_sum += box_value
+        ranking_sum += ranking_value
+        distill_sum += distill_value
+        batch_count += 1
+        sample_count += len(batch["sample_ids"])
+        return True
+
+    if dense_cache is not None and dense_indices:
+        for batch_indices in _cache_batches_from_indices(dense_indices, batch_size=batch_size):
+            tensor_indices = torch.as_tensor(batch_indices, device=device, dtype=torch.long)
+            if not consume(dense_cache.batch(tensor_indices)):
+                break
+    if light_cache is not None and light_indices and (max_batches <= 0 or batch_count < max_batches):
+        for batch_indices in _cache_batches_from_indices(light_indices, batch_size=max(1, light_batch_size)):
+            batch = _light_cache_batch(
+                light_cache,
+                batch_indices,
+                torch=torch,
+                F=F,
+                device=device,
+                target_cfg=target_cfg,
+                model_cfg=model_cfg,
+            )
+            if not consume(batch):
+                break
+
+    if batch_count <= 0:
+        return {}
+    denom = max(1, batch_count)
+    return {
+        "val_loss": loss_sum / denom,
+        "val_objectness_loss": objectness_sum / denom,
+        "val_box_loss": box_sum / denom,
+        "val_ranking_loss": ranking_sum / denom,
+        "val_heuristic_distill_loss": distill_sum / denom,
+        "val_batch_count": float(batch_count),
+        "val_sample_count": float(sample_count),
+    }
+
+
+def _checkpoint_epoch_record(
+    *,
+    output_dir: Path,
+    epoch: int,
+    model: Any,
+    model_cfg: AutoPromptModelConfig,
+    metadata: dict[str, Any],
+    metric_name: str,
+    metric_value: float,
+) -> dict[str, Any]:
+    checkpoint_path = output_dir / f"checkpoint_epoch_{epoch:03d}.pt"
+    save_auto_prompt_checkpoint(checkpoint_path, model, config=model_cfg, metadata={**metadata, "epoch": epoch})
+    return {
+        "epoch": int(epoch),
+        "checkpoint_path": str(checkpoint_path),
+        "metric_name": metric_name,
+        "metric_value": float(metric_value),
+    }
+
+
 def _finalize_auto_prompt_training(
     *,
     config_path: Path,
@@ -1107,6 +1272,11 @@ def _finalize_auto_prompt_training(
     trained_sample_events: int,
     heatmap_samples: list[Sample],
     history: list[dict[str, float]],
+    checkpoint_history: list[dict[str, Any]] | None = None,
+    selected_checkpoint_path: Path | None = None,
+    best_checkpoint_epoch: int | None = None,
+    best_metric_name: str | None = None,
+    best_metric_value: float | None = None,
     extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     output_root = _resolve_path(config_path.parent, str(raw.get("output_root", "artifacts/auto_prompt")))
@@ -1128,6 +1298,10 @@ def _finalize_auto_prompt_training(
     if extra_metadata:
         metadata.update(extra_metadata)
     save_auto_prompt_checkpoint(checkpoint_path, model, config=model_cfg, metadata=metadata)
+    if selected_checkpoint_path is None:
+        selected_checkpoint_path = checkpoint_path
+    if selected_checkpoint_path != checkpoint_path and not selected_checkpoint_path.exists():
+        save_auto_prompt_checkpoint(selected_checkpoint_path, model, config=model_cfg, metadata=metadata)
     heatmap_limit = int(raw.get("heatmaps", {}).get("sample_limit", train_cfg.get("heatmap_sample_limit", 8))) if isinstance(raw.get("heatmaps", {}), dict) else 8
     heatmap_outputs = _write_training_heatmaps(
         output_dir=output_dir,
@@ -1143,6 +1317,13 @@ def _finalize_auto_prompt_training(
         **metadata,
         "output_dir": str(output_dir),
         "checkpoint_path": str(checkpoint_path),
+        "final_checkpoint_path": str(checkpoint_path),
+        "selected_checkpoint_path": str(selected_checkpoint_path),
+        "best_checkpoint_path": str(selected_checkpoint_path),
+        "best_checkpoint_epoch": best_checkpoint_epoch,
+        "best_metric_name": best_metric_name,
+        "best_metric_value": best_metric_value,
+        "checkpoint_history": checkpoint_history or [],
         "model": asdict(model_cfg),
         "history": history,
         "final_loss": history[-1]["loss"],
@@ -1225,6 +1406,31 @@ def _train_auto_prompt_cached_from_config(
     progress_backend = str(train_cfg.get("progress_backend", "auto"))
     progress_mininterval = float(train_cfg.get("progress_update_interval_s", 1.0))
     heatmap_limit = int(raw.get("heatmaps", {}).get("sample_limit", train_cfg.get("heatmap_sample_limit", 8))) if isinstance(raw.get("heatmaps", {}), dict) else 8
+    validation_ratio = float(train_cfg.get("validation_ratio", 0.0))
+    validation_seed = int(train_cfg.get("validation_seed", seed + 1009))
+    dense_train_indices, dense_val_indices = _split_indices(
+        len(dense_cache) if dense_cache is not None else 0,
+        validation_ratio=validation_ratio,
+        seed=validation_seed,
+    )
+    light_train_indices, light_val_indices = _split_indices(
+        len(light_cache) if light_cache is not None else 0,
+        validation_ratio=validation_ratio,
+        seed=validation_seed + 17,
+    )
+    checkpoint_interval = max(0, int(train_cfg.get("checkpoint_interval_epochs", 0)))
+    select_best_checkpoint = _bool_setting(train_cfg.get("select_best_checkpoint"), default=checkpoint_interval > 0)
+    selection_metric_name = str(train_cfg.get("selection_metric", "val_loss")).strip() or "val_loss"
+    output_root = _resolve_path(config_path.parent, str(raw.get("output_root", "artifacts/auto_prompt")))
+    experiment_id = str(raw.get("experiment_id", "auto_prompt_v1"))
+    output_dir = output_root / experiment_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    best_checkpoint_path = output_dir / str(train_cfg.get("best_checkpoint_name", "checkpoint_best.pt"))
+    checkpoint_history: list[dict[str, Any]] = []
+    selected_checkpoint_path: Path | None = None
+    best_checkpoint_epoch: int | None = None
+    best_metric_name: str | None = None
+    best_metric_value: float | None = None
     history: list[dict[str, float]] = []
     first_epoch_sample_counts: dict[str, int] = {}
     first_epoch_sample_count = 0
@@ -1239,8 +1445,9 @@ def _train_auto_prompt_cached_from_config(
         distill_sum = 0.0
         batch_count = 0
         epoch_sample_count = 0
-        dense_batches = (len(dense_cache) + batch_size - 1) // batch_size if dense_cache is not None else 0
-        light_limit = min(light_samples_per_epoch, len(light_cache)) if light_cache is not None and light_samples_per_epoch > 0 else (len(light_cache) if light_cache else 0)
+        dense_batches = (len(dense_train_indices) + batch_size - 1) // batch_size if dense_cache is not None else 0
+        light_train_size = len(light_train_indices) if light_cache is not None else 0
+        light_limit = min(light_samples_per_epoch, light_train_size) if light_cache is not None and light_samples_per_epoch > 0 else light_train_size
         light_batches = (light_limit + max(1, light_batch_size) - 1) // max(1, light_batch_size) if light_cache is not None else 0
         progress_total = max_steps_per_epoch if max_steps_per_epoch > 0 else dense_batches + light_batches
         progress = _training_progress_bar(
@@ -1305,16 +1512,18 @@ def _train_auto_prompt_cached_from_config(
             return True
 
         try:
-            if dense_cache is not None:
-                order = torch.randperm(len(dense_cache), device=device)
-                for start in range(0, len(dense_cache), batch_size):
-                    if not consume_batch(dense_cache.batch(order[start : start + batch_size]), source="gpu_cache"):
+            if dense_cache is not None and dense_train_indices:
+                train_tensor = torch.as_tensor(dense_train_indices, device=device, dtype=torch.long)
+                order = torch.randperm(len(train_tensor), device=device)
+                for start in range(0, len(train_tensor), batch_size):
+                    if not consume_batch(dense_cache.batch(train_tensor[order[start : start + batch_size]]), source="gpu_cache"):
                         break
             if light_cache is not None and (max_steps_per_epoch <= 0 or batch_count < max_steps_per_epoch):
                 rng = random.Random(seed + epoch)
-                light_indices = _sample_light_indices(len(light_cache), limit=light_samples_per_epoch, rng=rng)
-                for start in range(0, len(light_indices), max(1, light_batch_size)):
-                    batch_indices = light_indices[start : start + max(1, light_batch_size)]
+                light_positions = _sample_light_indices(len(light_train_indices), limit=light_samples_per_epoch, rng=rng)
+                light_epoch_indices = [light_train_indices[position] for position in light_positions]
+                for start in range(0, len(light_epoch_indices), max(1, light_batch_size)):
+                    batch_indices = light_epoch_indices[start : start + max(1, light_batch_size)]
                     data_started = time.perf_counter()
                     batch = _light_cache_batch(
                         light_cache,
@@ -1352,6 +1561,62 @@ def _train_auto_prompt_cached_from_config(
                 "heuristic_distill_loss": distill_sum / denom,
             }
         )
+        history_entry = history[-1]
+        epoch_number = epoch + 1
+        checkpoint_due = checkpoint_interval > 0 and (epoch_number % checkpoint_interval == 0 or epoch_number == epochs)
+        if checkpoint_due:
+            validation = _evaluate_cache_selection_metric(
+                torch=torch,
+                F=F,
+                model=model,
+                dense_cache=dense_cache,
+                dense_indices=dense_val_indices,
+                light_cache=light_cache,
+                light_indices=light_val_indices,
+                batch_size=batch_size,
+                light_batch_size=light_batch_size,
+                train_cfg=train_cfg,
+                target_cfg=target_cfg,
+                model_cfg=model_cfg,
+                device=device,
+                non_blocking=non_blocking,
+                use_amp=use_amp,
+            )
+            history_entry.update(validation)
+            metric_name = selection_metric_name if selection_metric_name in history_entry else ("val_loss" if "val_loss" in history_entry else "loss")
+            metric_value = float(history_entry[metric_name])
+            checkpoint_metadata = {
+                "experiment_id": experiment_id,
+                "config_path": str(config_path),
+                "epoch": epoch_number,
+                "metric_name": metric_name,
+                "metric_value": metric_value,
+                "target": target_cfg,
+                "train": train_cfg,
+            }
+            checkpoint_record = _checkpoint_epoch_record(
+                output_dir=output_dir,
+                epoch=epoch_number,
+                model=model,
+                model_cfg=model_cfg,
+                metadata=checkpoint_metadata,
+                metric_name=metric_name,
+                metric_value=metric_value,
+            )
+            checkpoint_record.update({key: value for key, value in history_entry.items() if key.startswith("val_")})
+            checkpoint_history.append(checkpoint_record)
+            if select_best_checkpoint and (best_metric_value is None or metric_value < best_metric_value):
+                save_auto_prompt_checkpoint(best_checkpoint_path, model, config=model_cfg, metadata=checkpoint_metadata)
+                selected_checkpoint_path = best_checkpoint_path
+                best_checkpoint_epoch = epoch_number
+                best_metric_name = metric_name
+                best_metric_value = metric_value
+            print(
+                f"[checkpoint] epoch={epoch_number} path={checkpoint_record['checkpoint_path']} "
+                f"{metric_name}={metric_value:.6f} best_epoch={best_checkpoint_epoch}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     return _finalize_auto_prompt_training(
         config_path=config_path,
@@ -1367,12 +1632,21 @@ def _train_auto_prompt_cached_from_config(
         trained_sample_events=trained_sample_events,
         heatmap_samples=heatmap_samples,
         history=history,
+        checkpoint_history=checkpoint_history,
+        selected_checkpoint_path=selected_checkpoint_path,
+        best_checkpoint_epoch=best_checkpoint_epoch,
+        best_metric_name=best_metric_name,
+        best_metric_value=best_metric_value,
         extra_metadata={
             "cache": {
                 "mode": "mixed_gpu_light",
                 "dense_gpu_samples": len(dense_cache) if dense_cache is not None else 0,
+                "dense_gpu_train_samples": len(dense_train_indices),
+                "dense_gpu_validation_samples": len(dense_val_indices),
                 "dense_gpu_cached_gb": dense_cache.cached_gb if dense_cache is not None else 0.0,
                 "light_cache_samples": len(light_cache) if light_cache is not None else 0,
+                "light_cache_train_samples": len(light_train_indices),
+                "light_cache_validation_samples": len(light_val_indices),
                 "light_cache_cached_gb": light_cache.cached_gb if light_cache is not None else 0.0,
                 "light_cache_batch_size": light_batch_size,
                 "light_cache_samples_per_epoch": light_samples_per_epoch,
@@ -1446,6 +1720,19 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
     show_progress = bool(train_cfg.get("show_progress", True))
     progress_backend = str(train_cfg.get("progress_backend", "auto"))
     progress_mininterval = float(train_cfg.get("progress_update_interval_s", 1.0))
+    checkpoint_interval = max(0, int(train_cfg.get("checkpoint_interval_epochs", 0)))
+    select_best_checkpoint = _bool_setting(train_cfg.get("select_best_checkpoint"), default=checkpoint_interval > 0)
+    selection_metric_name = str(train_cfg.get("selection_metric", "loss")).strip() or "loss"
+    output_root = _resolve_path(config_path.parent, str(raw.get("output_root", "artifacts/auto_prompt")))
+    experiment_id = str(raw.get("experiment_id", "auto_prompt_v1"))
+    output_dir = output_root / experiment_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    best_checkpoint_path = output_dir / str(train_cfg.get("best_checkpoint_name", "checkpoint_best.pt"))
+    checkpoint_history: list[dict[str, Any]] = []
+    selected_checkpoint_path: Path | None = None
+    best_checkpoint_epoch: int | None = None
+    best_metric_name: str | None = None
+    best_metric_value: float | None = None
     history: list[dict[str, float]] = []
     first_epoch_sample_counts: dict[str, int] = {}
     first_epoch_sample_count = 0
@@ -1594,47 +1881,60 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
                 "heuristic_distill_loss": distill_sum / denom,
             }
         )
+        history_entry = history[-1]
+        epoch_number = epoch + 1
+        checkpoint_due = checkpoint_interval > 0 and (epoch_number % checkpoint_interval == 0 or epoch_number == epochs)
+        if checkpoint_due and model is not None:
+            metric_name = selection_metric_name if selection_metric_name in history_entry else "loss"
+            metric_value = float(history_entry[metric_name])
+            checkpoint_metadata = {
+                "experiment_id": experiment_id,
+                "config_path": str(config_path),
+                "epoch": epoch_number,
+                "metric_name": metric_name,
+                "metric_value": metric_value,
+                "target": target_cfg,
+                "train": train_cfg,
+            }
+            checkpoint_record = _checkpoint_epoch_record(
+                output_dir=output_dir,
+                epoch=epoch_number,
+                model=model,
+                model_cfg=model_cfg,
+                metadata=checkpoint_metadata,
+                metric_name=metric_name,
+                metric_value=metric_value,
+            )
+            checkpoint_history.append(checkpoint_record)
+            if select_best_checkpoint and (best_metric_value is None or metric_value < best_metric_value):
+                save_auto_prompt_checkpoint(best_checkpoint_path, model, config=model_cfg, metadata=checkpoint_metadata)
+                selected_checkpoint_path = best_checkpoint_path
+                best_checkpoint_epoch = epoch_number
+                best_metric_name = metric_name
+                best_metric_value = metric_value
 
     if model is None:
         raise RuntimeError("No samples with bbox_tight/bbox_loose were found for auto prompt training.")
-    output_root = _resolve_path(config_path.parent, str(raw.get("output_root", "artifacts/auto_prompt")))
-    experiment_id = str(raw.get("experiment_id", "auto_prompt_v1"))
-    output_dir = output_root / experiment_id
-    output_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = output_dir / "checkpoint.pt"
-    metadata = {
-        "experiment_id": experiment_id,
-        "config_path": str(config_path),
-        "sample_count": first_epoch_sample_count,
-        "sample_counts": first_epoch_sample_counts,
-        "trained_sample_events": trained_sample_events,
-        "requested_device": requested_device,
-        "device": device,
-        "target": target_cfg,
-        "train": train_cfg,
-    }
-    save_auto_prompt_checkpoint(checkpoint_path, model, config=model_cfg, metadata=metadata)
-    heatmap_outputs = _write_training_heatmaps(
-        output_dir=output_dir,
+    return _finalize_auto_prompt_training(
+        config_path=config_path,
+        raw=raw,
+        train_cfg=train_cfg,
+        target_cfg=target_cfg,
+        model_cfg=model_cfg,
         model=model,
-        samples=heatmap_samples,
-        model_config=model_cfg,
-        train_config=train_cfg,
+        requested_device=requested_device,
         device=device,
-        limit=heatmap_limit,
-        experiment_id=experiment_id,
+        first_epoch_sample_count=first_epoch_sample_count,
+        first_epoch_sample_counts=first_epoch_sample_counts,
+        trained_sample_events=trained_sample_events,
+        heatmap_samples=heatmap_samples,
+        history=history,
+        checkpoint_history=checkpoint_history,
+        selected_checkpoint_path=selected_checkpoint_path,
+        best_checkpoint_epoch=best_checkpoint_epoch,
+        best_metric_name=best_metric_name,
+        best_metric_value=best_metric_value,
     )
-    summary = {
-        **metadata,
-        "output_dir": str(output_dir),
-        "checkpoint_path": str(checkpoint_path),
-        "model": asdict(model_cfg),
-        "history": history,
-        "final_loss": history[-1]["loss"],
-        "heatmaps": heatmap_outputs,
-    }
-    (output_dir / "train_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    return summary
 
 
 def _write_training_heatmaps(
