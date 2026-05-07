@@ -24,8 +24,8 @@ auto_prompt:
   eval_gpus: ["0", "1", "2", "3", "4", "5", "6", "7"]
   train_seeds: [42, 123, 456]
   train_datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k"]
-  gpu_cache_datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k"]
-  light_cache_datasets: []
+  gpu_cache_datasets: []
+  light_cache_datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k"]
   eval_suites: ["auto_prompt_m6_promptnet_v2"]
   checkpoint_name: "checkpoint.pt"
   top_k: 5
@@ -54,9 +54,11 @@ auto_prompt:
     validation_ratio: 0.1
     validation_seed: 20260507
     best_checkpoint_name: "checkpoint_best.pt"
-    # V2 trains with a dense 512x512 GPU cache. On 24GB 4090 cards,
-    # batch 16 still OOMs because expanded feature maps allocate large activations.
-    batch_size: 8
+    # M6 uses light_gray cache instead of dense_gpu cache; dense_gpu keeps ~10.8GB
+    # resident on each 24GB card before V2 activations are allocated.
+    batch_size: 16
+    light_cache_batch_size: 16
+    light_cache_samples_per_epoch: 0
     learning_rate: 0.0003
     weight_decay: 0.0001
     objectness_loss: "balanced_focal"
