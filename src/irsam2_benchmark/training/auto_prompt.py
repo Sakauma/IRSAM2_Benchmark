@@ -950,6 +950,15 @@ def _light_cache_batch(
     }
 
 
+def _step_optimizer_after_backward(*, optimizer: Any, scaler: Any | None) -> None:
+    if scaler is not None:
+        scaler.step(optimizer)
+        scaler.update()
+    else:
+        optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+
+
 def _train_tensor_batch(
     *,
     torch: Any,
@@ -963,6 +972,8 @@ def _train_tensor_batch(
     non_blocking: bool,
     use_amp: bool,
     step_optimizer: bool = True,
+    zero_grad: bool = True,
+    loss_scale: float = 1.0,
 ) -> tuple[float, float, float, float, float, float]:
     step_started = time.perf_counter()
     image = batch["image"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
@@ -970,7 +981,8 @@ def _train_tensor_batch(
     objectness_weight = batch["objectness_weight"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
     box_size = batch["box_size"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
     box_weight = batch["box_weight"].to(device=device, dtype=torch.float32, non_blocking=non_blocking)
-    optimizer.zero_grad(set_to_none=True)
+    if zero_grad:
+        optimizer.zero_grad(set_to_none=True)
     with _autocast_context(torch, enabled=use_amp):
         outputs = model(image)
         loss, loss_parts = _compute_auto_prompt_losses(
@@ -988,14 +1000,13 @@ def _train_tensor_batch(
             train_cfg=train_cfg,
         )
     if scaler is not None:
-        scaler.scale(loss).backward()
+        scaler.scale(loss * float(loss_scale)).backward()
         if step_optimizer:
-            scaler.step(optimizer)
-            scaler.update()
+            _step_optimizer_after_backward(optimizer=optimizer, scaler=scaler)
     else:
-        loss.backward()
+        (loss * float(loss_scale)).backward()
         if step_optimizer:
-            optimizer.step()
+            _step_optimizer_after_backward(optimizer=optimizer, scaler=scaler)
     return (
         float(loss.detach().cpu()),
         float(loss_parts["objectness_loss"].detach().cpu()),
@@ -1361,6 +1372,7 @@ def _train_auto_prompt_cached_from_config(
     use_amp = _bool_setting(train_cfg.get("use_amp"), default=False) and str(device).startswith("cuda")
     profile_interval_batches = max(0, int(train_cfg.get("profile_interval_batches", 0)))
     max_steps_per_epoch = max(0, int(train_cfg.get("max_steps_per_epoch", 0)))
+    gradient_accumulation_steps = max(1, int(train_cfg.get("gradient_accumulation_steps", 1)))
 
     gpu_cache_configs = [str(item) for item in raw.get("gpu_cache_dataset_configs", [])]
     light_cache_configs = [str(item) for item in raw.get("light_cache_dataset_configs", [])]
@@ -1444,6 +1456,7 @@ def _train_auto_prompt_cached_from_config(
         ranking_sum = 0.0
         distill_sum = 0.0
         batch_count = 0
+        pending_accumulation_batches = 0
         epoch_sample_count = 0
         dense_batches = (len(dense_train_indices) + batch_size - 1) // batch_size if dense_cache is not None else 0
         light_train_size = len(light_train_indices) if light_cache is not None else 0
@@ -1460,9 +1473,12 @@ def _train_auto_prompt_cached_from_config(
 
         def consume_batch(batch: dict[str, Any], *, source: str, data_wait_ms: float = 0.0) -> bool:
             nonlocal loss_sum, objectness_sum, box_sum, ranking_sum, distill_sum
-            nonlocal batch_count, epoch_sample_count, trained_sample_events, heatmap_samples
+            nonlocal batch_count, pending_accumulation_batches, epoch_sample_count, trained_sample_events, heatmap_samples
             if max_steps_per_epoch > 0 and batch_count >= max_steps_per_epoch:
                 return False
+            zero_grad = pending_accumulation_batches == 0
+            pending_accumulation_batches += 1
+            step_optimizer = pending_accumulation_batches >= gradient_accumulation_steps
             loss_value, objectness_value, box_value, ranking_value, distill_value, step_ms = _train_tensor_batch(
                 torch=torch,
                 F=F,
@@ -1474,7 +1490,12 @@ def _train_auto_prompt_cached_from_config(
                 device=device,
                 non_blocking=non_blocking,
                 use_amp=use_amp,
+                step_optimizer=step_optimizer,
+                zero_grad=zero_grad,
+                loss_scale=1.0 / float(gradient_accumulation_steps),
             )
+            if step_optimizer:
+                pending_accumulation_batches = 0
             batch_count += 1
             batch_sample_count = len(batch["sample_ids"])
             epoch_sample_count += batch_sample_count
@@ -1494,7 +1515,8 @@ def _train_auto_prompt_cached_from_config(
                 print(
                     f"[train-profile] epoch={epoch + 1} batch={batch_count} source={source} "
                     f"data_wait_ms={data_wait_ms:.1f} step_ms={step_ms:.1f} "
-                    f"samples_per_s={batch_sample_count / step_seconds:.2f} batch_size={batch_sample_count} amp={use_amp}",
+                    f"samples_per_s={batch_sample_count / step_seconds:.2f} batch_size={batch_sample_count} "
+                    f"accum={gradient_accumulation_steps} amp={use_amp}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -1506,6 +1528,7 @@ def _train_auto_prompt_cached_from_config(
                     rank=f"{ranking_value:.4f}",
                     distill=f"{distill_value:.4f}",
                     lr=f"{optimizer.param_groups[0]['lr']:.2e}",
+                    accum=f"{pending_accumulation_batches}/{gradient_accumulation_steps}",
                     source=source,
                 )
                 progress.update(1)
@@ -1537,6 +1560,9 @@ def _train_auto_prompt_cached_from_config(
                     data_wait_ms = (time.perf_counter() - data_started) * 1000.0
                     if not consume_batch(batch, source="light_cache", data_wait_ms=data_wait_ms):
                         break
+            if pending_accumulation_batches > 0:
+                _step_optimizer_after_backward(optimizer=optimizer, scaler=scaler)
+                pending_accumulation_batches = 0
         finally:
             if progress is not None:
                 progress.close()
@@ -1649,6 +1675,8 @@ def _train_auto_prompt_cached_from_config(
                 "light_cache_validation_samples": len(light_val_indices),
                 "light_cache_cached_gb": light_cache.cached_gb if light_cache is not None else 0.0,
                 "light_cache_batch_size": light_batch_size,
+                "gradient_accumulation_steps": gradient_accumulation_steps,
+                "effective_light_cache_batch_size": light_batch_size * gradient_accumulation_steps,
                 "light_cache_samples_per_epoch": light_samples_per_epoch,
             }
         },

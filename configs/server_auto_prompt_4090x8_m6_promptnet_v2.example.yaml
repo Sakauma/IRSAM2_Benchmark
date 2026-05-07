@@ -54,10 +54,11 @@ auto_prompt:
     validation_ratio: 0.1
     validation_seed: 20260507
     best_checkpoint_name: "checkpoint_best.pt"
-    # M6 uses light_gray cache instead of dense_gpu cache; dense_gpu keeps ~10.8GB
-    # resident on each 24GB card before V2 activations are allocated.
-    batch_size: 16
-    light_cache_batch_size: 16
+    # M6 V2 keeps high-resolution 512x512 activations. Use a small physical
+    # micro-batch and gradient accumulation to keep the effective batch at 16.
+    batch_size: 4
+    light_cache_batch_size: 4
+    gradient_accumulation_steps: 4
     light_cache_samples_per_epoch: 0
     learning_rate: 0.0003
     weight_decay: 0.0001

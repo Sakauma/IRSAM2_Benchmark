@@ -461,6 +461,85 @@ class AutoPromptTrainingTests(unittest.TestCase):
         self.assertEqual(tuple(batch["objectness"].shape), (2, 1, 16, 16))
         self.assertEqual(batch["source"], "light_cache")
 
+    def test_train_tensor_batch_gradient_accumulation_matches_effective_batch(self):
+        torch, F, _, _ = auto_prompt_module._require_torch()
+
+        class TinyPromptModel(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.tensor(0.25))
+                self.bias = torch.nn.Parameter(torch.tensor(-0.1))
+
+            def forward(self, image):
+                logits = self.weight * image[:, :1] + self.bias
+                box_size = torch.zeros(
+                    (image.shape[0], 2, image.shape[2], image.shape[3]),
+                    dtype=image.dtype,
+                    device=image.device,
+                )
+                return {"objectness_logits": logits, "box_size": box_size}
+
+        image = torch.linspace(0.0, 1.0, steps=4 * 3 * 4 * 4, dtype=torch.float32).reshape(
+            4,
+            3,
+            4,
+            4,
+        )
+        objectness = torch.zeros((4, 1, 4, 4), dtype=torch.float32)
+        objectness[:, :, 1:3, 1:3] = 1.0
+        batch = {
+            "image": image,
+            "objectness": objectness,
+            "objectness_weight": torch.ones((4, 1, 4, 4), dtype=torch.float32),
+            "box_size": torch.zeros((4, 2, 4, 4), dtype=torch.float32),
+            "box_weight": torch.ones((4, 1, 4, 4), dtype=torch.float32),
+        }
+        train_cfg = {
+            "objectness_loss": "weighted_bce",
+            "box_loss_weight": 0.0,
+            "ranking_loss_weight": 0.0,
+            "heuristic_distill_weight": 0.0,
+        }
+
+        full_model = TinyPromptModel()
+        accum_model = TinyPromptModel()
+        accum_model.load_state_dict(full_model.state_dict())
+        full_optimizer = torch.optim.SGD(full_model.parameters(), lr=0.1)
+        accum_optimizer = torch.optim.SGD(accum_model.parameters(), lr=0.1)
+
+        auto_prompt_module._train_tensor_batch(
+            torch=torch,
+            F=F,
+            model=full_model,
+            optimizer=full_optimizer,
+            scaler=None,
+            batch=batch,
+            train_cfg=train_cfg,
+            device="cpu",
+            non_blocking=False,
+            use_amp=False,
+        )
+        for start in (0, 2):
+            micro_batch = {key: value[start : start + 2] for key, value in batch.items()}
+            auto_prompt_module._train_tensor_batch(
+                torch=torch,
+                F=F,
+                model=accum_model,
+                optimizer=accum_optimizer,
+                scaler=None,
+                batch=micro_batch,
+                train_cfg=train_cfg,
+                device="cpu",
+                non_blocking=False,
+                use_amp=False,
+                step_optimizer=start == 2,
+                zero_grad=start == 0,
+                loss_scale=0.5,
+            )
+
+        self.assertTrue(torch.allclose(full_model.weight, accum_model.weight, atol=1e-7))
+        self.assertTrue(torch.allclose(full_model.bias, accum_model.bias, atol=1e-7))
+
     def test_cached_training_requires_cuda_device(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
