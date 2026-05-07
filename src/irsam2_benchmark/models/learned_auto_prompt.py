@@ -15,6 +15,7 @@ LEARNED_IR_AUTO_PROMPT_PROTOCOL = "learned_ir_auto_prompt_v1"
 
 @dataclass(frozen=True)
 class AutoPromptModelConfig:
+    architecture: str = "small"
     input_channels: int = 3
     hidden_channels: int = 16
     min_box_side: float = 2.0
@@ -276,6 +277,7 @@ def build_ir_prompt_net(config: AutoPromptModelConfig | dict[str, Any] | None = 
             super().__init__()
             hidden = int(cfg.hidden_channels)
             self.config = cfg
+            self.model_name = "IRPromptNetSmall"
             self.features = nn.Sequential(
                 nn.Conv2d(int(cfg.input_channels), hidden, kernel_size=3, padding=1),
                 nn.ReLU(inplace=True),
@@ -297,6 +299,109 @@ def build_ir_prompt_net(config: AutoPromptModelConfig | dict[str, Any] | None = 
                 "confidence_logits": self.confidence_head(pooled),
             }
 
+    class ResidualDepthwiseBlock(nn.Module):
+        def __init__(self, channels: int, *, expansion: int = 8) -> None:
+            super().__init__()
+            expanded = int(channels) * int(expansion)
+            self.block = nn.Sequential(
+                nn.Conv2d(channels, channels, kernel_size=3, padding=1, groups=channels, bias=False),
+                nn.GroupNorm(1, channels),
+                nn.GELU(),
+                nn.Conv2d(channels, expanded, kernel_size=1),
+                nn.GELU(),
+                nn.Conv2d(expanded, channels, kernel_size=1),
+                nn.GroupNorm(1, channels),
+            )
+
+        def forward(self, x):
+            return x + self.block(x)
+
+    class MultiScaleContext(nn.Module):
+        def __init__(self, channels: int) -> None:
+            super().__init__()
+            self.branches = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.Conv2d(channels, channels, kernel_size=3, padding=dilation, dilation=dilation, groups=channels, bias=False),
+                        nn.GroupNorm(1, channels),
+                        nn.GELU(),
+                        nn.Conv2d(channels, channels, kernel_size=1),
+                        nn.GELU(),
+                    )
+                    for dilation in (1, 2, 4)
+                ]
+            )
+            self.fuse = nn.Sequential(
+                nn.Conv2d(channels * len(self.branches), channels, kernel_size=1),
+                nn.GroupNorm(1, channels),
+                nn.GELU(),
+            )
+
+        def forward(self, x):
+            return self.fuse(torch.cat([branch(x) for branch in self.branches], dim=1))
+
+    class SEAttention(nn.Module):
+        def __init__(self, channels: int) -> None:
+            super().__init__()
+            reduced = max(4, channels // 4)
+            self.fc = nn.Sequential(
+                nn.Linear(channels, reduced),
+                nn.ReLU(inplace=True),
+                nn.Linear(reduced, channels),
+                nn.Sigmoid(),
+            )
+
+        def forward(self, x):
+            weight = self.fc(F.adaptive_avg_pool2d(x, output_size=1).flatten(1))
+            return x * weight[:, :, None, None]
+
+    class IRPromptNetV2(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            hidden = int(cfg.hidden_channels)
+            self.config = cfg
+            self.model_name = "IRPromptNetV2"
+            self.stem = nn.Sequential(
+                nn.Conv2d(int(cfg.input_channels), hidden, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(1, hidden),
+                nn.GELU(),
+            )
+            self.residual = nn.Sequential(*(ResidualDepthwiseBlock(hidden) for _ in range(4)))
+            self.context = MultiScaleContext(hidden)
+            self.attention = SEAttention(hidden)
+            self.objectness_head = nn.Sequential(
+                nn.Conv2d(hidden, hidden, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(1, hidden),
+                nn.GELU(),
+                nn.Conv2d(hidden, 1, kernel_size=1),
+            )
+            self.box_size_head = nn.Sequential(
+                nn.Conv2d(hidden, hidden, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(1, hidden),
+                nn.GELU(),
+                nn.Conv2d(hidden, 2, kernel_size=1),
+            )
+            self.confidence_head = nn.Sequential(
+                nn.Linear(hidden, hidden),
+                nn.GELU(),
+                nn.Linear(hidden, 1),
+            )
+
+        def forward(self, x):
+            feat = self.stem(x)
+            feat = self.residual(feat)
+            feat = feat + self.context(feat)
+            feat = self.attention(feat)
+            pooled = feat.mean(dim=(2, 3))
+            return {
+                "objectness_logits": self.objectness_head(feat),
+                "box_size": F.softplus(self.box_size_head(feat)) + float(cfg.min_box_side),
+                "confidence_logits": self.confidence_head(pooled),
+            }
+
+    architecture = str(cfg.architecture).strip().lower()
+    if architecture in {"v2", "ir_prompt_v2", "promptnet_v2"}:
+        return IRPromptNetV2()
     return IRPromptNetSmall()
 
 
@@ -316,7 +421,7 @@ def save_auto_prompt_checkpoint(
     torch.save(
         {
             "protocol": LEARNED_IR_AUTO_PROMPT_PROTOCOL,
-            "model": "IRPromptNetSmall",
+            "model": str(getattr(model, "model_name", "IRPromptNetSmall")),
             "config": asdict(cfg),
             "state_dict": model.state_dict(),
             "metadata": metadata or {},
