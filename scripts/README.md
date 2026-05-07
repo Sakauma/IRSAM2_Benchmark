@@ -1,6 +1,6 @@
 # 脚本索引
 
-当前保留三个主要脚本入口。
+当前保留四个主要脚本入口。
 
 ## `run_5090_full_benchmark.py`
 
@@ -46,6 +46,26 @@ python scripts/analyze_paper_results.py \
 ```
 
 分析配置必须显式传入 `--analysis`。矩阵脚本会为每个需要分析的 suite/checkpoint 自动生成该文件。
+
+## `build_comparison_evaluation_matrix.py`
+
+汇总第三方模型导出的 mask 与当前 SAM2-IR-QD analysis CSV，生成论文方向判断用的对比评估表。默认读取 `artifacts/external_predictions/`、本地 `/home/sakauma/dataset` 数据集，以及 M5/M6 analysis 输出。
+
+```bash
+python scripts/build_comparison_evaluation_matrix.py
+```
+
+输出目录默认为 `artifacts/comparison_evaluation_matrix_latest/`，包含：
+
+- `comparison-report.md`
+- `manifest.json`
+- `tables/external_public_dataset.csv`
+- `tables/external_public_macro.csv`
+- `tables/ours_public_dataset.csv`
+- `tables/ours_public_macro.csv`
+- `tables/comparison_public_macro.csv`
+
+注意：第三方 mask 的 `WholeMaskIoU25Rate/50Rate` 是快速代理召回；论文最终目标级 `TargetRecallIoU25/50` 仍需用 benchmark evaluator 正式生成。
 
 ## `run_4090x4_auto_prompt.py`
 
