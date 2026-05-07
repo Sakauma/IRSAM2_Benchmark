@@ -1,0 +1,39 @@
+# SAM2-IR-QD M7: local proposal-only diagnostics for MultiModal small targets.
+# This script does not load SAM2. It only evaluates whether the learned IR
+# prompt proposal can place Top-K candidate points inside GT small targets.
+#
+# Recommended local launch:
+#   PYTHONPATH=src python scripts/run_m7_proposal_diagnostic.py \
+#     --config configs/m7_proposal_diagnostic_4060m.example.yaml
+#
+# Faster smoke:
+#   PYTHONPATH=src python scripts/run_m7_proposal_diagnostic.py \
+#     --config configs/m7_proposal_diagnostic_4060m.example.yaml \
+#     --max-samples 20 --device cpu
+
+checkpoint_path: "artifacts/sam2_ir_qd_m6_promptnet_v2_v1/train/sam2_ir_qd_m6_promptnet_v2_v1_seed123/checkpoint_best.pt"
+output_dir: "artifacts/m7_proposal_diagnostic_4060m/multimodal_small_target_m6_seed123"
+device: "cuda"
+
+dataset:
+  dataset_id: "MultiModal"
+  adapter: "multimodal_raw"
+  root: "/home/sakauma/dataset/MultiModal"
+  modality: "ir"
+  images_dir: "img"
+  mask_mode: "auto"
+  class_map: {}
+
+target_scales: ["small"]
+max_samples: 500
+max_images: 0
+
+top_k_values: [1, 5, 10, 20, 50]
+response_thresholds: [0.05, 0.10, 0.15, 0.20]
+nms_radii: [4, 8]
+border_suppression_px: 4
+point_budget: 1
+use_local_contrast: true
+use_top_hat: true
+show_progress: true
+
