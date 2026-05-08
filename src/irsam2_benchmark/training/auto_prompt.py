@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import sys
 import time
@@ -743,6 +744,83 @@ def _training_progress_bar(
         mininterval=max(0.0, float(mininterval)),
         file=sys.stderr,
     )
+
+
+def _optional_progress_path(
+    *,
+    config_path: Path,
+    output_dir: Path,
+    train_cfg: dict[str, Any],
+    key: str,
+    default_name: str,
+) -> Path | None:
+    value = train_cfg.get(key)
+    if value is None or str(value).strip() == "":
+        return output_dir / default_name
+    lowered = str(value).strip().lower()
+    if lowered in {"none", "off", "false", "0"}:
+        return None
+    return _resolve_path(config_path.parent, str(value))
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _progress_history_values(history_entry: dict[str, Any] | None) -> dict[str, float]:
+    if not history_entry:
+        return {}
+    output: dict[str, float] = {}
+    for key, value in history_entry.items():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            output[str(key)] = float(value)
+    return output
+
+
+def _write_training_progress_state(
+    *,
+    state_path: Path | None,
+    events_path: Path | None,
+    experiment_id: str,
+    train_seed: int | None,
+    epoch: int,
+    epochs: int,
+    status: str,
+    phase: str,
+    started_at: float,
+    history_entry: dict[str, Any] | None = None,
+    best_checkpoint_epoch: int | None = None,
+    best_metric_name: str | None = None,
+    best_metric_value: float | None = None,
+) -> None:
+    if state_path is None:
+        return
+    metrics = _progress_history_values(history_entry)
+    payload = {
+        "schema_version": 1,
+        "experiment_id": experiment_id,
+        "train_seed": train_seed,
+        "epoch": int(epoch),
+        "epochs": int(epochs),
+        "status": status,
+        "phase": phase,
+        "elapsed_s": round(max(0.0, time.perf_counter() - started_at), 3),
+        "updated_at_unix": round(time.time(), 3),
+        "metrics": metrics,
+        "best_checkpoint_epoch": best_checkpoint_epoch,
+        "best_metric_name": best_metric_name,
+        "best_metric_value": float(best_metric_value) if best_metric_value is not None else None,
+    }
+    _atomic_write_json(state_path, payload)
+    if events_path is not None:
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        with events_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
 
 def _cuda_grad_scaler(torch: Any) -> Any:
@@ -1537,6 +1615,37 @@ def _train_auto_prompt_cached_from_config(
     profile_interval_batches = max(0, int(train_cfg.get("profile_interval_batches", 0)))
     max_steps_per_epoch = max(0, int(train_cfg.get("max_steps_per_epoch", 0)))
     gradient_accumulation_steps = max(1, int(train_cfg.get("gradient_accumulation_steps", 1)))
+    epochs = max(1, int(train_cfg.get("epochs", 1)))
+    output_root = _resolve_path(config_path.parent, str(raw.get("output_root", "artifacts/auto_prompt")))
+    experiment_id = str(raw.get("experiment_id", "auto_prompt_v1"))
+    output_dir = output_root / experiment_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    progress_started_at = time.perf_counter()
+    progress_state_path = _optional_progress_path(
+        config_path=config_path,
+        output_dir=output_dir,
+        train_cfg=train_cfg,
+        key="progress_state_path",
+        default_name="train_progress_state.json",
+    )
+    progress_events_path = _optional_progress_path(
+        config_path=config_path,
+        output_dir=output_dir,
+        train_cfg=train_cfg,
+        key="progress_events_path",
+        default_name="train_progress_events.jsonl",
+    )
+    _write_training_progress_state(
+        state_path=progress_state_path,
+        events_path=progress_events_path,
+        experiment_id=experiment_id,
+        train_seed=int(raw["train_seed"]) if raw.get("train_seed") is not None else seed,
+        epoch=0,
+        epochs=epochs,
+        status="running",
+        phase="cache_building",
+        started_at=progress_started_at,
+    )
 
     gpu_cache_configs = [str(item) for item in raw.get("gpu_cache_dataset_configs", [])]
     light_cache_configs = [str(item) for item in raw.get("light_cache_dataset_configs", [])]
@@ -1586,7 +1695,6 @@ def _train_auto_prompt_cached_from_config(
         max_batch_size=light_batch_max,
     )
 
-    epochs = max(1, int(train_cfg.get("epochs", 1)))
     show_progress = bool(train_cfg.get("show_progress", True))
     progress_backend = str(train_cfg.get("progress_backend", "auto"))
     progress_mininterval = float(train_cfg.get("progress_update_interval_s", 1.0))
@@ -1612,10 +1720,6 @@ def _train_auto_prompt_cached_from_config(
     checkpoint_interval = max(0, int(train_cfg.get("checkpoint_interval_epochs", 0)))
     select_best_checkpoint = _bool_setting(train_cfg.get("select_best_checkpoint"), default=checkpoint_interval > 0)
     selection_metric_name = str(train_cfg.get("selection_metric", "val_loss")).strip() or "val_loss"
-    output_root = _resolve_path(config_path.parent, str(raw.get("output_root", "artifacts/auto_prompt")))
-    experiment_id = str(raw.get("experiment_id", "auto_prompt_v1"))
-    output_dir = output_root / experiment_id
-    output_dir.mkdir(parents=True, exist_ok=True)
     best_checkpoint_path = output_dir / str(train_cfg.get("best_checkpoint_name", "checkpoint_best.pt"))
     checkpoint_history: list[dict[str, Any]] = []
     selected_checkpoint_path: Path | None = None
@@ -1627,6 +1731,17 @@ def _train_auto_prompt_cached_from_config(
     first_epoch_sample_count = 0
     trained_sample_events = 0
     heatmap_samples: list[Sample] = []
+    _write_training_progress_state(
+        state_path=progress_state_path,
+        events_path=progress_events_path,
+        experiment_id=experiment_id,
+        train_seed=int(raw["train_seed"]) if raw.get("train_seed") is not None else seed,
+        epoch=0,
+        epochs=epochs,
+        status="running",
+        phase="training",
+        started_at=progress_started_at,
+    )
     for epoch in range(epochs):
         model.train()
         loss_sum = 0.0
@@ -1827,8 +1942,23 @@ def _train_auto_prompt_cached_from_config(
                 file=sys.stderr,
                 flush=True,
             )
+        _write_training_progress_state(
+            state_path=progress_state_path,
+            events_path=progress_events_path,
+            experiment_id=experiment_id,
+            train_seed=int(raw["train_seed"]) if raw.get("train_seed") is not None else seed,
+            epoch=epoch_number,
+            epochs=epochs,
+            status="running",
+            phase="training",
+            started_at=progress_started_at,
+            history_entry=history_entry,
+            best_checkpoint_epoch=best_checkpoint_epoch,
+            best_metric_name=best_metric_name,
+            best_metric_value=best_metric_value,
+        )
 
-    return _finalize_auto_prompt_training(
+    summary = _finalize_auto_prompt_training(
         config_path=config_path,
         raw=raw,
         train_cfg=train_cfg,
@@ -1867,6 +1997,22 @@ def _train_auto_prompt_cached_from_config(
             }
         },
     )
+    _write_training_progress_state(
+        state_path=progress_state_path,
+        events_path=progress_events_path,
+        experiment_id=experiment_id,
+        train_seed=int(raw["train_seed"]) if raw.get("train_seed") is not None else seed,
+        epoch=epochs,
+        epochs=epochs,
+        status="completed",
+        phase="finalized",
+        started_at=progress_started_at,
+        history_entry=history[-1] if history else None,
+        best_checkpoint_epoch=best_checkpoint_epoch,
+        best_metric_name=best_metric_name,
+        best_metric_value=best_metric_value,
+    )
+    return summary
 
 
 def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
@@ -1941,6 +2087,32 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
     experiment_id = str(raw.get("experiment_id", "auto_prompt_v1"))
     output_dir = output_root / experiment_id
     output_dir.mkdir(parents=True, exist_ok=True)
+    progress_started_at = time.perf_counter()
+    progress_state_path = _optional_progress_path(
+        config_path=config_path,
+        output_dir=output_dir,
+        train_cfg=train_cfg,
+        key="progress_state_path",
+        default_name="train_progress_state.json",
+    )
+    progress_events_path = _optional_progress_path(
+        config_path=config_path,
+        output_dir=output_dir,
+        train_cfg=train_cfg,
+        key="progress_events_path",
+        default_name="train_progress_events.jsonl",
+    )
+    _write_training_progress_state(
+        state_path=progress_state_path,
+        events_path=progress_events_path,
+        experiment_id=experiment_id,
+        train_seed=int(raw["train_seed"]) if raw.get("train_seed") is not None else seed,
+        epoch=0,
+        epochs=epochs,
+        status="running",
+        phase="training",
+        started_at=progress_started_at,
+    )
     best_checkpoint_path = output_dir / str(train_cfg.get("best_checkpoint_name", "checkpoint_best.pt"))
     checkpoint_history: list[dict[str, Any]] = []
     selected_checkpoint_path: Path | None = None
@@ -2126,10 +2298,25 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
                 best_checkpoint_epoch = epoch_number
                 best_metric_name = metric_name
                 best_metric_value = metric_value
+        _write_training_progress_state(
+            state_path=progress_state_path,
+            events_path=progress_events_path,
+            experiment_id=experiment_id,
+            train_seed=int(raw["train_seed"]) if raw.get("train_seed") is not None else seed,
+            epoch=epoch_number,
+            epochs=epochs,
+            status="running",
+            phase="training",
+            started_at=progress_started_at,
+            history_entry=history_entry,
+            best_checkpoint_epoch=best_checkpoint_epoch,
+            best_metric_name=best_metric_name,
+            best_metric_value=best_metric_value,
+        )
 
     if model is None:
         raise RuntimeError("No samples with bbox_tight/bbox_loose were found for auto prompt training.")
-    return _finalize_auto_prompt_training(
+    summary = _finalize_auto_prompt_training(
         config_path=config_path,
         raw=raw,
         train_cfg=train_cfg,
@@ -2149,6 +2336,22 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
         best_metric_name=best_metric_name,
         best_metric_value=best_metric_value,
     )
+    _write_training_progress_state(
+        state_path=progress_state_path,
+        events_path=progress_events_path,
+        experiment_id=experiment_id,
+        train_seed=int(raw["train_seed"]) if raw.get("train_seed") is not None else seed,
+        epoch=epochs,
+        epochs=epochs,
+        status="completed",
+        phase="finalized",
+        started_at=progress_started_at,
+        history_entry=history[-1] if history else None,
+        best_checkpoint_epoch=best_checkpoint_epoch,
+        best_metric_name=best_metric_name,
+        best_metric_value=best_metric_value,
+    )
+    return summary
 
 
 def _write_training_heatmaps(

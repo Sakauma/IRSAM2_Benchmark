@@ -485,6 +485,11 @@ def _write_training_configs(
         train_payload["train"]["show_progress"] = bool(show_progress)
         train_payload["train"]["progress_backend"] = progress_backend if show_progress else "none"
         train_payload["train"].setdefault("progress_update_interval_s", 1.0)
+        train_output_dir = output_root / train_experiment_id
+        progress_state_path = train_output_dir / "train_progress_state.json"
+        progress_events_path = train_output_dir / "train_progress_events.jsonl"
+        train_payload["train"]["progress_state_path"] = str(progress_state_path)
+        train_payload["train"]["progress_events_path"] = str(progress_events_path)
         train_config_path = generated_dir / f"auto_prompt_train_seed{train_seed}.yaml"
         final_checkpoint_path = output_root / train_experiment_id / str(auto_config["checkpoint_name"])
         selected_checkpoint_name = str(train_settings.get("best_checkpoint_name", "checkpoint_best.pt"))
@@ -500,6 +505,9 @@ def _write_training_configs(
                 "config_path": train_config_path,
                 "checkpoint_path": checkpoint_path,
                 "final_checkpoint_path": final_checkpoint_path,
+                "epochs": max(1, int(train_payload["train"].get("epochs", 1))),
+                "progress_state_path": progress_state_path,
+                "progress_events_path": progress_events_path,
                 "gpu": train_gpus[train_index % len(train_gpus)],
             }
         )
@@ -552,6 +560,129 @@ def _make_eval_progress(*, total: int, enabled: bool) -> Any | None:
     except Exception:
         return None
     return tqdm(total=total, unit="run", desc="eval runs", dynamic_ncols=True, leave=True, position=0, file=sys.stderr)
+
+
+def _make_train_progress(*, total: int, enabled: bool, stream_logs: bool) -> Any | None:
+    if stream_logs or not enabled or total <= 0:
+        return None
+    try:
+        from tqdm import tqdm
+    except Exception:
+        return None
+    return tqdm(total=total, unit="epoch", desc="train epochs", dynamic_ncols=True, leave=True, position=0, file=sys.stderr)
+
+
+def _progress_write(progress: Any | None, message: str) -> None:
+    if progress is not None and hasattr(progress, "write"):
+        progress.write(message)
+        return
+    print(message, flush=True)
+
+
+def _train_record_epochs(item: dict[str, Any]) -> int:
+    try:
+        return max(1, int(item.get("epochs", 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _train_progress_key(item: dict[str, Any]) -> str:
+    return str(item.get("experiment_id") or item.get("seed") or item.get("config_path") or id(item))
+
+
+def _read_train_progress_state(path: Path | None) -> dict[str, Any] | None:
+    if path is None or not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _remove_train_progress_files(item: dict[str, Any]) -> None:
+    for key in ("progress_state_path", "progress_events_path"):
+        value = item.get(key)
+        if not value:
+            continue
+        path = Path(str(value))
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+
+
+def _advance_train_progress_to(progress: Any | None, *, item: dict[str, Any], seen_epochs: dict[str, int], epoch: int) -> None:
+    if progress is None:
+        return
+    key = _train_progress_key(item)
+    target = min(_train_record_epochs(item), max(0, int(epoch)))
+    previous = seen_epochs.get(key, 0)
+    if target > previous:
+        progress.update(target - previous)
+        seen_epochs[key] = target
+
+
+def _set_train_progress_postfix(
+    progress: Any | None,
+    *,
+    active: list[dict[str, Any]],
+    seen_epochs: dict[str, int],
+    counts: dict[str, int],
+    queued: int,
+) -> None:
+    if progress is None:
+        return
+    postfix: dict[str, Any] = {
+        "active": len(active),
+        "completed": counts.get("completed", 0),
+        "skipped": counts.get("skipped", 0),
+        "failed": counts.get("failed", 0),
+        "dry_run": counts.get("dry_run", 0),
+        "queued": queued,
+    }
+    latest_state: dict[str, Any] | None = None
+    latest_time = -1.0
+    for running in active[:4]:
+        item = running["item"]
+        key = _train_progress_key(item)
+        state = running.get("progress_state")
+        phase = str(state.get("phase", "starting")) if isinstance(state, dict) else "starting"
+        postfix[f"seed{item['seed']}"] = f"{seen_epochs.get(key, 0)}/{_train_record_epochs(item)}:{phase}"
+        if isinstance(state, dict):
+            updated_at = float(state.get("updated_at_unix", 0.0) or 0.0)
+            if updated_at > latest_time:
+                latest_time = updated_at
+                latest_state = state
+    if len(active) > 4:
+        postfix["more"] = len(active) - 4
+    if latest_state:
+        metrics = latest_state.get("metrics", {})
+        if isinstance(metrics, dict) and "loss" in metrics:
+            postfix["loss"] = f"{float(metrics['loss']):.4f}"
+        best_epoch = latest_state.get("best_checkpoint_epoch")
+        if best_epoch is not None:
+            postfix["best_epoch"] = best_epoch
+    progress.set_postfix(postfix)
+
+
+def _refresh_train_progress(
+    progress: Any | None,
+    *,
+    active: list[dict[str, Any]],
+    seen_epochs: dict[str, int],
+    counts: dict[str, int],
+    queued: int,
+) -> None:
+    if progress is None:
+        return
+    for running in active:
+        state = _read_train_progress_state(Path(str(running["item"]["progress_state_path"])))
+        if not state:
+            continue
+        running["progress_state"] = state
+        _advance_train_progress_to(progress, item=running["item"], seen_epochs=seen_epochs, epoch=int(state.get("epoch", 0) or 0))
+    _set_train_progress_postfix(progress, active=active, seen_epochs=seen_epochs, counts=counts, queued=queued)
 
 
 def _set_eval_progress(progress: Any | None, *, counts: Dict[str, int], active: int, queued: int) -> None:
@@ -621,99 +752,124 @@ def _run_train_records(
     rerun_train: bool,
     stop_on_error: bool,
     stream_logs: bool,
+    show_progress: bool,
 ) -> list[dict[str, Any]]:
     failures: list[dict[str, Any]] = []
     queue = list(train_records)
     active: list[dict[str, Any]] = []
     free_gpus = list(train_gpus) or ["0"]
     total = len(queue)
+    total_epochs = sum(_train_record_epochs(item) for item in train_records)
+    progress = _make_train_progress(total=total_epochs, enabled=show_progress, stream_logs=stream_logs)
+    progress_counts: dict[str, int] = {"completed": 0, "skipped": 0, "failed": 0, "dry_run": 0}
+    seen_epochs: dict[str, int] = {}
     completed = 0
-    while queue or active:
-        while queue and free_gpus and not (stop_on_error and failures):
-            item = queue.pop(0)
-            gpu = free_gpus.pop(0)
-            item["gpu"] = str(gpu)
-            checkpoint_path = Path(str(item["checkpoint_path"]))
-            final_checkpoint_path = Path(str(item.get("final_checkpoint_path", checkpoint_path)))
-            train_command = [str(part) for part in item["command"].split(" ")] if isinstance(item.get("command"), str) else item["command"]
-            train_command = _command_for_train(Path(str(item["config_path"])), train_command[0] if train_command else sys.executable)
-            train_log = Path(str(item["log_path"]))
-            prefix = f"[train {completed + len(active) + 1}/{total} seed={item['seed']} gpu={gpu}]"
-            print(f"{prefix} checkpoint={checkpoint_path}", flush=True)
-            if dry_run:
-                item["status"] = "dry_run"
-                print(f"{prefix} dry_run CUDA_VISIBLE_DEVICES={gpu} {' '.join(train_command)}", flush=True)
-                completed += 1
-                free_gpus.append(gpu)
-                continue
-            if skip_train:
-                item["status"] = "skipped_by_flag"
-                print(f"{prefix} skipped_by_flag", flush=True)
-                completed += 1
-                free_gpus.append(gpu)
-                continue
-            existing_selected = _selected_checkpoint_from_summary(final_checkpoint_path)
-            if existing_selected is not None:
-                item["checkpoint_path"] = str(existing_selected)
-                checkpoint_path = existing_selected
-            if not rerun_train and (checkpoint_path.exists() or final_checkpoint_path.exists()):
-                item["status"] = "skipped_existing"
-                print(f"{prefix} skipped_existing", flush=True)
-                completed += 1
-                free_gpus.append(gpu)
-                continue
-            process, handle, thread = _start_logged(
-                train_command,
-                env=_env_for_gpu(paths, str(gpu)),
-                log_path=train_log,
-                stream_logs=stream_logs,
-            )
-            active.append(
-                {
-                    "item": item,
-                    "gpu": gpu,
-                    "process": process,
-                    "handle": handle,
-                    "thread": thread,
-                    "prefix": prefix,
-                    "checkpoint_path": checkpoint_path,
-                    "final_checkpoint_path": final_checkpoint_path,
-                    "log_path": train_log,
-                }
-            )
-        if not active:
-            if stop_on_error and failures:
-                break
-            continue
-        time.sleep(0.5)
-        still_active: list[dict[str, Any]] = []
-        for running in active:
-            process = running["process"]
-            returncode = process.poll()
-            if returncode is None:
-                still_active.append(running)
-                continue
-            if running["thread"] is not None:
-                running["thread"].join(timeout=1.0)
-            running["handle"].close()
-            item = running["item"]
-            selected = _selected_checkpoint_from_summary(Path(running["final_checkpoint_path"]))
-            if selected is not None:
-                item["checkpoint_path"] = str(selected)
-                checkpoint_path = selected
-            else:
+    try:
+        while queue or active:
+            while queue and free_gpus and not (stop_on_error and failures):
+                item = queue.pop(0)
+                gpu = free_gpus.pop(0)
+                item["gpu"] = str(gpu)
                 checkpoint_path = Path(str(item["checkpoint_path"]))
-            item["returncode"] = int(returncode)
-            item["status"] = "completed" if returncode == 0 and checkpoint_path.exists() else "failed"
-            if item["status"] != "completed":
-                item["log_tail"] = fr._tail_text(Path(running["log_path"]))
-                failures.append(item)
-                print(f"{running['prefix']} failed", flush=True)
-            else:
-                print(f"{running['prefix']} completed selected={item['checkpoint_path']}", flush=True)
-            completed += 1
-            free_gpus.append(str(running["gpu"]))
-        active = still_active
+                final_checkpoint_path = Path(str(item.get("final_checkpoint_path", checkpoint_path)))
+                train_command = [str(part) for part in item["command"].split(" ")] if isinstance(item.get("command"), str) else item["command"]
+                train_command = _command_for_train(Path(str(item["config_path"])), train_command[0] if train_command else sys.executable)
+                train_log = Path(str(item["log_path"]))
+                prefix = f"[train {completed + len(active) + 1}/{total} seed={item['seed']} gpu={gpu}]"
+                _progress_write(progress, f"{prefix} checkpoint={checkpoint_path}")
+                if dry_run:
+                    item["status"] = "dry_run"
+                    progress_counts["dry_run"] += 1
+                    _progress_write(progress, f"{prefix} dry_run CUDA_VISIBLE_DEVICES={gpu} {' '.join(train_command)}")
+                    _advance_train_progress_to(progress, item=item, seen_epochs=seen_epochs, epoch=_train_record_epochs(item))
+                    completed += 1
+                    free_gpus.append(gpu)
+                    _set_train_progress_postfix(progress, active=active, seen_epochs=seen_epochs, counts=progress_counts, queued=len(queue))
+                    continue
+                if skip_train:
+                    item["status"] = "skipped_by_flag"
+                    progress_counts["skipped"] += 1
+                    _progress_write(progress, f"{prefix} skipped_by_flag")
+                    _advance_train_progress_to(progress, item=item, seen_epochs=seen_epochs, epoch=_train_record_epochs(item))
+                    completed += 1
+                    free_gpus.append(gpu)
+                    _set_train_progress_postfix(progress, active=active, seen_epochs=seen_epochs, counts=progress_counts, queued=len(queue))
+                    continue
+                existing_selected = _selected_checkpoint_from_summary(final_checkpoint_path)
+                if existing_selected is not None:
+                    item["checkpoint_path"] = str(existing_selected)
+                    checkpoint_path = existing_selected
+                if not rerun_train and (checkpoint_path.exists() or final_checkpoint_path.exists()):
+                    item["status"] = "skipped_existing"
+                    progress_counts["skipped"] += 1
+                    _progress_write(progress, f"{prefix} skipped_existing")
+                    _advance_train_progress_to(progress, item=item, seen_epochs=seen_epochs, epoch=_train_record_epochs(item))
+                    completed += 1
+                    free_gpus.append(gpu)
+                    _set_train_progress_postfix(progress, active=active, seen_epochs=seen_epochs, counts=progress_counts, queued=len(queue))
+                    continue
+                _remove_train_progress_files(item)
+                process, handle, thread = _start_logged(
+                    train_command,
+                    env=_env_for_gpu(paths, str(gpu)),
+                    log_path=train_log,
+                    stream_logs=stream_logs,
+                )
+                active.append(
+                    {
+                        "item": item,
+                        "gpu": gpu,
+                        "process": process,
+                        "handle": handle,
+                        "thread": thread,
+                        "prefix": prefix,
+                        "checkpoint_path": checkpoint_path,
+                        "final_checkpoint_path": final_checkpoint_path,
+                        "log_path": train_log,
+                    }
+                )
+                _set_train_progress_postfix(progress, active=active, seen_epochs=seen_epochs, counts=progress_counts, queued=len(queue))
+            if not active:
+                if stop_on_error and failures:
+                    break
+                continue
+            time.sleep(0.5)
+            _refresh_train_progress(progress, active=active, seen_epochs=seen_epochs, counts=progress_counts, queued=len(queue))
+            still_active: list[dict[str, Any]] = []
+            for running in active:
+                process = running["process"]
+                returncode = process.poll()
+                if returncode is None:
+                    still_active.append(running)
+                    continue
+                if running["thread"] is not None:
+                    running["thread"].join(timeout=1.0)
+                running["handle"].close()
+                item = running["item"]
+                selected = _selected_checkpoint_from_summary(Path(running["final_checkpoint_path"]))
+                if selected is not None:
+                    item["checkpoint_path"] = str(selected)
+                    checkpoint_path = selected
+                else:
+                    checkpoint_path = Path(str(item["checkpoint_path"]))
+                item["returncode"] = int(returncode)
+                item["status"] = "completed" if returncode == 0 and checkpoint_path.exists() else "failed"
+                if item["status"] != "completed":
+                    item["log_tail"] = fr._tail_text(Path(running["log_path"]))
+                    failures.append(item)
+                    progress_counts["failed"] += 1
+                    _progress_write(progress, f"{running['prefix']} failed")
+                else:
+                    progress_counts["completed"] += 1
+                    _advance_train_progress_to(progress, item=item, seen_epochs=seen_epochs, epoch=_train_record_epochs(item))
+                    _progress_write(progress, f"{running['prefix']} completed selected={item['checkpoint_path']}")
+                completed += 1
+                free_gpus.append(str(running["gpu"]))
+            active = still_active
+            _set_train_progress_postfix(progress, active=active, seen_epochs=seen_epochs, counts=progress_counts, queued=len(queue))
+    finally:
+        if progress is not None:
+            progress.close()
     return failures
 
 
@@ -1372,6 +1528,9 @@ def main(argv: List[str] | None = None) -> int:
                 "config_path": str(train_config_path),
                 "checkpoint_path": str(train_context["checkpoint_path"]),
                 "final_checkpoint_path": str(train_context.get("final_checkpoint_path", train_context["checkpoint_path"])),
+                "epochs": int(train_context.get("epochs", 1)),
+                "progress_state_path": str(train_context["progress_state_path"]),
+                "progress_events_path": str(train_context["progress_events_path"]),
                 "log_path": str(manifest_dir / "logs" / f"auto_prompt_train_seed{train_seed}.log"),
                 "command": " ".join(train_command),
                 "gpu": str(train_context.get("gpu", auto_config.get("train_gpu", "0"))),
@@ -1441,6 +1600,7 @@ def main(argv: List[str] | None = None) -> int:
         rerun_train=args.rerun_train,
         stop_on_error=args.stop_on_error,
         stream_logs=args.stream_logs or (len(train_records) == 1 and not args.no_progress),
+        show_progress=not args.no_progress,
     )
     if train_failures:
         manifest = {
