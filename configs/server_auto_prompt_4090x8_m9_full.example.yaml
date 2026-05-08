@@ -4,6 +4,7 @@
 #   PYTHONPATH=src python scripts/run_m9_rbgt_auto_prompt.py \
 #     --config configs/server_auto_prompt_4090x8_m9_full.example.yaml \
 #     --stage all \
+#     --rerun-stage \
 #     --stop-on-error \
 #     --preflight-mode fast
 
@@ -22,10 +23,14 @@ m9:
   rbgt_test_dataset: "rbgt_tiny_ir_box_m9_test"
   learned_eval_modes: ["sam2_learned_auto_point", "sam2_learned_auto_point_rerank", "sam2_ir_fa_rerank", "sam2_ir_fa_rerank_feedback_only"]
   reference_eval_modes: ["sam2_heuristic_auto_box_point", "sam2_box_oracle", "sam2_box_point_oracle"]
+  reference_policy: "shared"
   export:
     root: "/project/IDIP/Dataset/RBGT-Tiny"
     annotations_dir: "annotations_voc"
     images_dir: "images"
+    small_target_filter: true
+    validate_existing: true
+    auto_reexport_invalid: false
     overwrite: false
   base_model:
     input_channels: 3
@@ -52,6 +57,7 @@ m9:
       light_cache_num_workers: 8
       light_cache_shard_size: 512
       light_cache_max_open_shards: 64
+      light_cache_lock_stale_timeout_s: 21600
       light_cache_rebuild: false
       gradient_accumulation_steps: 4
       light_cache_samples_per_epoch: 65536
@@ -99,6 +105,7 @@ m9:
       light_cache_num_workers: 8
       light_cache_shard_size: 512
       light_cache_max_open_shards: 64
+      light_cache_lock_stale_timeout_s: 21600
       light_cache_rebuild: false
       gradient_accumulation_steps: 4
       light_cache_samples_per_epoch: 65536

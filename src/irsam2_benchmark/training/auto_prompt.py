@@ -953,8 +953,6 @@ class DiskLightGrayShard:
     def open(self) -> None:
         if self.image_array is None:
             self.image_array = np.load(self.images_path, mmap_mode="r")
-        if self.boxes_array is None:
-            self.boxes_array = np.load(self.boxes_path, mmap_mode="r")
         if self.shapes_array is None:
             self.shapes_array = np.load(self.shapes_path, mmap_mode="r")
 
@@ -1329,10 +1327,45 @@ def _load_disk_light_gray_cache(
     return cache
 
 
+def _disk_cache_lock_pid(lock_path: Path) -> int | None:
+    try:
+        text = lock_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for token in text.replace("\n", " ").split():
+        if not token.startswith("pid="):
+            continue
+        try:
+            return int(token.split("=", 1)[1])
+        except ValueError:
+            return None
+    return None
+
+
+def _process_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _disk_cache_lock_age_s(lock_path: Path) -> float:
+    try:
+        return max(0.0, time.time() - lock_path.stat().st_mtime)
+    except OSError:
+        return 0.0
+
+
 def _acquire_disk_cache_lock(cache_dir: Path, train_cfg: dict[str, Any], *, accept_ready: bool) -> int | None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     lock_path = cache_dir / "build.lock"
     wait_timeout_s = max(1.0, float(train_cfg.get("light_cache_lock_timeout_s", 86400.0)))
+    stale_timeout_s = max(0.0, float(train_cfg.get("light_cache_lock_stale_timeout_s", 21600.0)))
     started_at = time.perf_counter()
     progress = None
     while True:
@@ -1346,6 +1379,31 @@ def _acquire_disk_cache_lock(cache_dir: Path, train_cfg: dict[str, Any], *, acce
             if progress is None:
                 print(f"[cache-wait] mode=light_gray_disk lock={lock_path}", file=sys.stderr, flush=True)
                 progress = _light_cache_progress(train_cfg=train_cfg, desc="light-cache wait", total=None, unit="s")
+            lock_pid = _disk_cache_lock_pid(lock_path)
+            lock_age_s = _disk_cache_lock_age_s(lock_path)
+            if lock_pid is not None and not _process_exists(lock_pid):
+                if progress is not None:
+                    progress.close()
+                    progress = None
+                print(
+                    f"[cache-lock] removing stale lock with dead pid={lock_pid} age={lock_age_s:.0f}s path={lock_path}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
+            if stale_timeout_s > 0.0 and lock_age_s > stale_timeout_s:
+                if progress is not None:
+                    progress.close()
+                owner = f"pid={lock_pid}" if lock_pid is not None else "pid=unknown"
+                raise TimeoutError(
+                    f"Light cache lock is older than stale timeout but may still belong to a live process "
+                    f"({owner}, age={lock_age_s:.0f}s, timeout={stale_timeout_s:.0f}s): {lock_path}. "
+                    "Inspect the process and remove the lock manually if it is safe."
+                )
             elapsed = time.perf_counter() - started_at
             if elapsed > wait_timeout_s:
                 if progress is not None:

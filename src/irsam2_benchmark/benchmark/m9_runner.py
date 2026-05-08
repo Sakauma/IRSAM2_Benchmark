@@ -103,6 +103,72 @@ def _expected_rbgt_export_paths(root: Path) -> list[Path]:
     ]
 
 
+def _reference_policy(m9: dict[str, Any]) -> str:
+    policy = str(m9.get("reference_policy", "shared")).strip().lower()
+    if policy in {"shared", "per_variant", "first_variant", "none"}:
+        return policy
+    return "shared"
+
+
+def _json_list_count(payload: dict[str, Any], key: str) -> int:
+    value = payload.get(key)
+    return len(value) if isinstance(value, list) else 0
+
+
+def _validate_existing_rbgt_export(root: Path, export_cfg: dict[str, Any]) -> dict[str, Any]:
+    outputs = _expected_rbgt_export_paths(root)
+    issues: list[str] = []
+    split_counts: dict[str, dict[str, int]] = {}
+    for path in outputs:
+        split = path.parent.name.replace("annotations_coco_ir_box_m9_", "")
+        if not path.exists():
+            issues.append(f"missing split json: {path}")
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            issues.append(f"unreadable split json: {path}: {exc}")
+            continue
+        image_count = _json_list_count(payload, "images")
+        annotation_count = _json_list_count(payload, "annotations")
+        split_counts[split] = {"images": image_count, "annotations": annotation_count}
+        if image_count <= 0:
+            issues.append(f"empty image list in split json: {path}")
+        if annotation_count <= 0:
+            issues.append(f"empty annotation list in split json: {path}")
+
+    summary_path = root / "annotations_coco_ir_box_m9_summary.json"
+    summary: dict[str, Any] = {}
+    if not summary_path.exists():
+        issues.append(f"missing export summary: {summary_path}")
+    else:
+        try:
+            payload = json.loads(summary_path.read_text(encoding="utf-8"))
+            summary = payload if isinstance(payload, dict) else {}
+        except Exception as exc:
+            issues.append(f"unreadable export summary: {summary_path}: {exc}")
+    expected = {
+        "root": str(root.resolve()),
+        "annotations_dir": str(export_cfg.get("annotations_dir", "annotations_voc")),
+        "images_dir": str(export_cfg.get("images_dir", "images")),
+        "small_target_filter": bool(export_cfg.get("small_target_filter", True)),
+    }
+    if summary:
+        if str(Path(str(summary.get("root", ""))).resolve()) != expected["root"]:
+            issues.append(f"summary root mismatch: expected={expected['root']} actual={summary.get('root')}")
+        for key in ("annotations_dir", "images_dir", "small_target_filter"):
+            if summary.get(key) != expected[key]:
+                issues.append(f"summary {key} mismatch: expected={expected[key]!r} actual={summary.get(key)!r}")
+    return {
+        "valid": not issues,
+        "issues": issues,
+        "outputs": [str(path) for path in outputs],
+        "summary_path": str(summary_path),
+        "split_counts": split_counts,
+        "expected": expected,
+    }
+
+
 def _stage_defaults(m9: dict[str, Any], role: str) -> dict[str, Any]:
     stages = m9.get("stage_defaults", {})
     if isinstance(stages, dict) and isinstance(stages.get(role), dict):
@@ -288,17 +354,16 @@ def _write_dataset_configs(
     paths_out: list[str] = []
     for dataset_id in dataset_ids:
         path = output_dir / f"{dataset_id}.yaml"
-        if not path.exists():
-            fr._write_yaml(
-                path,
-                _dataset_payload(
-                    base_matrix=base_matrix,
-                    suite_config=suite_config,
-                    paths=paths,
-                    dataset_id=dataset_id,
-                    checkpoint=checkpoint,
-                ),
-            )
+        fr._write_yaml(
+            path,
+            _dataset_payload(
+                base_matrix=base_matrix,
+                suite_config=suite_config,
+                paths=paths,
+                dataset_id=dataset_id,
+                checkpoint=checkpoint,
+            ),
+        )
         paths_out.append(str(path))
     return paths_out
 
@@ -424,6 +489,24 @@ def _materialize_train_jobs(
     return jobs
 
 
+def _terminate_train_processes(active: list[dict[str, Any]]) -> None:
+    for running in list(active):
+        process = running["process"]
+        if process.poll() is None:
+            process.terminate()
+    for running in list(active):
+        process = running["process"]
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5.0)
+        handle = running.get("handle")
+        if handle is not None and not handle.closed:
+            handle.close()
+        active.remove(running)
+
+
 def _run_jobs(
     *,
     jobs: list[TrainJob],
@@ -492,9 +575,7 @@ def _run_jobs(
                 failures.append(failure)
                 print(f"[train] {job.key} seed={job.seed} failed", flush=True)
         if stop_on_error and failures:
-            for running in active:
-                running["process"].terminate()
-                running["handle"].close()
+            _terminate_train_processes(active)
             break
     return failures
 
@@ -555,29 +636,58 @@ def _run_export(*, raw: dict[str, Any], dry_run: bool, python_bin: str) -> dict[
         return {"status": "skipped_no_root"}
     root_path = Path(str(root)).expanduser()
     expected_outputs = _expected_rbgt_export_paths(root_path)
-    if all(path.exists() for path in expected_outputs) and not bool(export_cfg.get("overwrite", False)):
-        return {"status": "skipped_existing", "outputs": [str(path) for path in expected_outputs]}
+    overwrite = bool(export_cfg.get("overwrite", False))
+    validation = _validate_existing_rbgt_export(root_path, export_cfg) if bool(export_cfg.get("validate_existing", True)) else {"valid": all(path.exists() for path in expected_outputs), "issues": [], "outputs": [str(path) for path in expected_outputs]}
+    any_existing = any(path.exists() for path in expected_outputs)
+    all_existing = all(path.exists() for path in expected_outputs)
+    if all_existing and validation.get("valid") and not overwrite:
+        return {"status": "skipped_existing", "outputs": [str(path) for path in expected_outputs], "validation": validation}
+    if any_existing and not overwrite:
+        if not bool(export_cfg.get("auto_reexport_invalid", False)):
+            return {
+                "status": "failed",
+                "returncode": 1,
+                "message": "Existing RBGT M9 export is missing, stale, or invalid. Set m9.export.overwrite=true after confirming it is safe to regenerate.",
+                "validation": validation,
+            }
+        overwrite = True
     command = [
         python_bin,
         str(EXPORT_RBGT_TINY_BOX_COCO_PY),
         "--root",
         str(root),
         "--split",
-        "--small-target-filter",
     ]
-    if bool(export_cfg.get("overwrite", False)):
+    if bool(export_cfg.get("small_target_filter", True)):
+        command.append("--small-target-filter")
+    if overwrite:
         command.append("--overwrite")
+    for key, flag in (
+        ("seed", "--seed"),
+        ("max_area_ratio", "--max-area-ratio"),
+        ("max_box_side", "--max-box-side"),
+        ("min_box_side", "--min-box-side"),
+    ):
+        if export_cfg.get(key) is not None:
+            command.extend([flag, str(export_cfg[key])])
     for key, flag in (("annotations_dir", "--annotations-dir"), ("images_dir", "--images-dir")):
         if export_cfg.get(key):
             command.extend([flag, str(export_cfg[key])])
     if dry_run:
         print(f"[export dry-run] {' '.join(command)}", flush=True)
-        return {"status": "dry_run", "command": command}
+        return {"status": "dry_run", "command": command, "validation": validation}
     result = subprocess.run(command, cwd=PROJECT_ROOT, text=True, check=False)
-    return {"status": "completed" if result.returncode == 0 else "failed", "returncode": result.returncode, "command": command}
+    post_validation = _validate_existing_rbgt_export(root_path, export_cfg) if result.returncode == 0 else validation
+    status = "completed" if result.returncode == 0 and post_validation.get("valid") else "failed"
+    return {"status": status, "returncode": result.returncode, "command": command, "validation": post_validation}
 
 
-def _eval_variant(
+def _eval_variants_for_jobs(jobs: list[TrainJob], selected_variants: set[str] | None) -> list[str]:
+    eval_m9b = (selected_variants is None or "M9-B" in selected_variants) and any(job.key.startswith("v2_rbgt") for job in jobs)
+    return sorted({job.variant for job in jobs if job.role != "pretrain"} | ({"M9-B"} if eval_m9b else set()))
+
+
+def _build_variant_eval_plan(
     *,
     variant: str,
     jobs: list[TrainJob],
@@ -587,13 +697,10 @@ def _eval_variant(
     base_matrix: dict[str, Any],
     artifact_root: Path,
     generated_dir: Path,
-    eval_gpus: list[str],
     dry_run: bool,
-    rerun: bool,
-    stop_on_error: bool,
     python_bin: str,
     include_reference: bool,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[tuple[Any, ...]], list[dict[str, Any]]]:
     eval_roles = {"pretrain"} if variant == "M9-B" else {"public", "finetune", "mixed"}
     train_contexts = [
         {
@@ -608,7 +715,7 @@ def _eval_variant(
         and (dry_run or job.selected_checkpoint_path.exists())
     ]
     if not train_contexts:
-        return [], [], []
+        return [], []
     m9 = raw.get("m9", {})
     public_eval = [str(item) for item in m9.get("public_eval_datasets", ["nuaa_sirst", "nudt_sirst", "irstd_1k"])]
     learned_modes = [str(item) for item in m9.get("learned_eval_modes", ["sam2_learned_auto_point", "sam2_learned_auto_point_rerank", "sam2_ir_fa_rerank", "sam2_ir_fa_rerank_feedback_only"])]
@@ -631,7 +738,7 @@ def _eval_variant(
     suite_subset = copy.deepcopy(suite_config)
     suite_subset["artifact_subdir"] = str(raw.get("m9", {}).get("artifact_subdir", "sam2_ir_qd_m9_full_v1"))
     suite_subset["suites"] = {suite_key: suite_entry}
-    run_plan, analysis_records = apr._build_run_plan(
+    return apr._build_run_plan(
         base_matrix=base_matrix,
         suite_config=suite_subset,
         paths=paths,
@@ -649,12 +756,191 @@ def _eval_variant(
         smoke_test=False,
         python_bin=python_bin,
     )
+
+
+def _build_reference_eval_plan(
+    *,
+    raw: dict[str, Any],
+    paths: dict[str, Any],
+    suite_config: dict[str, Any],
+    base_matrix: dict[str, Any],
+    artifact_root: Path,
+    generated_dir: Path,
+    python_bin: str,
+) -> tuple[list[tuple[Any, ...]], list[dict[str, Any]]]:
+    m9 = raw.get("m9", {})
+    public_eval = [str(item) for item in m9.get("public_eval_datasets", ["nuaa_sirst", "nudt_sirst", "irstd_1k"])]
+    reference_modes = [str(item) for item in m9.get("reference_eval_modes", ["sam2_heuristic_auto_box_point", "sam2_box_oracle", "sam2_box_point_oracle"])]
+    if not reference_modes:
+        return [], []
+    suite_key = "auto_prompt_m9_reference"
+    suite_entry = {
+        "enabled": True,
+        "experiment_id": "E9_reference",
+        "purpose": "Shared M9 heuristic/oracle reference evaluation.",
+        "checkpoints": ["large"],
+        "modes": reference_modes,
+        "datasets": public_eval,
+        "run_analysis": True,
+        "primary_metric": "mIoU",
+        "comparisons": [],
+    }
+    suite_subset = copy.deepcopy(suite_config)
+    suite_subset["artifact_subdir"] = str(raw.get("m9", {}).get("artifact_subdir", "sam2_ir_qd_m9_full_v1"))
+    suite_subset["suites"] = {suite_key: suite_entry}
+    return apr._build_run_plan(
+        base_matrix=base_matrix,
+        suite_config=suite_subset,
+        paths=paths,
+        auto_config=raw.get("auto_prompt", {}),
+        train_contexts=[],
+        config_dir=generated_dir / "run_configs",
+        matrix_dir=generated_dir / "matrices",
+        analysis_config_dir=generated_dir / "analysis_configs",
+        analysis_root=artifact_root / "analysis",
+        source_config_path=Path(str(raw["__config_path__"])),
+        source_config_sha256=str(raw["__config_sha256__"]),
+        selected_suites={suite_key},
+        selected_checkpoints=None,
+        selected_modes=None,
+        smoke_test=False,
+        python_bin=python_bin,
+    )
+
+
+def _build_all_eval_plan(
+    *,
+    jobs: list[TrainJob],
+    raw: dict[str, Any],
+    paths: dict[str, Any],
+    suite_config: dict[str, Any],
+    base_matrix: dict[str, Any],
+    artifact_root: Path,
+    generated_dir: Path,
+    dry_run: bool,
+    python_bin: str,
+    selected_variants: set[str] | None,
+) -> tuple[list[tuple[Any, ...]], list[dict[str, Any]]]:
+    reference_policy = _reference_policy(raw.get("m9", {}))
+    run_plan: list[tuple[Any, ...]] = []
+    analysis_records: list[dict[str, Any]] = []
+    if reference_policy == "shared":
+        records, analyses = _build_reference_eval_plan(
+            raw=raw,
+            paths=paths,
+            suite_config=suite_config,
+            base_matrix=base_matrix,
+            artifact_root=artifact_root,
+            generated_dir=generated_dir,
+            python_bin=python_bin,
+        )
+        run_plan.extend(records)
+        analysis_records.extend(analyses)
+    include_reference_next = reference_policy == "first_variant"
+    for variant in _eval_variants_for_jobs(jobs, selected_variants):
+        records, analyses = _build_variant_eval_plan(
+            variant=variant,
+            jobs=jobs,
+            raw=raw,
+            paths=paths,
+            suite_config=suite_config,
+            base_matrix=base_matrix,
+            artifact_root=artifact_root,
+            generated_dir=generated_dir,
+            dry_run=dry_run,
+            python_bin=python_bin,
+            include_reference=reference_policy == "per_variant" or include_reference_next,
+        )
+        include_reference_next = False
+        run_plan.extend(records)
+        analysis_records.extend(analyses)
+    return run_plan, analysis_records
+
+
+def _eval_variant(
+    *,
+    variant: str,
+    jobs: list[TrainJob],
+    raw: dict[str, Any],
+    paths: dict[str, Any],
+    suite_config: dict[str, Any],
+    base_matrix: dict[str, Any],
+    artifact_root: Path,
+    generated_dir: Path,
+    eval_gpus: list[str],
+    dry_run: bool,
+    rerun: bool,
+    stop_on_error: bool,
+    python_bin: str,
+    include_reference: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    run_plan, analysis_records = _build_variant_eval_plan(
+        variant=variant,
+        jobs=jobs,
+        raw=raw,
+        paths=paths,
+        suite_config=suite_config,
+        base_matrix=base_matrix,
+        artifact_root=artifact_root,
+        generated_dir=generated_dir,
+        dry_run=dry_run,
+        python_bin=python_bin,
+        include_reference=include_reference,
+    )
+    if not run_plan:
+        return [], [], []
     records, failures = apr._run_eval_plan(
         run_plan=run_plan,
         paths=paths,
         eval_gpus=eval_gpus,
         manifest_dir=artifact_root,
         run_id=f"m9-{variant}-{int(time.time())}",
+        dry_run=dry_run,
+        rerun=rerun,
+        stop_on_error=stop_on_error,
+        show_progress=True,
+        stream_logs=False,
+    )
+    if not dry_run and not failures:
+        for item in analysis_records:
+            command = fr._analysis_command(Path(item["analysis_config"]), python_bin)
+            result = subprocess.run(command, cwd=PROJECT_ROOT, env=fr._build_env(paths), text=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            item["status"] = "completed" if result.returncode == 0 else "failed"
+            item["returncode"] = result.returncode
+    return records, failures, analysis_records
+
+
+def _eval_reference(
+    *,
+    raw: dict[str, Any],
+    paths: dict[str, Any],
+    suite_config: dict[str, Any],
+    base_matrix: dict[str, Any],
+    artifact_root: Path,
+    generated_dir: Path,
+    eval_gpus: list[str],
+    dry_run: bool,
+    rerun: bool,
+    stop_on_error: bool,
+    python_bin: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    run_plan, analysis_records = _build_reference_eval_plan(
+        raw=raw,
+        paths=paths,
+        suite_config=suite_config,
+        base_matrix=base_matrix,
+        artifact_root=artifact_root,
+        generated_dir=generated_dir,
+        python_bin=python_bin,
+    )
+    if not run_plan:
+        return [], [], []
+    records, failures = apr._run_eval_plan(
+        run_plan=run_plan,
+        paths=paths,
+        eval_gpus=eval_gpus,
+        manifest_dir=artifact_root,
+        run_id=f"m9-reference-{int(time.time())}",
         dry_run=dry_run,
         rerun=rerun,
         stop_on_error=stop_on_error,
@@ -758,6 +1044,8 @@ def main(argv: list[str] | None = None) -> int:
 
     failures: list[dict[str, Any]] = []
     export_record: dict[str, Any] | None = None
+    preflight_path: Path | None = None
+    preflight_summary: dict[str, Any] | None = None
     if args.stage in {"all", "export"}:
         export_record = _run_export(raw=raw, dry_run=args.dry_run, python_bin=args.python_bin)
         if export_record.get("status") == "failed" and args.stop_on_error:
@@ -769,6 +1057,41 @@ def main(argv: list[str] | None = None) -> int:
     checkpoint = suite_config["checkpoints"][0]
     dataset_config_dir = generated_dir / "training_dataset_configs"
     jobs_by_key: dict[str, TrainJob] = {}
+    if args.stage in {"all", "pretrain", "finetune", "select", "eval", "analysis"}:
+        preflight_jobs = _materialize_train_jobs(
+            specs=specs,
+            raw=raw,
+            paths=paths,
+            suite_config=suite_config,
+            base_matrix=base_matrix,
+            artifact_root=artifact_root,
+            generated_dir=generated_dir,
+            gpus=gpus,
+        )
+        preflight_run_plan, _ = _build_all_eval_plan(
+            jobs=list(preflight_jobs.values()),
+            raw=raw,
+            paths=paths,
+            suite_config=suite_config,
+            base_matrix=base_matrix,
+            artifact_root=artifact_root,
+            generated_dir=generated_dir,
+            dry_run=True,
+            python_bin=args.python_bin,
+            selected_variants=variants,
+        )
+        preflight_summary = apr._dataset_preflight_summary(
+            train_config_paths=[job.config_path for job in preflight_jobs.values()],
+            run_plan=preflight_run_plan,
+            mode=args.preflight_mode,
+        )
+        preflight_path = apr._write_dataset_preflight_summary(artifact_root, preflight_summary)
+        apr._print_dataset_preflight_summary(preflight_summary)
+        if not bool(preflight_summary.get("overall", {}).get("valid", False)):
+            failure = {"status": "preflight_failed", "preflight_path": str(preflight_path), "summary": preflight_summary.get("overall", {})}
+            failures.append(failure)
+            if args.stop_on_error:
+                return 1
     if args.stage in {"select", "eval", "analysis"}:
         jobs_by_key.update(
             _materialize_train_jobs(
@@ -912,10 +1235,29 @@ def main(argv: list[str] | None = None) -> int:
     eval_records: list[dict[str, Any]] = []
     analysis_records: list[dict[str, Any]] = []
     if args.stage in {"all", "eval", "analysis"}:
-        eval_m9b = (variants is None or "M9-B" in variants) and any(job.key.startswith("v2_rbgt") for job in all_jobs)
-        eval_variants = sorted({job.variant for job in all_jobs if job.role != "pretrain"} | ({"M9-B"} if eval_m9b else set()))
-        include_reference_next = True
-        for variant in eval_variants:
+        policy = _reference_policy(m9)
+        if policy == "shared":
+            records, eval_failures, analyses = _eval_reference(
+                raw=raw,
+                paths=paths,
+                suite_config=suite_config,
+                base_matrix=base_matrix,
+                artifact_root=artifact_root,
+                generated_dir=generated_dir,
+                eval_gpus=gpus,
+                dry_run=args.dry_run,
+                rerun=args.rerun_stage,
+                stop_on_error=args.stop_on_error,
+                python_bin=args.python_bin,
+            )
+            eval_records.extend(records)
+            analysis_records.extend(analyses)
+            failures.extend(eval_failures)
+            if eval_failures and args.stop_on_error:
+                _write_variant_summary(artifact_root, all_jobs, eval_records, failures)
+                return 1
+        include_reference_next = policy == "first_variant"
+        for variant in _eval_variants_for_jobs(all_jobs, variants):
             records, eval_failures, analyses = _eval_variant(
                 variant=variant,
                 jobs=all_jobs,
@@ -930,7 +1272,7 @@ def main(argv: list[str] | None = None) -> int:
                 rerun=args.rerun_stage,
                 stop_on_error=args.stop_on_error,
                 python_bin=args.python_bin,
-                include_reference=include_reference_next,
+                include_reference=policy == "per_variant" or include_reference_next,
             )
             include_reference_next = False
             eval_records.extend(records)
@@ -948,9 +1290,13 @@ def main(argv: list[str] | None = None) -> int:
         "smoke_test": args.smoke_test,
         "stage": args.stage,
         "preflight_mode": args.preflight_mode,
+        "preflight_path": str(preflight_path) if preflight_path is not None else None,
+        "preflight": preflight_summary.get("overall", {}) if preflight_summary else None,
+        "reference_policy": _reference_policy(m9),
         "variants": sorted(variants) if variants else "default",
         "seeds": seeds,
         "export": export_record,
+        "export_validation": export_record.get("validation") if isinstance(export_record, dict) else None,
         "train_jobs": [job.__dict__ | {"config_path": str(job.config_path), "output_dir": str(job.output_dir), "log_path": str(job.log_path), "checkpoint_path": str(job.checkpoint_path), "selected_checkpoint_path": str(job.selected_checkpoint_path)} for job in all_jobs],
         "eval_count": len(eval_records),
         "analysis_count": len(analysis_records),
