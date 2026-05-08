@@ -735,12 +735,21 @@ def main(argv: list[str] | None = None) -> int:
     variants = _split_csv(args.variants)
     gpus = [str(item) for item in m9.get("gpus", ["0", "1", "2", "3", "4", "5", "6", "7"])]
     if args.smoke_test:
+        smoke_runtime = copy.deepcopy(suite_config.get("smoke_test_runtime", {}))
+        if smoke_runtime:
+            suite_config["runtime"] = fr._deep_merge(copy.deepcopy(suite_config.get("runtime", {})), smoke_runtime)
         raw.setdefault("auto_prompt", {}).setdefault("train", {})["epochs"] = 1
         m9.setdefault("stage_defaults", {})
         for role in ("pretrain", "public", "finetune", "mixed"):
             m9["stage_defaults"].setdefault(role, {})
             m9["stage_defaults"][role]["epochs"] = 1
+            m9["stage_defaults"][role]["checkpoint_interval_epochs"] = 1
+            m9["stage_defaults"][role]["light_cache_max_samples"] = 32
             m9["stage_defaults"][role]["light_cache_samples_per_epoch"] = 32
+            m9["stage_defaults"][role]["max_steps_per_epoch"] = 2
+            m9["stage_defaults"][role]["validation_max_batches"] = 1
+        m9.setdefault("selector", {})
+        m9["selector"]["max_samples"] = min(int(m9["selector"].get("max_samples", 16)), 16)
 
     failures: list[dict[str, Any]] = []
     export_record: dict[str, Any] | None = None
