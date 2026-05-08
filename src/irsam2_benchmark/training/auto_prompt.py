@@ -1760,10 +1760,11 @@ def _autotune_light_batch_size(
         return max(1, int(requested))
     if not str(device).startswith("cuda") or not torch.cuda.is_available():
         return min(max(1, int(max_batch_size)), len(cache))
-    low, high, best = 1, min(max(1, int(max_batch_size)), len(cache)), 1
+    low, high, best = 1, min(max(1, int(max_batch_size)), len(cache)), 0
     probe_indices = list(range(high))
     while low <= high:
         candidate = (low + high) // 2
+        batch = None
         try:
             batch = _light_cache_batch(
                 cache,
@@ -1788,15 +1789,25 @@ def _autotune_light_batch_size(
                 step_optimizer=False,
             )
             optimizer.zero_grad(set_to_none=True)
+            del batch
+            if str(device).startswith("cuda"):
+                torch.cuda.empty_cache()
             best = candidate
             low = candidate + 1
         except RuntimeError as exc:
             optimizer.zero_grad(set_to_none=True)
+            if batch is not None:
+                del batch
             if _is_oom_error(exc):
                 torch.cuda.empty_cache()
                 high = candidate - 1
                 continue
             raise
+    if best <= 0:
+        raise RuntimeError(
+            "Unable to fit even light_cache_batch_size=1 on the selected CUDA device. "
+            "Use a less busy GPU or reduce max_long_side."
+        )
     print(f"[batch-autotune] light_cache_batch_size={best} max_candidate={max_batch_size}", file=sys.stderr, flush=True)
     return best
 

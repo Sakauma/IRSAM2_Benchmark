@@ -458,6 +458,7 @@ def _run_jobs(
                 continue
             env = fr._build_env(paths)
             env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+            env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
             job.log_path.parent.mkdir(parents=True, exist_ok=True)
             handle = job.log_path.open("w", encoding="utf-8")
             handle.write(f"$ {' '.join(command)}\n\n")
@@ -744,10 +745,14 @@ def main(argv: list[str] | None = None) -> int:
             m9["stage_defaults"].setdefault(role, {})
             m9["stage_defaults"][role]["epochs"] = 1
             m9["stage_defaults"][role]["checkpoint_interval_epochs"] = 1
+            m9["stage_defaults"][role]["batch_size"] = 1
+            m9["stage_defaults"][role]["light_cache_batch_size"] = 1
+            m9["stage_defaults"][role]["gradient_accumulation_steps"] = 1
             m9["stage_defaults"][role]["light_cache_max_samples"] = 32
             m9["stage_defaults"][role]["light_cache_samples_per_epoch"] = 32
             m9["stage_defaults"][role]["max_steps_per_epoch"] = 2
             m9["stage_defaults"][role]["validation_max_batches"] = 1
+            m9["stage_defaults"][role]["max_long_side"] = 256
         m9.setdefault("selector", {})
         m9["selector"]["max_samples"] = min(int(m9["selector"].get("max_samples", 16)), 16)
 

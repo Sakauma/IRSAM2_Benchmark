@@ -155,6 +155,8 @@ runner 已支持：
 - RBGT split 已存在时自动复用，不会重复导出。
 - RBGT light cache 使用 shard 化磁盘缓存，首次构建显示进度条，后续运行显示 cache hit 并复用。
 - 多进程同时启动同一份 RBGT cache 时使用构建锁，避免重复构建。
+- 正式训练使用 light-cache batch autotune，避免 PromptNetV3-FPN 在 24GB GPU 上固定 batch 过大导致 OOM。
+- smoke 训练固定为小显存配置，用于验证流程，不代表正式训练吞吐。
 - RBGT pretrain checkpoint 自动注入 staged fine-tune。
 - pretrain checkpoint 只作为 `M9-B` 评估对象；`M9-C/M9-E/M9-G` 只评估 final fine-tune checkpoint。
 - `--stage select/eval/analysis` 可以从已有训练目录重建任务上下文。
