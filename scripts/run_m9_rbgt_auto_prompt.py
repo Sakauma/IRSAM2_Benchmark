@@ -11,8 +11,8 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from irsam2_benchmark.benchmark.auto_prompt_runner import main as auto_prompt_main  # noqa: E402
+from irsam2_benchmark.benchmark.m9_runner import main  # noqa: E402
 
 
 if __name__ == "__main__":
-    raise SystemExit(auto_prompt_main())
+    raise SystemExit(main())

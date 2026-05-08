@@ -57,47 +57,69 @@ M9 成功后，论文主线应调整为：
 
 - `scripts/run_m9_rbgt_auto_prompt.py`
   - M9 专用入口。
-  - 当前复用现有 auto-prompt runner，因此保留已有 8 卡并行训练、8 卡评估、断点跳过和 manifest 机制。
+  - 负责 RBGT split 导出、RBGT box pretrain、public IR fine-tune、checkpoint 选择、public IR eval 和 analysis。
+  - 支持 `--stage export/pretrain/finetune/select/eval/analysis/all`，可以断点续跑单个阶段。
+  - 训练和评估都使用 `m9.gpus` 中的 GPU 列表。
 
 - `scripts/select_auto_prompt_checkpoint.py`
-  - 根据 checkpoint history 或外部 metrics CSV 选择 M9 checkpoint。
-  - 支持 prompt-centric score。
+  - 根据 checkpoint history、外部 metrics CSV 或 prompt-validation 数据集选择 M9 checkpoint。
+  - mask 数据集使用 PromptHitRate、TargetRecallIoU25、PromptTopKHitRate、PromptBoxCoverage 和 FalseAlarmPixelsPerMP 综合打分。
+  - box-only 数据集使用 PromptPointInBBox、PromptTopKInBBox 和 PromptBoxBBoxIoU 打分。
+
+- `configs/server_auto_prompt_4090x8_m9_full.example.yaml`
+  - M9 完整实验配置。
+  - 包含 M9-A 到 M9-G 的默认变体定义所需字段。
+  - RBGT-Tiny 标注路径使用 `annotations_voc`，导出的 COCO split 写在 RBGT-Tiny 同目录下。
+  - `artifact_subdir` 为 `sam2_ir_qd_m9_full_v1`。
 
 - `configs/server_auto_prompt_4090x8_m9_rbgt_pretrain.example.yaml`
-  - M9 RBGT box pretraining 第一阶段配置。
+  - M9 RBGT box pretraining 第一阶段旧配置。
   - 使用 `ir_prompt_v3_fpn`。
-  - 训练 GPU 使用 0-7。
-  - 评估 GPU 使用 0-7。
+  - 仅保留为单阶段调试入口；正式实验优先使用 full 配置。
 
 ## 服务器命令
 
-先导出 RBGT split：
+推荐先跑 smoke：
 
 ```bash
 cd /project/IDIP/MAJ/code/IRSAM2_Benchmark
 
-PYTHONPATH=src python scripts/export_rbgt_tiny_box_coco.py \
-  --root /project/IDIP/Dataset/RBGT-Tiny \
-  --split \
-  --small-target-filter \
-  --overwrite
-```
-
-smoke：
-
-```bash
 PYTHONPATH=src python scripts/run_m9_rbgt_auto_prompt.py \
-  --config configs/server_auto_prompt_4090x8_m9_rbgt_pretrain.example.yaml \
+  --config configs/server_auto_prompt_4090x8_m9_full.example.yaml \
+  --stage all \
   --smoke-test \
+  --variants M9-E \
+  --seeds 42 \
   --stop-on-error \
   --preflight-mode fast
 ```
 
-完整 RBGT pretraining：
+完整 M9：
 
 ```bash
 PYTHONPATH=src python scripts/run_m9_rbgt_auto_prompt.py \
-  --config configs/server_auto_prompt_4090x8_m9_rbgt_pretrain.example.yaml \
+  --config configs/server_auto_prompt_4090x8_m9_full.example.yaml \
+  --stage all \
+  --stop-on-error \
+  --preflight-mode fast
+```
+
+只重跑 eval：
+
+```bash
+PYTHONPATH=src python scripts/run_m9_rbgt_auto_prompt.py \
+  --config configs/server_auto_prompt_4090x8_m9_full.example.yaml \
+  --stage eval \
+  --stop-on-error \
+  --preflight-mode fast
+```
+
+只重做 checkpoint 选择：
+
+```bash
+PYTHONPATH=src python scripts/run_m9_rbgt_auto_prompt.py \
+  --config configs/server_auto_prompt_4090x8_m9_full.example.yaml \
+  --stage select \
   --stop-on-error \
   --preflight-mode fast
 ```
@@ -117,11 +139,20 @@ M9 可以进入论文主线，需要同时满足：
 
 ## 当前工程状态
 
-当前提交实现了 M9 的第一阶段：RBGT split、PromptNetV3-FPN、初始化 checkpoint 支持、M9 pretrain 配置和叙事文档。
+当前工程已经实现 M9 完整编排：
 
-完整 two-stage 自动编排仍需在下一步增强：
+- `M9-A`：PromptNetV2 public-only。
+- `M9-B`：PromptNetV2 RBGT-pretrain-only。
+- `M9-C`：PromptNetV2 RBGT-pretrain -> public fine-tune。
+- `M9-D`：PromptNetV3-FPN public-only。
+- `M9-E`：PromptNetV3-FPN RBGT-pretrain -> public fine-tune，作为主方法候选。
+- `M9-F`：PromptNetV3-FPN public+RBGT mixed。
+- `M9-G`：PromptNetV3-FPN staged no hard-negative。
 
-1. 自动运行 RBGT pretrain。
-2. 自动把 selected RBGT checkpoint 注入 public IR fine-tune。
-3. 自动运行 M9-A 到 M9-G 的完整消融矩阵。
-4. 自动生成 M9 与 M6/M8/第三方模型的对比表。
+runner 已支持：
+
+- RBGT split 已存在时自动复用，不会重复导出。
+- RBGT pretrain checkpoint 自动注入 staged fine-tune。
+- pretrain checkpoint 只作为 `M9-B` 评估对象；`M9-C/M9-E/M9-G` 只评估 final fine-tune checkpoint。
+- `--stage select/eval/analysis` 可以从已有训练目录重建任务上下文。
+- 每次运行写入 `m9_manifest_latest.json`、`m9_variant_summary.csv` 和 `m9_success_gate.json`。
