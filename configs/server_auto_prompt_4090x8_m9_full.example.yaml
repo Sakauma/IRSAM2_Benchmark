@@ -47,6 +47,10 @@ m9:
       best_checkpoint_name: "checkpoint_best.pt"
       batch_size: 8
       light_cache_batch_size: 8
+      light_cache_backend: "disk"
+      light_cache_num_workers: 8
+      light_cache_shard_size: 512
+      light_cache_rebuild: false
       gradient_accumulation_steps: 4
       light_cache_samples_per_epoch: 65536
       learning_rate: 0.0003
@@ -86,6 +90,10 @@ m9:
       best_checkpoint_name: "checkpoint_best.pt"
       batch_size: 8
       light_cache_batch_size: 8
+      light_cache_backend: "disk"
+      light_cache_num_workers: 8
+      light_cache_shard_size: 512
+      light_cache_rebuild: false
       gradient_accumulation_steps: 4
       light_cache_samples_per_epoch: 65536
       learning_rate: 0.0003

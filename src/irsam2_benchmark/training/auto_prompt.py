@@ -5,6 +5,8 @@ import os
 import random
 import sys
 import time
+import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -719,6 +721,7 @@ def _training_progress_bar(
     enabled: bool,
     backend: str,
     mininterval: float,
+    unit: str = "batch",
 ) -> Any | None:
     if not enabled:
         return None
@@ -730,14 +733,14 @@ def _training_progress_bar(
     if backend not in {"auto", "tqdm", "line"}:
         backend = "auto"
     if backend == "line" or (backend == "auto" and not sys.stderr.isatty()):
-        return _LineProgress(desc=desc, total=total, unit="batch", mininterval=mininterval)
+        return _LineProgress(desc=desc, total=total, unit=unit, mininterval=mininterval)
     try:
         from tqdm import tqdm
     except Exception:
         return None
     return tqdm(
         total=total,
-        unit="batch",
+        unit=unit,
         desc=desc,
         dynamic_ncols=True,
         leave=True,
@@ -931,6 +934,126 @@ class LightGrayCache:
     def __len__(self) -> int:
         return len(self.sample_ids)
 
+    def grays_for_indices(self, indices: list[int]) -> list[np.ndarray]:
+        return [self.grays[index] for index in indices]
+
+
+@dataclass
+class DiskLightGrayShard:
+    images_path: Path
+    boxes_path: Path
+    shapes_path: Path
+    meta_path: Path
+    count: int
+    image_array: Any | None = None
+    boxes_array: Any | None = None
+    shapes_array: Any | None = None
+
+    def open(self) -> None:
+        if self.image_array is None:
+            self.image_array = np.load(self.images_path, mmap_mode="r")
+        if self.boxes_array is None:
+            self.boxes_array = np.load(self.boxes_path, mmap_mode="r")
+        if self.shapes_array is None:
+            self.shapes_array = np.load(self.shapes_path, mmap_mode="r")
+
+
+@dataclass
+class DiskLightGrayCache:
+    cache_dir: Path
+    shards: list[DiskLightGrayShard]
+    index_map: list[tuple[int, int]]
+    boxes: list[list[float]]
+    sample_ids: list[str]
+    dataset_ids: list[str]
+    area_buckets: list[str]
+    sample_weights: list[float]
+    supervision_types: list[str]
+    samples: list[Sample]
+    cached_gb: float
+
+    def __len__(self) -> int:
+        return len(self.sample_ids)
+
+    def grays_for_indices(self, indices: list[int]) -> list[np.ndarray]:
+        output: list[np.ndarray] = []
+        for index in indices:
+            shard_index, local_index = self.index_map[index]
+            shard = self.shards[shard_index]
+            shard.open()
+            h, w = [int(value) for value in shard.shapes_array[local_index][:2]]
+            output.append(np.asarray(shard.image_array[local_index, :h, :w], dtype=np.uint8))
+        return output
+
+
+LightCache = LightGrayCache | DiskLightGrayCache
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.ndarray):
+        return None
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _sample_to_light_cache_record(sample: Sample) -> dict[str, Any]:
+    return {
+        "image_path": str(sample.image_path),
+        "sample_id": sample.sample_id,
+        "frame_id": sample.frame_id,
+        "sequence_id": sample.sequence_id,
+        "frame_index": int(sample.frame_index),
+        "temporal_key": sample.temporal_key,
+        "track_id": sample.track_id,
+        "width": int(sample.width),
+        "height": int(sample.height),
+        "category": sample.category,
+        "target_scale": sample.target_scale,
+        "device_source": sample.device_source,
+        "annotation_protocol_flag": sample.annotation_protocol_flag,
+        "supervision_type": sample.supervision_type,
+        "bbox_tight": sample.bbox_tight,
+        "bbox_loose": sample.bbox_loose,
+        "point_prompt": sample.point_prompt,
+        "mask_path": str(sample.mask_path) if sample.mask_path is not None else None,
+        "metadata": _json_safe(sample.metadata),
+    }
+
+
+def _sample_from_light_cache_record(record: dict[str, Any]) -> Sample:
+    return Sample(
+        image_path=Path(str(record["image_path"])),
+        sample_id=str(record["sample_id"]),
+        frame_id=str(record.get("frame_id", record["sample_id"])),
+        sequence_id=str(record.get("sequence_id", "")),
+        frame_index=int(record.get("frame_index", 0)),
+        temporal_key=str(record.get("temporal_key", record.get("frame_id", record["sample_id"]))),
+        track_id=record.get("track_id"),
+        width=int(record.get("width", 0)),
+        height=int(record.get("height", 0)),
+        category=str(record.get("category", "unknown")),
+        target_scale=str(record.get("target_scale", "unknown")),
+        device_source=str(record.get("device_source", "unknown")),
+        annotation_protocol_flag=str(record.get("annotation_protocol_flag", "cached_light_gray")),
+        supervision_type=str(record.get("supervision_type", "bbox")),
+        bbox_tight=record.get("bbox_tight"),
+        bbox_loose=record.get("bbox_loose"),
+        point_prompt=record.get("point_prompt"),
+        mask_path=Path(str(record["mask_path"])) if record.get("mask_path") else None,
+        metadata=dict(record.get("metadata", {})),
+    )
+
 
 def _torch_cache_dtype(torch: Any, name: str) -> Any:
     text = str(name).strip().lower()
@@ -1027,14 +1150,329 @@ def _build_dense_gpu_cache(
     )
 
 
-def _build_light_gray_cache(
+def _light_cache_progress(
+    *,
+    train_cfg: dict[str, Any],
+    desc: str,
+    total: int | None,
+    unit: str = "sample",
+) -> Any | None:
+    return _training_progress_bar(
+        desc=desc,
+        total=total,
+        enabled=bool(train_cfg.get("show_progress", True)),
+        backend=str(train_cfg.get("progress_backend", "auto")),
+        mininterval=float(train_cfg.get("progress_update_interval_s", 1.0)),
+        unit=unit,
+    )
+
+
+def _light_cache_source_fingerprint(config_path: Path, dataset_configs: list[str], train_cfg: dict[str, Any]) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"irsam2-light-gray-cache-v1\n")
+    digest.update(str(int(train_cfg.get("max_long_side", 512))).encode("utf-8"))
+    digest.update(b"\n")
+    digest.update(str(max(0, int(train_cfg.get("light_cache_max_samples", 0)))).encode("utf-8"))
+    digest.update(b"\n")
+    for item in dataset_configs:
+        dataset_config = _resolve_path(config_path.parent, str(item))
+        digest.update(str(dataset_config).encode("utf-8"))
+        digest.update(b"\n")
+        if dataset_config.exists():
+            digest.update(dataset_config.read_bytes())
+        try:
+            app_config = load_app_config(dataset_config)
+            root = Path(str(app_config.dataset.root))
+            ann_dir = root / (app_config.dataset.annotations_dir or "annotations_coco")
+            if app_config.dataset.annotations_file:
+                ann_files = [ann_dir / app_config.dataset.annotations_file]
+            else:
+                ann_files = sorted(ann_dir.glob("*.json")) if ann_dir.exists() else []
+            for ann_path in ann_files:
+                if ann_path.exists():
+                    stat = ann_path.stat()
+                    digest.update(str(ann_path).encode("utf-8"))
+                    digest.update(f":{stat.st_size}:{stat.st_mtime_ns}".encode("utf-8"))
+        except Exception:
+            continue
+    return digest.hexdigest()[:24]
+
+
+def _light_cache_disk_root(config_path: Path, train_cfg: dict[str, Any]) -> Path:
+    configured = train_cfg.get("light_cache_disk_root")
+    if configured:
+        return _resolve_path(config_path.parent, str(configured))
+    raw = _read_yaml(config_path)
+    output_root = _resolve_path(config_path.parent, str(raw.get("output_root", "artifacts/auto_prompt")))
+    return output_root.parent / "cache" / "light_gray"
+
+
+def _disk_cache_manifest_ready(cache_dir: Path) -> bool:
+    manifest_path = cache_dir / "manifest.json"
+    if not manifest_path.exists():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not bool(manifest.get("complete")):
+        return False
+    for shard in manifest.get("shards", []):
+        for key in ("images", "boxes", "shapes", "meta"):
+            if not (cache_dir / str(shard.get(key, ""))).exists():
+                return False
+    return True
+
+
+def _load_disk_light_gray_cache(cache_dir: Path, *, announce: bool = True) -> DiskLightGrayCache | None:
+    if not _disk_cache_manifest_ready(cache_dir):
+        return None
+    manifest = json.loads((cache_dir / "manifest.json").read_text(encoding="utf-8"))
+    shards: list[DiskLightGrayShard] = []
+    index_map: list[tuple[int, int]] = []
+    boxes: list[list[float]] = []
+    sample_ids: list[str] = []
+    dataset_ids: list[str] = []
+    area_buckets: list[str] = []
+    sample_weights: list[float] = []
+    supervision_types: list[str] = []
+    samples: list[Sample] = []
+    for shard_index, shard_payload in enumerate(manifest.get("shards", [])):
+        shard = DiskLightGrayShard(
+            images_path=cache_dir / str(shard_payload["images"]),
+            boxes_path=cache_dir / str(shard_payload["boxes"]),
+            shapes_path=cache_dir / str(shard_payload["shapes"]),
+            meta_path=cache_dir / str(shard_payload["meta"]),
+            count=int(shard_payload["count"]),
+        )
+        meta = json.loads(shard.meta_path.read_text(encoding="utf-8"))
+        records = list(meta.get("records", []))
+        shards.append(shard)
+        for local_index, record in enumerate(records):
+            index_map.append((shard_index, local_index))
+            boxes.append([float(value) for value in record["box"][:4]])
+            sample_ids.append(str(record["sample_id"]))
+            dataset_ids.append(str(record["dataset_id"]))
+            area_buckets.append(str(record["area_bucket"]))
+            sample_weights.append(float(record.get("sample_weight", 1.0)))
+            supervision_types.append(str(record.get("supervision_type", "bbox")))
+            samples.append(_sample_from_light_cache_record(record["sample"]))
+    cache = DiskLightGrayCache(
+        cache_dir=cache_dir,
+        shards=shards,
+        index_map=index_map,
+        boxes=boxes,
+        sample_ids=sample_ids,
+        dataset_ids=dataset_ids,
+        area_buckets=area_buckets,
+        sample_weights=sample_weights,
+        supervision_types=supervision_types,
+        samples=samples,
+        cached_gb=float(manifest.get("cached_gb", 0.0)),
+    )
+    if announce:
+        print(
+            f"[cache-hit] mode=light_gray_disk samples={len(cache)} cached_gb={cache.cached_gb:.2f} dir={cache_dir}",
+            file=sys.stderr,
+            flush=True,
+        )
+    return cache
+
+
+def _acquire_disk_cache_lock(cache_dir: Path, train_cfg: dict[str, Any], *, accept_ready: bool) -> int | None:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = cache_dir / "build.lock"
+    wait_timeout_s = max(1.0, float(train_cfg.get("light_cache_lock_timeout_s", 86400.0)))
+    started_at = time.perf_counter()
+    progress = None
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, f"pid={os.getpid()} started_at={time.time()}\n".encode("utf-8"))
+            if progress is not None:
+                progress.close()
+            return fd
+        except FileExistsError:
+            if progress is None:
+                print(f"[cache-wait] mode=light_gray_disk lock={lock_path}", file=sys.stderr, flush=True)
+                progress = _light_cache_progress(train_cfg=train_cfg, desc="light-cache wait", total=None, unit="s")
+            elapsed = time.perf_counter() - started_at
+            if elapsed > wait_timeout_s:
+                if progress is not None:
+                    progress.close()
+                raise TimeoutError(f"Timed out waiting for light cache lock: {lock_path}")
+            time.sleep(5.0)
+            if progress is not None:
+                progress.set_postfix(waited=f"{elapsed:.0f}s")
+                progress.update(5)
+            if accept_ready and _disk_cache_manifest_ready(cache_dir):
+                if progress is not None:
+                    progress.close()
+                return None
+
+
+def _release_disk_cache_lock(cache_dir: Path, fd: int | None) -> None:
+    if fd is None:
+        return
+    os.close(fd)
+    try:
+        (cache_dir / "build.lock").unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _light_cache_sample_payload(sample: Sample, *, max_long_side: int, train_cfg: dict[str, Any]) -> dict[str, Any]:
+    gray, box = _load_resized_gray_uint8_and_box(sample, max_long_side)
+    return {
+        "gray": gray,
+        "box": box,
+        "sample_id": sample.sample_id,
+        "dataset_id": str(sample.metadata.get("dataset_id", "unknown")),
+        "area_bucket": _sample_area_bucket(sample),
+        "sample_weight": _configured_sample_weight(sample, train_cfg=train_cfg),
+        "supervision_type": sample.supervision_type,
+        "sample": _sample_to_light_cache_record(sample),
+    }
+
+
+def _write_light_cache_shard(cache_dir: Path, shard_index: int, payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    max_h = max(int(item["gray"].shape[0]) for item in payloads)
+    max_w = max(int(item["gray"].shape[1]) for item in payloads)
+    images = np.zeros((len(payloads), max_h, max_w), dtype=np.uint8)
+    boxes = np.zeros((len(payloads), 4), dtype=np.float32)
+    shapes = np.zeros((len(payloads), 2), dtype=np.int32)
+    records: list[dict[str, Any]] = []
+    for index, item in enumerate(payloads):
+        gray = item["gray"]
+        h, w = int(gray.shape[0]), int(gray.shape[1])
+        images[index, :h, :w] = gray
+        boxes[index] = np.asarray(item["box"], dtype=np.float32)
+        shapes[index] = [h, w]
+        records.append(
+            {
+                "sample_id": item["sample_id"],
+                "dataset_id": item["dataset_id"],
+                "area_bucket": item["area_bucket"],
+                "sample_weight": float(item["sample_weight"]),
+                "supervision_type": item["supervision_type"],
+                "box": [float(value) for value in item["box"][:4]],
+                "shape": [h, w],
+                "sample": item["sample"],
+            }
+        )
+    prefix = f"shard_{shard_index:06d}"
+    images_name = f"{prefix}_images.npy"
+    boxes_name = f"{prefix}_boxes.npy"
+    shapes_name = f"{prefix}_shapes.npy"
+    meta_name = f"{prefix}_meta.json"
+    np.save(cache_dir / images_name, images)
+    np.save(cache_dir / boxes_name, boxes)
+    np.save(cache_dir / shapes_name, shapes)
+    (cache_dir / meta_name).write_text(json.dumps({"records": records}, ensure_ascii=False), encoding="utf-8")
+    return {
+        "images": images_name,
+        "boxes": boxes_name,
+        "shapes": shapes_name,
+        "meta": meta_name,
+        "count": len(payloads),
+        "bytes": int(images.nbytes + boxes.nbytes + shapes.nbytes),
+    }
+
+
+def _collect_light_cache_samples(config_path: Path, dataset_configs: list[str], *, max_samples: int) -> list[Sample]:
+    print(
+        f"[cache-scan] mode=light_gray dataset_configs={len(dataset_configs)} max_samples={max_samples}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return list(_limit_samples(_iter_training_samples(config_path, dataset_configs=dataset_configs), limit=max_samples))
+
+
+def _build_disk_light_gray_cache(
+    *,
+    config_path: Path,
+    dataset_configs: list[str],
+    train_cfg: dict[str, Any],
+) -> DiskLightGrayCache | None:
+    max_long_side = int(train_cfg.get("max_long_side", 512))
+    max_samples = max(0, int(train_cfg.get("light_cache_max_samples", 0)))
+    cache_root = _light_cache_disk_root(config_path, train_cfg)
+    cache_key = _light_cache_source_fingerprint(config_path, dataset_configs, train_cfg)
+    cache_dir = cache_root / cache_key
+    rebuild = _bool_setting(train_cfg.get("light_cache_rebuild"), default=False)
+    if not rebuild:
+        hit = _load_disk_light_gray_cache(cache_dir)
+        if hit is not None:
+            return hit
+    lock_fd = _acquire_disk_cache_lock(cache_dir, train_cfg, accept_ready=not rebuild)
+    if lock_fd is None and not rebuild:
+        return _load_disk_light_gray_cache(cache_dir)
+    try:
+        if not rebuild:
+            hit = _load_disk_light_gray_cache(cache_dir)
+            if hit is not None:
+                return hit
+        started_at = time.perf_counter()
+        samples = _collect_light_cache_samples(config_path, dataset_configs, max_samples=max_samples)
+        if not samples:
+            return None
+        shard_size = max(1, int(train_cfg.get("light_cache_shard_size", 512)))
+        worker_count = max(1, int(train_cfg.get("light_cache_num_workers", 8)))
+        progress = _light_cache_progress(train_cfg=train_cfg, desc="light-cache build disk", total=len(samples), unit="sample")
+        shards: list[dict[str, Any]] = []
+        cached_bytes = 0
+        try:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                for shard_start in range(0, len(samples), shard_size):
+                    shard_samples = samples[shard_start : shard_start + shard_size]
+                    payloads: list[dict[str, Any] | None] = [None] * len(shard_samples)
+                    futures = {
+                        executor.submit(_light_cache_sample_payload, sample, max_long_side=max_long_side, train_cfg=train_cfg): index
+                        for index, sample in enumerate(shard_samples)
+                    }
+                    for future in as_completed(futures):
+                        index = futures[future]
+                        payload = future.result()
+                        payloads[index] = payload
+                        cached_bytes += int(payload["gray"].nbytes)
+                        if progress is not None:
+                            progress.set_postfix(backend="disk", cached_gb=f"{cached_bytes / float(1024**3):.2f}")
+                            progress.update(1)
+                    shard_payloads = [item for item in payloads if item is not None]
+                    shards.append(_write_light_cache_shard(cache_dir, len(shards), shard_payloads))
+        finally:
+            if progress is not None:
+                progress.close()
+        manifest = {
+            "version": 1,
+            "complete": True,
+            "created_at": time.time(),
+            "cache_key": cache_key,
+            "max_long_side": max_long_side,
+            "max_samples": max_samples,
+            "sample_count": len(samples),
+            "cached_gb": cached_bytes / float(1024**3),
+            "shards": [{key: value for key, value in shard.items() if key != "bytes"} for shard in shards],
+        }
+        (cache_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        elapsed = time.perf_counter() - started_at
+        print(
+            f"[cache-build] mode=light_gray_disk samples={len(samples)} shards={len(shards)} "
+            f"cached_gb={manifest['cached_gb']:.2f} elapsed={elapsed:.1f}s dir={cache_dir}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return _load_disk_light_gray_cache(cache_dir, announce=False)
+    finally:
+        _release_disk_cache_lock(cache_dir, lock_fd)
+
+
+def _build_memory_light_gray_cache(
     *,
     config_path: Path,
     dataset_configs: list[str],
     train_cfg: dict[str, Any],
 ) -> LightGrayCache | None:
-    if not dataset_configs:
-        return None
     max_long_side = int(train_cfg.get("max_long_side", 512))
     max_samples = max(0, int(train_cfg.get("light_cache_max_samples", 0)))
     started_at = time.perf_counter()
@@ -1046,19 +1484,34 @@ def _build_light_gray_cache(
     sample_weights: list[float] = []
     supervision_types: list[str] = []
     samples: list[Sample] = []
-    for sample in _limit_samples(_iter_training_samples(config_path, dataset_configs=dataset_configs), limit=max_samples):
-        gray, box = _load_resized_gray_uint8_and_box(sample, max_long_side)
-        grays.append(gray)
-        boxes.append(box)
-        sample_ids.append(sample.sample_id)
-        dataset_ids.append(str(sample.metadata.get("dataset_id", "unknown")))
-        area_buckets.append(_sample_area_bucket(sample))
-        sample_weights.append(_configured_sample_weight(sample, train_cfg=train_cfg))
-        supervision_types.append(sample.supervision_type)
-        samples.append(sample)
+    progress = _light_cache_progress(
+        train_cfg=train_cfg,
+        desc="light-cache build memory",
+        total=max_samples if max_samples > 0 else None,
+        unit="sample",
+    )
+    cached_bytes = 0
+    try:
+        for sample in _limit_samples(_iter_training_samples(config_path, dataset_configs=dataset_configs), limit=max_samples):
+            gray, box = _load_resized_gray_uint8_and_box(sample, max_long_side)
+            grays.append(gray)
+            boxes.append(box)
+            sample_ids.append(sample.sample_id)
+            dataset_ids.append(str(sample.metadata.get("dataset_id", "unknown")))
+            area_buckets.append(_sample_area_bucket(sample))
+            sample_weights.append(_configured_sample_weight(sample, train_cfg=train_cfg))
+            supervision_types.append(sample.supervision_type)
+            samples.append(sample)
+            cached_bytes += int(gray.nbytes)
+            if progress is not None:
+                progress.set_postfix(backend="memory", cached_gb=f"{cached_bytes / float(1024**3):.2f}")
+                progress.update(1)
+    finally:
+        if progress is not None:
+            progress.close()
     if not grays:
         return None
-    cached_gb = sum(int(gray.nbytes) for gray in grays) / float(1024**3)
+    cached_gb = cached_bytes / float(1024**3)
     elapsed = time.perf_counter() - started_at
     dataset_counts: dict[str, int] = {}
     for dataset_id in dataset_ids:
@@ -1082,8 +1535,24 @@ def _build_light_gray_cache(
     )
 
 
+def _build_light_gray_cache(
+    *,
+    config_path: Path,
+    dataset_configs: list[str],
+    train_cfg: dict[str, Any],
+) -> LightCache | None:
+    if not dataset_configs:
+        return None
+    backend = str(train_cfg.get("light_cache_backend", "memory")).strip().lower()
+    if backend == "auto":
+        backend = "disk" if any("rbgt" in str(item).lower() for item in dataset_configs) else "memory"
+    if backend in {"disk", "file", "mmap"}:
+        return _build_disk_light_gray_cache(config_path=config_path, dataset_configs=dataset_configs, train_cfg=train_cfg)
+    return _build_memory_light_gray_cache(config_path=config_path, dataset_configs=dataset_configs, train_cfg=train_cfg)
+
+
 def _light_cache_batch(
-    cache: LightGrayCache,
+    cache: LightCache,
     indices: list[int],
     *,
     torch: Any,
@@ -1092,7 +1561,7 @@ def _light_cache_batch(
     target_cfg: dict[str, Any],
     model_cfg: AutoPromptModelConfig,
 ) -> dict[str, Any]:
-    selected = [cache.grays[index] for index in indices]
+    selected = cache.grays_for_indices(indices)
     max_h = max(int(gray.shape[0]) for gray in selected)
     max_w = max(int(gray.shape[1]) for gray in selected)
     if all(int(gray.shape[0]) == max_h and int(gray.shape[1]) == max_w for gray in selected):
@@ -1141,7 +1610,7 @@ def _light_cache_batch(
         "area_buckets": [cache.area_buckets[index] for index in indices],
         "supervision_types": [cache.supervision_types[index] for index in indices],
         "samples": [cache.samples[index] for index in indices],
-        "source": "light_cache",
+        "source": "light_cache_disk" if isinstance(cache, DiskLightGrayCache) else "light_cache",
     }
 
 
@@ -1275,7 +1744,7 @@ def _autotune_light_batch_size(
     F: Any,
     model: Any,
     optimizer: Any,
-    cache: LightGrayCache | None,
+    cache: LightCache | None,
     train_cfg: dict[str, Any],
     target_cfg: dict[str, Any],
     model_cfg: AutoPromptModelConfig,
@@ -1372,7 +1841,7 @@ def _weighted_choice(rng: random.Random, items: list[Any], weights: list[float])
 
 
 def _sample_balanced_light_indices(
-    cache: LightGrayCache,
+    cache: LightCache,
     train_indices: list[int],
     *,
     limit: int,
@@ -1453,7 +1922,7 @@ def _evaluate_cache_selection_metric(
     model: Any,
     dense_cache: DenseGpuCache | None,
     dense_indices: list[int],
-    light_cache: LightGrayCache | None,
+    light_cache: LightCache | None,
     light_indices: list[int],
     batch_size: int,
     light_batch_size: int,

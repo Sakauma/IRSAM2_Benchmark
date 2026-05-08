@@ -70,6 +70,7 @@ M9 成功后，论文主线应调整为：
   - M9 完整实验配置。
   - 包含 M9-A 到 M9-G 的默认变体定义所需字段。
   - RBGT-Tiny 标注路径使用 `annotations_voc`，导出的 COCO split 写在 RBGT-Tiny 同目录下。
+  - RBGT pretrain 和 mixed 阶段默认使用 disk light cache，并显示 cache 构建进度。
   - `artifact_subdir` 为 `sam2_ir_qd_m9_full_v1`。
 
 - `configs/server_auto_prompt_4090x8_m9_rbgt_pretrain.example.yaml`
@@ -152,6 +153,8 @@ M9 可以进入论文主线，需要同时满足：
 runner 已支持：
 
 - RBGT split 已存在时自动复用，不会重复导出。
+- RBGT light cache 使用 shard 化磁盘缓存，首次构建显示进度条，后续运行显示 cache hit 并复用。
+- 多进程同时启动同一份 RBGT cache 时使用构建锁，避免重复构建。
 - RBGT pretrain checkpoint 自动注入 staged fine-tune。
 - pretrain checkpoint 只作为 `M9-B` 评估对象；`M9-C/M9-E/M9-G` 只评估 final fine-tune checkpoint。
 - `--stage select/eval/analysis` 可以从已有训练目录重建任务上下文。
