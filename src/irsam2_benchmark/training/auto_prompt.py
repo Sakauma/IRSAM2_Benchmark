@@ -6,9 +6,10 @@ import random
 import sys
 import time
 import hashlib
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -957,6 +958,14 @@ class DiskLightGrayShard:
         if self.shapes_array is None:
             self.shapes_array = np.load(self.shapes_path, mmap_mode="r")
 
+    def close(self) -> None:
+        for attr in ("image_array", "boxes_array", "shapes_array"):
+            array = getattr(self, attr)
+            setattr(self, attr, None)
+            mmap_obj = getattr(array, "_mmap", None)
+            if mmap_obj is not None:
+                mmap_obj.close()
+
 
 @dataclass
 class DiskLightGrayCache:
@@ -971,22 +980,56 @@ class DiskLightGrayCache:
     supervision_types: list[str]
     samples: list[Sample]
     cached_gb: float
+    max_open_shards: int = 64
+    _open_shards: OrderedDict[int, None] = field(default_factory=OrderedDict, init=False, repr=False)
 
     def __len__(self) -> int:
         return len(self.sample_ids)
+
+    def _ensure_open(self, shard_index: int) -> DiskLightGrayShard:
+        shard = self.shards[shard_index]
+        shard.open()
+        if shard_index in self._open_shards:
+            self._open_shards.move_to_end(shard_index)
+        else:
+            self._open_shards[shard_index] = None
+        self._trim_open_shards()
+        return shard
+
+    def _trim_open_shards(self) -> None:
+        limit = max(1, int(self.max_open_shards))
+        while len(self._open_shards) > limit:
+            shard_index, _ = self._open_shards.popitem(last=False)
+            self.shards[shard_index].close()
 
     def grays_for_indices(self, indices: list[int]) -> list[np.ndarray]:
         output: list[np.ndarray] = []
         for index in indices:
             shard_index, local_index = self.index_map[index]
-            shard = self.shards[shard_index]
-            shard.open()
+            shard = self._ensure_open(shard_index)
             h, w = [int(value) for value in shard.shapes_array[local_index][:2]]
-            output.append(np.asarray(shard.image_array[local_index, :h, :w], dtype=np.uint8))
+            output.append(np.array(shard.image_array[local_index, :h, :w], dtype=np.uint8, copy=True))
         return output
+
+    def close(self) -> None:
+        for shard_index in list(self._open_shards.keys()):
+            self.shards[shard_index].close()
+        self._open_shards.clear()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 LightCache = LightGrayCache | DiskLightGrayCache
+
+
+def _close_light_cache(cache: LightCache | None) -> None:
+    close = getattr(cache, "close", None)
+    if callable(close):
+        close()
 
 
 def _json_safe(value: Any) -> Any:
@@ -1224,7 +1267,12 @@ def _disk_cache_manifest_ready(cache_dir: Path) -> bool:
     return True
 
 
-def _load_disk_light_gray_cache(cache_dir: Path, *, announce: bool = True) -> DiskLightGrayCache | None:
+def _load_disk_light_gray_cache(
+    cache_dir: Path,
+    *,
+    announce: bool = True,
+    max_open_shards: int = 64,
+) -> DiskLightGrayCache | None:
     if not _disk_cache_manifest_ready(cache_dir):
         return None
     manifest = json.loads((cache_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -1269,10 +1317,12 @@ def _load_disk_light_gray_cache(cache_dir: Path, *, announce: bool = True) -> Di
         supervision_types=supervision_types,
         samples=samples,
         cached_gb=float(manifest.get("cached_gb", 0.0)),
+        max_open_shards=max(1, int(max_open_shards)),
     )
     if announce:
         print(
-            f"[cache-hit] mode=light_gray_disk samples={len(cache)} cached_gb={cache.cached_gb:.2f} dir={cache_dir}",
+            f"[cache-hit] mode=light_gray_disk samples={len(cache)} cached_gb={cache.cached_gb:.2f} "
+            f"max_open_shards={cache.max_open_shards} dir={cache_dir}",
             file=sys.stderr,
             flush=True,
         )
@@ -1396,20 +1446,21 @@ def _build_disk_light_gray_cache(
 ) -> DiskLightGrayCache | None:
     max_long_side = int(train_cfg.get("max_long_side", 512))
     max_samples = max(0, int(train_cfg.get("light_cache_max_samples", 0)))
+    max_open_shards = max(1, int(train_cfg.get("light_cache_max_open_shards", 64)))
     cache_root = _light_cache_disk_root(config_path, train_cfg)
     cache_key = _light_cache_source_fingerprint(config_path, dataset_configs, train_cfg)
     cache_dir = cache_root / cache_key
     rebuild = _bool_setting(train_cfg.get("light_cache_rebuild"), default=False)
     if not rebuild:
-        hit = _load_disk_light_gray_cache(cache_dir)
+        hit = _load_disk_light_gray_cache(cache_dir, max_open_shards=max_open_shards)
         if hit is not None:
             return hit
     lock_fd = _acquire_disk_cache_lock(cache_dir, train_cfg, accept_ready=not rebuild)
     if lock_fd is None and not rebuild:
-        return _load_disk_light_gray_cache(cache_dir)
+        return _load_disk_light_gray_cache(cache_dir, max_open_shards=max_open_shards)
     try:
         if not rebuild:
-            hit = _load_disk_light_gray_cache(cache_dir)
+            hit = _load_disk_light_gray_cache(cache_dir, max_open_shards=max_open_shards)
             if hit is not None:
                 return hit
         started_at = time.perf_counter()
@@ -1450,6 +1501,7 @@ def _build_disk_light_gray_cache(
             "cache_key": cache_key,
             "max_long_side": max_long_side,
             "max_samples": max_samples,
+            "max_open_shards": max_open_shards,
             "sample_count": len(samples),
             "cached_gb": cached_bytes / float(1024**3),
             "shards": [{key: value for key, value in shard.items() if key != "bytes"} for shard in shards],
@@ -1458,11 +1510,12 @@ def _build_disk_light_gray_cache(
         elapsed = time.perf_counter() - started_at
         print(
             f"[cache-build] mode=light_gray_disk samples={len(samples)} shards={len(shards)} "
-            f"cached_gb={manifest['cached_gb']:.2f} elapsed={elapsed:.1f}s dir={cache_dir}",
+            f"cached_gb={manifest['cached_gb']:.2f} max_open_shards={max_open_shards} "
+            f"elapsed={elapsed:.1f}s dir={cache_dir}",
             file=sys.stderr,
             flush=True,
         )
-        return _load_disk_light_gray_cache(cache_dir, announce=False)
+        return _load_disk_light_gray_cache(cache_dir, announce=False, max_open_shards=max_open_shards)
     finally:
         _release_disk_cache_lock(cache_dir, lock_fd)
 
@@ -2532,6 +2585,8 @@ def _train_auto_prompt_cached_from_config(
             }
         },
     )
+    _close_light_cache(light_cache)
+    _close_light_cache(validation_light_cache)
     _write_training_progress_state(
         state_path=progress_state_path,
         events_path=progress_events_path,
