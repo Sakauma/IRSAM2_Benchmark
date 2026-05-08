@@ -19,7 +19,7 @@ from ..data import build_dataset_adapter
 from ..data.prompt_synthesis import clamp_box_xyxy
 from ..data.sample import Sample
 from ..evaluation.heatmaps import write_heatmap_artifact
-from ..models import AutoPromptModelConfig, build_ir_prompt_net, ir_prior_stack, save_auto_prompt_checkpoint
+from ..models import AutoPromptModelConfig, build_ir_prompt_net, count_auto_prompt_parameters, ir_prior_stack, save_auto_prompt_checkpoint
 
 
 def _require_torch():
@@ -761,6 +761,46 @@ def _optional_progress_path(
     if lowered in {"none", "off", "false", "0"}:
         return None
     return _resolve_path(config_path.parent, str(value))
+
+
+def _load_init_checkpoint_if_requested(
+    *,
+    torch: Any,
+    model: Any,
+    config_path: Path,
+    train_cfg: dict[str, Any],
+    model_cfg: AutoPromptModelConfig,
+    device: str,
+) -> str | None:
+    value = train_cfg.get("init_checkpoint")
+    if value is None or str(value).strip() == "":
+        return None
+    if str(value).strip().lower() in {"none", "off", "false", "0"}:
+        return None
+    checkpoint_path = _resolve_path(config_path.parent, str(value))
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Auto prompt init_checkpoint does not exist: {checkpoint_path}")
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint_config = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
+    checkpoint_architecture = str(checkpoint_config.get("architecture", "")).strip().lower()
+    requested_architecture = str(model_cfg.architecture).strip().lower()
+    if checkpoint_architecture and checkpoint_architecture != requested_architecture:
+        raise ValueError(
+            "Auto prompt init_checkpoint architecture mismatch: "
+            f"checkpoint={checkpoint_architecture!r} requested={requested_architecture!r} path={checkpoint_path}"
+        )
+    if not isinstance(checkpoint, dict) or "state_dict" not in checkpoint:
+        raise ValueError(f"Auto prompt init_checkpoint has no state_dict: {checkpoint_path}")
+    model.load_state_dict(checkpoint["state_dict"], strict=True)
+    print(
+        f"[train-init] loaded init_checkpoint={checkpoint_path} architecture={requested_architecture}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return str(checkpoint_path)
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -1505,6 +1545,7 @@ def _checkpoint_epoch_record(
     return {
         "epoch": int(epoch),
         "checkpoint_path": str(checkpoint_path),
+        "checkpoint_size_bytes": checkpoint_path.stat().st_size if checkpoint_path.exists() else 0,
         "metric_name": metric_name,
         "metric_value": float(metric_value),
     }
@@ -1555,6 +1596,8 @@ def _finalize_auto_prompt_training(
         selected_checkpoint_path = checkpoint_path
     if selected_checkpoint_path != checkpoint_path and not selected_checkpoint_path.exists():
         save_auto_prompt_checkpoint(selected_checkpoint_path, model, config=model_cfg, metadata=metadata)
+    checkpoint_size_bytes = checkpoint_path.stat().st_size if checkpoint_path.exists() else 0
+    selected_checkpoint_size_bytes = selected_checkpoint_path.stat().st_size if selected_checkpoint_path.exists() else 0
     heatmap_limit = int(raw.get("heatmaps", {}).get("sample_limit", train_cfg.get("heatmap_sample_limit", 8))) if isinstance(raw.get("heatmaps", {}), dict) else 8
     heatmap_outputs = _write_training_heatmaps(
         output_dir=output_dir,
@@ -1571,7 +1614,9 @@ def _finalize_auto_prompt_training(
         "output_dir": str(output_dir),
         "checkpoint_path": str(checkpoint_path),
         "final_checkpoint_path": str(checkpoint_path),
+        "checkpoint_size_bytes": checkpoint_size_bytes,
         "selected_checkpoint_path": str(selected_checkpoint_path),
+        "selected_checkpoint_size_bytes": selected_checkpoint_size_bytes,
         "best_checkpoint_path": str(selected_checkpoint_path),
         "best_checkpoint_epoch": best_checkpoint_epoch,
         "best_metric_name": best_metric_name,
@@ -1673,6 +1718,14 @@ def _train_auto_prompt_cached_from_config(
         raise RuntimeError("No samples were found for auto prompt cached training.")
 
     model = build_ir_prompt_net(model_cfg).to(device)
+    init_checkpoint_path = _load_init_checkpoint_if_requested(
+        torch=torch,
+        model=model,
+        config_path=config_path,
+        train_cfg=train_cfg,
+        model_cfg=model_cfg,
+        device=device,
+    )
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(train_cfg.get("learning_rate", 3e-4)),
@@ -1978,6 +2031,8 @@ def _train_auto_prompt_cached_from_config(
         best_metric_name=best_metric_name,
         best_metric_value=best_metric_value,
         extra_metadata={
+            "init_checkpoint": init_checkpoint_path,
+            "parameter_count": count_auto_prompt_parameters(model),
             "cache": {
                 "mode": "mixed_gpu_light",
                 "dense_gpu_samples": len(dense_cache) if dense_cache is not None else 0,
@@ -2076,6 +2131,7 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
     model: Any | None = None
     optimizer: Any | None = None
     scaler: Any | None = None
+    init_checkpoint_path: str | None = None
     epochs = max(1, int(train_cfg.get("epochs", 1)))
     show_progress = bool(train_cfg.get("show_progress", True))
     progress_backend = str(train_cfg.get("progress_backend", "auto"))
@@ -2158,6 +2214,14 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
                 data_wait_ms = (batch_ready_at - data_wait_started) * 1000.0
                 if model is None:
                     model = build_ir_prompt_net(model_cfg).to(device)
+                    init_checkpoint_path = _load_init_checkpoint_if_requested(
+                        torch=torch,
+                        model=model,
+                        config_path=config_path,
+                        train_cfg=train_cfg,
+                        model_cfg=model_cfg,
+                        device=device,
+                    )
                     optimizer = torch.optim.AdamW(
                         model.parameters(),
                         lr=float(train_cfg.get("learning_rate", 3e-4)),
@@ -2335,6 +2399,10 @@ def train_auto_prompt_from_config(config_path: str | Path) -> dict[str, Any]:
         best_checkpoint_epoch=best_checkpoint_epoch,
         best_metric_name=best_metric_name,
         best_metric_value=best_metric_value,
+        extra_metadata={
+            "init_checkpoint": init_checkpoint_path,
+            "parameter_count": count_auto_prompt_parameters(model),
+        },
     )
     _write_training_progress_state(
         state_path=progress_state_path,

@@ -1,0 +1,389 @@
+# SAM2-IR-QD M9: RBGT-Tiny box-supervised PromptNetV3-FPN pretraining.
+# This config runs the primary RBGT pretraining stage with 8-GPU parallel seeds
+# and evaluates the selected learned-prompt checkpoints on public IR datasets.
+#
+# Prepare RBGT fixed COCO splits once:
+#   PYTHONPATH=src python scripts/export_rbgt_tiny_box_coco.py \
+#     --root /project/IDIP/Dataset/RBGT-Tiny \
+#     --split \
+#     --small-target-filter \
+#     --overwrite
+#
+# Smoke:
+#   PYTHONPATH=src python scripts/run_m9_rbgt_auto_prompt.py \
+#     --config configs/server_auto_prompt_4090x8_m9_rbgt_pretrain.example.yaml \
+#     --smoke-test \
+#     --stop-on-error \
+#     --preflight-mode fast
+#
+# Full:
+#   PYTHONPATH=src python scripts/run_m9_rbgt_auto_prompt.py \
+#     --config configs/server_auto_prompt_4090x8_m9_rbgt_pretrain.example.yaml \
+#     --stop-on-error \
+#     --preflight-mode fast
+
+benchmark:
+  suite_name: "server_auto_prompt_4090x8_m9_rbgt_box_pretrain_v1"
+  artifact_subdir: "sam2_ir_qd_m9_rbgt_box_pretrain_v1"
+
+auto_prompt:
+  experiment_id: "sam2_ir_qd_m9_rbgt_box_pretrain_v1"
+  artifact_subdir: "sam2_ir_qd_m9_rbgt_box_pretrain_v1"
+  train_gpu: "0"
+  train_gpus: ["0", "1", "2", "3", "4", "5", "6", "7"]
+  eval_gpus: ["0", "1", "2", "3", "4", "5", "6", "7"]
+  train_seeds: [42, 123, 456]
+  train_datasets: ["rbgt_tiny_ir_box_m9_train"]
+  validation_datasets: ["rbgt_tiny_ir_box_m9_val"]
+  gpu_cache_datasets: []
+  light_cache_datasets: ["rbgt_tiny_ir_box_m9_train"]
+  eval_suites: ["auto_prompt_m9_rbgt_pretrain"]
+  checkpoint_name: "checkpoint.pt"
+  top_k: 5
+  point_budget: 1
+  response_threshold: 0.15
+  nms_radius: 4
+  border_suppression_px: 4
+  prompt_reranker:
+    window_sizes: [9, 17, 33]
+    use_frequency: true
+    use_mask_feedback: true
+    max_feedback_candidates: 5
+    box_scales: [1.0, 1.5, 2.0, 3.0]
+    min_area_ratio: 0.000001
+    max_area_ratio: 0.02
+    box_enable_margin: 0.02
+    box_enable_min_score: 0.0
+    box_enable_min_point_feedback_score: 0.0
+  train:
+    device: "cuda"
+    seed: 42
+    epochs: 40
+    checkpoint_interval_epochs: 5
+    select_best_checkpoint: true
+    selection_metric: "val_loss"
+    validation_ratio: 0.0
+    validation_seed: 20260509
+    best_checkpoint_name: "checkpoint_best.pt"
+    batch_size: 8
+    light_cache_batch_size: 8
+    gradient_accumulation_steps: 4
+    light_cache_samples_per_epoch: 65536
+    learning_rate: 0.0003
+    weight_decay: 0.0001
+    objectness_loss: "balanced_focal"
+    focal_alpha: 0.75
+    focal_gamma: 2.0
+    max_positive_weight: 256.0
+    ranking_loss_weight: 0.25
+    ranking_margin: 1.0
+    ranking_negative_top_k: 32
+    heuristic_distill_weight: 0.05
+    box_loss_weight: 0.1
+    max_long_side: 512
+    max_samples: 0
+    num_workers: 0
+    cache_dtype: "float16"
+    use_amp: true
+    profile_interval_batches: 200
+    show_progress: true
+    progress_backend: "tqdm"
+    progress_update_interval_s: 1.0
+    heatmap_sample_limit: 16
+  model:
+    architecture: "ir_prompt_v3_fpn"
+    input_channels: 3
+    hidden_channels: 48
+    fpn_channels: 64
+    depth: 6
+    dropout: 0.0
+    min_box_side: 2.0
+    negative_ring_offset: 4.0
+    use_local_contrast: true
+    use_top_hat: true
+  target:
+    gaussian_sigma: 2.0
+    positive_radius: 1
+    hard_negative_weight: 2.0
+    hard_negative_percentile: 95.0
+  heatmaps:
+    sample_limit: 16
+    eval_enabled: true
+    eval_sample_limit: 16
+
+paths:
+  sam2:
+    repo: "/project/IDIP/MAJ/code/sam2"
+    checkpoint_root: "/project/IDIP/MAJ/code/sam2/checkpoints"
+  artifacts:
+    root: "artifacts"
+  reference_results:
+    root: "reference_results"
+  datasets:
+    nuaa_sirst: "/project/IDIP/MAJ/dataset/data/NUAA-SIRST"
+    nudt_sirst: "/project/IDIP/MAJ/dataset/data/NUDT-SIRST"
+    irstd_1k: "/project/IDIP/MAJ/dataset/data/IRSTD-1k"
+    rbgt_tiny_ir_box_m9_train: "/project/IDIP/Dataset/RBGT-Tiny"
+    rbgt_tiny_ir_box_m9_val: "/project/IDIP/Dataset/RBGT-Tiny"
+    rbgt_tiny_ir_box_m9_test: "/project/IDIP/Dataset/RBGT-Tiny"
+    multimodal_small_test: "/project/IDIP/MAJ/dataset/data/MultiModal"
+
+model_defaults:
+  model_id: "sam2.1_hiera_large"
+  family: "sam2"
+  cfg: "configs/sam2.1/sam2.1_hiera_l.yaml"
+  ckpt: "checkpoints/sam2.1_hiera_large.pt"
+  repo: ""
+
+runtime_defaults:
+  artifact_root: "artifacts"
+  reference_results_root: "reference_results"
+  output_name: "sam2_ir_qd_m9_rbgt_box_pretrain_v1/default"
+  device: "cuda"
+  num_workers: 0
+  smoke_test: false
+  max_samples: 0
+  max_images: 0
+  save_visuals: true
+  visual_limit: 24
+  update_reference_results: false
+  seeds: [42]
+  image_batch_size: 1
+  reuse_image_embedding: true
+  max_prompts_per_image_batch: 128
+  auto_mask_points_per_batch: 128
+  batch_oom_fallback: true
+  show_progress: true
+  progress_update_interval_s: 1.0
+  profile_eval: true
+
+runtime:
+  device: "cuda"
+  seeds: [42]
+  reuse_image_embedding: true
+  max_prompts_per_image_batch: 128
+  save_visuals: true
+  visual_limit: 24
+  update_reference_results: false
+  profile_eval: true
+
+smoke_test_runtime:
+  smoke_test: true
+  max_samples: 10
+  max_images: 10
+  visual_limit: 4
+  seeds: [42]
+
+evaluation_defaults:
+  benchmark_version: "irsam2-paper-v1-auto-prompt"
+  track: "track_a_image_prompted"
+  protocol: "ir_auto_prompt_e2"
+  inference_mode: "box"
+  split_version: "paper_split_v1"
+  prompt_policy_version: "paper_prompt_policy_v1"
+  metric_schema_version: "paper_metric_schema_v1"
+  reference_result_version: "paper_reference_results_v1"
+  prompt_policy:
+    name: "paper_default_ir_prompt"
+    prompt_type: "box"
+    prompt_source: "gt"
+    prompt_budget: 1
+    refresh_interval: null
+    multi_mask: false
+    notes: "Default prompt policy; each method overrides it."
+
+datasets:
+  nuaa_sirst:
+    root_env: "NUAA_SIRST_ROOT"
+    config:
+      dataset_id: "NUAA-SIRST"
+      adapter: "generic_image_mask"
+      root: "datasets/NUAA-SIRST"
+      modality: "ir"
+      images_dir: "images"
+      masks_dir: "masks"
+      mask_mode: "binary"
+      class_map: {}
+  nudt_sirst:
+    root_env: "NUDT_SIRST_ROOT"
+    config:
+      dataset_id: "NUDT-SIRST"
+      adapter: "generic_image_mask"
+      root: "datasets/NUDT-SIRST"
+      modality: "ir"
+      images_dir: "images"
+      masks_dir: "masks"
+      mask_mode: "binary"
+      class_map: {}
+  irstd_1k:
+    root_env: "IRSTD_1K_ROOT"
+    config:
+      dataset_id: "IRSTD-1K"
+      adapter: "generic_image_mask"
+      root: "datasets/IRSTD-1K"
+      modality: "ir"
+      images_dir: "images"
+      masks_dir: "masks"
+      mask_mode: "binary"
+      class_map: {}
+  rbgt_tiny_ir_box_m9_train:
+    root_env: "RBGT_TINY_ROOT"
+    config:
+      dataset_id: "RBGT-Tiny-Box-Train"
+      adapter: "coco_like"
+      root: "datasets/RBGT-Tiny"
+      modality: "ir"
+      images_dir: "images"
+      annotations_dir: "annotations_coco_ir_box_m9_train"
+      annotations_file: "instances_rbgt_tiny_ir_box_train.json"
+      mask_mode: "auto"
+      class_map: {}
+  rbgt_tiny_ir_box_m9_val:
+    root_env: "RBGT_TINY_ROOT"
+    config:
+      dataset_id: "RBGT-Tiny-Box-Val"
+      adapter: "coco_like"
+      root: "datasets/RBGT-Tiny"
+      modality: "ir"
+      images_dir: "images"
+      annotations_dir: "annotations_coco_ir_box_m9_val"
+      annotations_file: "instances_rbgt_tiny_ir_box_val.json"
+      mask_mode: "auto"
+      class_map: {}
+  rbgt_tiny_ir_box_m9_test:
+    root_env: "RBGT_TINY_ROOT"
+    config:
+      dataset_id: "RBGT-Tiny-Box-Test"
+      adapter: "coco_like"
+      root: "datasets/RBGT-Tiny"
+      modality: "ir"
+      images_dir: "images"
+      annotations_dir: "annotations_coco_ir_box_m9_test"
+      annotations_file: "instances_rbgt_tiny_ir_box_test.json"
+      mask_mode: "auto"
+      class_map: {}
+  multimodal_small_test:
+    root_env: "MULTIMODAL_DATASET_ROOT"
+    config:
+      dataset_id: "MultiModal-SmallTarget-Test"
+      adapter: "coco_like"
+      root: "datasets/MultiModal"
+      modality: "ir"
+      images_dir: "img"
+      annotations_dir: "annotations_coco_small_target_test"
+      annotations_file: "instances_multimodal_small_target_test.json"
+      mask_mode: "auto"
+      class_map: {}
+
+methods:
+  sam2_box_oracle:
+    baseline: "sam2_pretrained_box_prompt"
+    method:
+      name: "sam2_box_oracle"
+      family: "sam2_oracle_prompt"
+      modality: "ir"
+      box_variant: "loose"
+    evaluation:
+      inference_mode: "box"
+      prompt_policy:
+        name: "mask_derived_loose_box"
+        prompt_type: "box"
+        prompt_source: "gt"
+        prompt_budget: 1
+        notes: "SAM2 with adaptive loose box derived from GT mask."
+  sam2_box_point_oracle:
+    baseline: "sam2_pretrained_box_point_prompt"
+    method:
+      name: "sam2_box_point_oracle"
+      family: "sam2_oracle_prompt"
+      modality: "ir"
+      box_variant: "loose"
+      point_variant: "foreground_centroid"
+    evaluation:
+      inference_mode: "box+point"
+      prompt_policy:
+        name: "mask_derived_loose_box_centroid_point"
+        prompt_type: "box+point"
+        prompt_source: "gt"
+        prompt_budget: 2
+        notes: "SAM2 with loose box and centroid point derived from GT mask."
+
+models:
+  - alias: "large"
+    model_id: "sam2.1_hiera_large"
+    family: "sam2"
+    cfg: "configs/sam2.1/sam2.1_hiera_l.yaml"
+    ckpt: "checkpoints/sam2.1_hiera_large.pt"
+    runtime:
+      image_batch_size: 1
+      max_prompts_per_image_batch: 128
+      auto_mask_points_per_batch: 128
+
+modes:
+  - method: "sam2_heuristic_auto_box_point"
+    alias: "heuristic_box_point"
+  - method: "sam2_box_oracle"
+    alias: "oracle_box"
+  - method: "sam2_box_point_oracle"
+    alias: "oracle_box_point"
+  - method: "sam2_learned_auto_point"
+    alias: "learned_point"
+  - method: "sam2_learned_auto_point_rerank"
+    alias: "learned_point_rerank"
+  - method: "sam2_ir_fa_rerank"
+    alias: "m9_fa_rerank"
+  - method: "sam2_ir_fa_rerank_feedback_only"
+    alias: "m9_feedback_only"
+
+analysis:
+  primary_metric: "mIoU"
+  metrics: ["mIoU", "Dice", "BoundaryF1Tol1", "TargetRecallIoU25", "FalseAlarmPixelsPerMP", "PromptHitRate", "PromptTopKHitRate", "PromptBoxCoverage", "LatencyMs"]
+  lower_is_better: ["FalseAlarmPixelsPerMP", "LatencyMs"]
+  statistics:
+    n_bootstrap: 10000
+    ci: 0.95
+    random_seed: 42
+    comparisons:
+      - name: "m9_fa_rerank_vs_learned_point"
+        baseline: "sam2_learned_auto_point"
+        candidate: "sam2_ir_fa_rerank"
+      - name: "m9_feedback_only_vs_fa_rerank"
+        baseline: "sam2_ir_fa_rerank"
+        candidate: "sam2_ir_fa_rerank_feedback_only"
+
+suites:
+  auto_prompt_m9_rbgt_pretrain:
+    enabled: true
+    experiment_id: "E9_rbgt_box_pretrain"
+    purpose: "M9 evaluation for RBGT-Tiny box-supervised PromptNetV3-FPN pretraining."
+    checkpoints: ["large"]
+    modes:
+      - "sam2_heuristic_auto_box_point"
+      - "sam2_box_oracle"
+      - "sam2_box_point_oracle"
+      - "sam2_learned_auto_point"
+      - "sam2_learned_auto_point_rerank"
+      - "sam2_ir_fa_rerank"
+      - "sam2_ir_fa_rerank_feedback_only"
+    datasets: ["nuaa_sirst", "nudt_sirst", "irstd_1k"]
+    run_analysis: true
+    primary_metric: "mIoU"
+    comparisons:
+      - name: "m9_fa_rerank_vs_learned_point"
+        baseline: "sam2_learned_auto_point"
+        candidate: "sam2_ir_fa_rerank"
+      - name: "m9_feedback_only_vs_fa_rerank"
+        baseline: "sam2_ir_fa_rerank"
+        candidate: "sam2_ir_fa_rerank_feedback_only"
+  auto_prompt_m9_rbgt_box_probe:
+    enabled: true
+    experiment_id: "E9_rbgt_box_probe"
+    purpose: "BBox-only RBGT-Tiny prompt probe; do not merge into mask mIoU main table."
+    checkpoints: ["large"]
+    modes:
+      - "sam2_heuristic_auto_box_point"
+      - "sam2_learned_auto_point"
+      - "sam2_ir_fa_rerank"
+    datasets: ["rbgt_tiny_ir_box_m9_test"]
+    run_analysis: false
+    primary_metric: "PromptPointInBBox"

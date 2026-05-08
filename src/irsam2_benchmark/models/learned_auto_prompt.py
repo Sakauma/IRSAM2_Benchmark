@@ -18,6 +18,9 @@ class AutoPromptModelConfig:
     architecture: str = "small"
     input_channels: int = 3
     hidden_channels: int = 16
+    depth: int = 4
+    fpn_channels: int = 64
+    dropout: float = 0.0
     min_box_side: float = 2.0
     negative_ring_offset: float = 4.0
     use_local_contrast: bool = True
@@ -399,10 +402,86 @@ def build_ir_prompt_net(config: AutoPromptModelConfig | dict[str, Any] | None = 
                 "confidence_logits": self.confidence_head(pooled),
             }
 
+    class ConvNormAct(nn.Module):
+        def __init__(self, in_channels: int, out_channels: int, *, stride: int = 1) -> None:
+            super().__init__()
+            self.block = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False),
+                nn.GroupNorm(1, out_channels),
+                nn.GELU(),
+            )
+
+        def forward(self, x):
+            return self.block(x)
+
+    class IRPromptNetV3FPN(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            hidden = int(cfg.hidden_channels)
+            fpn_channels = int(cfg.fpn_channels)
+            depth = max(2, int(cfg.depth))
+            dropout = max(0.0, float(cfg.dropout))
+            self.config = cfg
+            self.model_name = "IRPromptNetV3FPN"
+            self.stem = ConvNormAct(int(cfg.input_channels), hidden)
+            self.stage1 = nn.Sequential(*(ResidualDepthwiseBlock(hidden, expansion=4) for _ in range(max(1, depth // 2))))
+            self.down2 = ConvNormAct(hidden, hidden * 2, stride=2)
+            self.stage2 = nn.Sequential(*(ResidualDepthwiseBlock(hidden * 2, expansion=4) for _ in range(max(1, depth // 2))))
+            self.down4 = ConvNormAct(hidden * 2, hidden * 4, stride=2)
+            self.stage3 = nn.Sequential(*(ResidualDepthwiseBlock(hidden * 4, expansion=4) for _ in range(max(1, depth // 3))))
+            self.lateral1 = nn.Conv2d(hidden, fpn_channels, kernel_size=1)
+            self.lateral2 = nn.Conv2d(hidden * 2, fpn_channels, kernel_size=1)
+            self.lateral3 = nn.Conv2d(hidden * 4, fpn_channels, kernel_size=1)
+            self.fuse = nn.Sequential(
+                ConvNormAct(fpn_channels, fpn_channels),
+                ResidualDepthwiseBlock(fpn_channels, expansion=4),
+                nn.Dropout2d(dropout) if dropout > 0.0 else nn.Identity(),
+            )
+            self.context = MultiScaleContext(fpn_channels)
+            self.attention = SEAttention(fpn_channels)
+            self.objectness_head = nn.Sequential(
+                ConvNormAct(fpn_channels, fpn_channels),
+                nn.Conv2d(fpn_channels, 1, kernel_size=1),
+            )
+            self.box_size_head = nn.Sequential(
+                ConvNormAct(fpn_channels, fpn_channels),
+                nn.Conv2d(fpn_channels, 2, kernel_size=1),
+            )
+            self.confidence_head = nn.Sequential(
+                nn.Linear(fpn_channels, fpn_channels),
+                nn.GELU(),
+                nn.Dropout(dropout) if dropout > 0.0 else nn.Identity(),
+                nn.Linear(fpn_channels, 1),
+            )
+
+        def forward(self, x):
+            feat1 = self.stage1(self.stem(x))
+            feat2 = self.stage2(self.down2(feat1))
+            feat3 = self.stage3(self.down4(feat2))
+            target_size = feat1.shape[-2:]
+            pyramid = self.lateral1(feat1)
+            pyramid = pyramid + F.interpolate(self.lateral2(feat2), size=target_size, mode="bilinear", align_corners=False)
+            pyramid = pyramid + F.interpolate(self.lateral3(feat3), size=target_size, mode="bilinear", align_corners=False)
+            feat = self.fuse(pyramid)
+            feat = feat + self.context(feat)
+            feat = self.attention(feat)
+            pooled = feat.mean(dim=(2, 3))
+            return {
+                "objectness_logits": self.objectness_head(feat),
+                "box_size": F.softplus(self.box_size_head(feat)) + float(cfg.min_box_side),
+                "confidence_logits": self.confidence_head(pooled),
+            }
+
     architecture = str(cfg.architecture).strip().lower()
     if architecture in {"v2", "ir_prompt_v2", "promptnet_v2"}:
         return IRPromptNetV2()
+    if architecture in {"v3", "ir_prompt_v3", "ir_prompt_v3_fpn", "promptnet_v3_fpn"}:
+        return IRPromptNetV3FPN()
     return IRPromptNetSmall()
+
+
+def count_auto_prompt_parameters(model: Any) -> int:
+    return int(sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad))
 
 
 def save_auto_prompt_checkpoint(
@@ -418,13 +497,16 @@ def save_auto_prompt_checkpoint(
     else:
         cfg = config if isinstance(config, AutoPromptModelConfig) else AutoPromptModelConfig(**(config or {}))
     path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_payload = dict(metadata or {})
+    metadata_payload.setdefault("architecture", cfg.architecture)
+    metadata_payload.setdefault("parameter_count", count_auto_prompt_parameters(model))
     torch.save(
         {
             "protocol": LEARNED_IR_AUTO_PROMPT_PROTOCOL,
             "model": str(getattr(model, "model_name", "IRPromptNetSmall")),
             "config": asdict(cfg),
             "state_dict": model.state_dict(),
-            "metadata": metadata or {},
+            "metadata": metadata_payload,
         },
         path,
     )
