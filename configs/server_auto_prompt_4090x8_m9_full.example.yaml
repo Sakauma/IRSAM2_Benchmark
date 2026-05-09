@@ -7,6 +7,13 @@
 #     --rerun-stage \
 #     --stop-on-error \
 #     --preflight-mode fast
+# Four-GPU resume without rerunning completed checkpoints:
+#   PYTHONPATH=src python scripts/run_m9_rbgt_auto_prompt.py \
+#     --config configs/server_auto_prompt_4090x8_m9_full.example.yaml \
+#     --stage all \
+#     --gpus 0,1,2,3 \
+#     --stop-on-error \
+#     --preflight-mode fast
 
 benchmark:
   suite_name: "server_auto_prompt_4090x8_m9_full_v1"

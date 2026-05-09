@@ -88,6 +88,15 @@ def _split_csv(value: str | None) -> set[str] | None:
     return output or None
 
 
+def _split_csv_list(value: str | None) -> list[str] | None:
+    if value is None:
+        return None
+    output = [item.strip() for item in value.split(",") if item.strip()]
+    if not output:
+        raise ValueError("CSV argument must contain at least one non-empty value.")
+    return output
+
+
 def _selected_checkpoint_from_summary(output_dir: Path) -> Path | None:
     summary_path = output_dir / "checkpoint_selection_summary.json"
     if summary_path.exists():
@@ -1149,6 +1158,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stage", choices=("all", "export", "pretrain", "finetune", "select", "eval", "analysis"), default="all")
     parser.add_argument("--variants")
     parser.add_argument("--seeds")
+    parser.add_argument("--gpus", help="Comma-separated physical GPU ids to use for M9 train/eval scheduling, e.g. 0,1,2,3.")
     parser.add_argument("--python-bin", default=sys.executable)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
@@ -1173,7 +1183,9 @@ def main(argv: list[str] | None = None) -> int:
     seeds = [int(item) for item in (_split_csv(args.seeds) or {str(seed) for seed in m9.get("seeds", [42, 123, 456])})]
     seeds = sorted(seeds)
     variants = _split_csv(args.variants)
-    gpus = [str(item) for item in m9.get("gpus", ["0", "1", "2", "3", "4", "5", "6", "7"])]
+    gpus = _split_csv_list(args.gpus) or [str(item) for item in m9.get("gpus", ["0", "1", "2", "3", "4", "5", "6", "7"])]
+    if not gpus:
+        raise ValueError("M9 requires at least one GPU id from --gpus or m9.gpus.")
     if args.smoke_test:
         smoke_runtime = copy.deepcopy(suite_config.get("smoke_test_runtime", {}))
         if smoke_runtime:
@@ -1450,6 +1462,7 @@ def main(argv: list[str] | None = None) -> int:
         "reference_policy": _reference_policy(m9),
         "variants": sorted(variants) if variants else "default",
         "seeds": seeds,
+        "gpus": gpus,
         "export": export_record,
         "export_validation": export_record.get("validation") if isinstance(export_record, dict) else None,
         "train_jobs": [_jsonable_train_job(job) for job in all_jobs],
