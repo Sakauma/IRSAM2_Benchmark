@@ -767,6 +767,91 @@ def _optional_progress_path(
     return _resolve_path(config_path.parent, str(value))
 
 
+def _checkpoint_epoch_from_metadata(metadata: dict[str, Any]) -> int | None:
+    value = metadata.get("epoch")
+    if value is None:
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _checkpoint_epoch_from_path(path: Path) -> int | None:
+    stem = path.stem
+    prefix = "checkpoint_epoch_"
+    if not stem.startswith(prefix):
+        return None
+    try:
+        return max(0, int(stem[len(prefix) :]))
+    except ValueError:
+        return None
+
+
+def _load_checkpoint_payload(*, torch: Any, checkpoint_path: Path, map_location: str | None = None) -> dict[str, Any]:
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=map_location or "cpu", weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=map_location or "cpu")
+    if not isinstance(checkpoint, dict) or "state_dict" not in checkpoint:
+        raise ValueError(f"Auto prompt checkpoint has no state_dict: {checkpoint_path}")
+    return checkpoint
+
+
+def _validate_checkpoint_architecture(
+    *,
+    checkpoint: dict[str, Any],
+    checkpoint_path: Path,
+    model_cfg: AutoPromptModelConfig,
+    label: str,
+) -> None:
+    checkpoint_config = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
+    checkpoint_architecture = str(checkpoint_config.get("architecture", "")).strip().lower()
+    requested_architecture = str(model_cfg.architecture).strip().lower()
+    if checkpoint_architecture and checkpoint_architecture != requested_architecture:
+        raise ValueError(
+            f"Auto prompt {label} architecture mismatch: "
+            f"checkpoint={checkpoint_architecture!r} requested={requested_architecture!r} path={checkpoint_path}"
+        )
+
+
+def _load_auto_prompt_checkpoint_if_requested(
+    *,
+    torch: Any,
+    model: Any,
+    config_path: Path,
+    train_cfg: dict[str, Any],
+    model_cfg: AutoPromptModelConfig,
+    device: str,
+    key: str,
+    label: str,
+) -> tuple[str | None, dict[str, Any]]:
+    value = train_cfg.get(key)
+    if value is None or str(value).strip() == "":
+        return None, {}
+    if str(value).strip().lower() in {"none", "off", "false", "0"}:
+        return None, {}
+    checkpoint_path = _resolve_path(config_path.parent, str(value))
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Auto prompt {label} does not exist: {checkpoint_path}")
+    checkpoint = _load_checkpoint_payload(torch=torch, checkpoint_path=checkpoint_path, map_location=device)
+    _validate_checkpoint_architecture(
+        checkpoint=checkpoint,
+        checkpoint_path=checkpoint_path,
+        model_cfg=model_cfg,
+        label=label,
+    )
+    model.load_state_dict(checkpoint["state_dict"], strict=True)
+    metadata = checkpoint.get("metadata", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    print(
+        f"[train-init] loaded {label}={checkpoint_path} architecture={str(model_cfg.architecture).strip().lower()}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return str(checkpoint_path), metadata
+
+
 def _load_init_checkpoint_if_requested(
     *,
     torch: Any,
@@ -776,35 +861,109 @@ def _load_init_checkpoint_if_requested(
     model_cfg: AutoPromptModelConfig,
     device: str,
 ) -> str | None:
-    value = train_cfg.get("init_checkpoint")
-    if value is None or str(value).strip() == "":
-        return None
-    if str(value).strip().lower() in {"none", "off", "false", "0"}:
-        return None
-    checkpoint_path = _resolve_path(config_path.parent, str(value))
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Auto prompt init_checkpoint does not exist: {checkpoint_path}")
-    try:
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    except TypeError:
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-    checkpoint_config = checkpoint.get("config", {}) if isinstance(checkpoint, dict) else {}
-    checkpoint_architecture = str(checkpoint_config.get("architecture", "")).strip().lower()
-    requested_architecture = str(model_cfg.architecture).strip().lower()
-    if checkpoint_architecture and checkpoint_architecture != requested_architecture:
-        raise ValueError(
-            "Auto prompt init_checkpoint architecture mismatch: "
-            f"checkpoint={checkpoint_architecture!r} requested={requested_architecture!r} path={checkpoint_path}"
-        )
-    if not isinstance(checkpoint, dict) or "state_dict" not in checkpoint:
-        raise ValueError(f"Auto prompt init_checkpoint has no state_dict: {checkpoint_path}")
-    model.load_state_dict(checkpoint["state_dict"], strict=True)
-    print(
-        f"[train-init] loaded init_checkpoint={checkpoint_path} architecture={requested_architecture}",
-        file=sys.stderr,
-        flush=True,
+    checkpoint_path, _ = _load_auto_prompt_checkpoint_if_requested(
+        torch=torch,
+        model=model,
+        config_path=config_path,
+        train_cfg=train_cfg,
+        model_cfg=model_cfg,
+        device=device,
+        key="init_checkpoint",
+        label="init_checkpoint",
     )
-    return str(checkpoint_path)
+    return checkpoint_path
+
+
+def _load_resume_checkpoint_if_requested(
+    *,
+    torch: Any,
+    model: Any,
+    config_path: Path,
+    train_cfg: dict[str, Any],
+    model_cfg: AutoPromptModelConfig,
+    device: str,
+) -> tuple[str | None, int, dict[str, Any]]:
+    checkpoint_path, metadata = _load_auto_prompt_checkpoint_if_requested(
+        torch=torch,
+        model=model,
+        config_path=config_path,
+        train_cfg=train_cfg,
+        model_cfg=model_cfg,
+        device=device,
+        key="resume_checkpoint",
+        label="resume_checkpoint",
+    )
+    if checkpoint_path is None:
+        return None, 0, {}
+    resume_epoch = _checkpoint_epoch_from_metadata(metadata)
+    if resume_epoch is None:
+        resume_epoch = _checkpoint_epoch_from_path(Path(checkpoint_path)) or 0
+    return checkpoint_path, resume_epoch, metadata
+
+
+def _checkpoint_metadata_from_path(*, torch: Any, checkpoint_path: Path) -> dict[str, Any]:
+    try:
+        checkpoint = _load_checkpoint_payload(torch=torch, checkpoint_path=checkpoint_path, map_location="cpu")
+    except Exception:
+        return {}
+    metadata = checkpoint.get("metadata", {})
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _restore_checkpoint_history_from_disk(*, torch: Any, output_dir: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for checkpoint_path in sorted(output_dir.glob("checkpoint_epoch_*.pt")):
+        metadata = _checkpoint_metadata_from_path(torch=torch, checkpoint_path=checkpoint_path)
+        epoch = _checkpoint_epoch_from_metadata(metadata) or _checkpoint_epoch_from_path(checkpoint_path)
+        if epoch is None:
+            continue
+        metric_name = str(metadata.get("metric_name", "loss"))
+        metric_value = _float_or_none(metadata.get("metric_value"))
+        record: dict[str, Any] = {
+            "epoch": int(epoch),
+            "checkpoint_path": str(checkpoint_path),
+            "checkpoint_size_bytes": checkpoint_path.stat().st_size if checkpoint_path.exists() else 0,
+            "metric_name": metric_name,
+            "metric_value": float(metric_value) if metric_value is not None else 0.0,
+        }
+        records.append(record)
+    records.sort(key=lambda item: int(item.get("epoch", 0) or 0))
+    return records
+
+
+def _restore_best_checkpoint_state(
+    *,
+    torch: Any,
+    best_checkpoint_path: Path,
+    checkpoint_history: list[dict[str, Any]],
+) -> tuple[Path | None, int | None, str | None, float | None]:
+    if best_checkpoint_path.exists():
+        metadata = _checkpoint_metadata_from_path(torch=torch, checkpoint_path=best_checkpoint_path)
+        epoch = _checkpoint_epoch_from_metadata(metadata)
+        metric_name = str(metadata.get("metric_name", "")).strip() or None
+        metric_value = _float_or_none(metadata.get("metric_value"))
+        return best_checkpoint_path, epoch, metric_name, metric_value
+    if not checkpoint_history:
+        return None, None, None, None
+    candidates = [record for record in checkpoint_history if record.get("checkpoint_path") and Path(str(record["checkpoint_path"])).exists()]
+    if not candidates:
+        return None, None, None, None
+    best_record = min(candidates, key=lambda item: float(item.get("metric_value", 0.0)))
+    return (
+        Path(str(best_record["checkpoint_path"])),
+        int(best_record.get("epoch", 0) or 0),
+        str(best_record.get("metric_name", "loss")),
+        float(best_record.get("metric_value", 0.0)),
+    )
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -2309,7 +2468,7 @@ def _train_auto_prompt_cached_from_config(
         raise RuntimeError("No samples were found for auto prompt cached training.")
 
     model = build_ir_prompt_net(model_cfg).to(device)
-    init_checkpoint_path = _load_init_checkpoint_if_requested(
+    resume_checkpoint_path, resume_start_epoch, resume_metadata = _load_resume_checkpoint_if_requested(
         torch=torch,
         model=model,
         config_path=config_path,
@@ -2317,6 +2476,16 @@ def _train_auto_prompt_cached_from_config(
         model_cfg=model_cfg,
         device=device,
     )
+    init_checkpoint_path: str | None = None
+    if resume_checkpoint_path is None:
+        init_checkpoint_path = _load_init_checkpoint_if_requested(
+            torch=torch,
+            model=model,
+            config_path=config_path,
+            train_cfg=train_cfg,
+            model_cfg=model_cfg,
+            device=device,
+        )
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(train_cfg.get("learning_rate", 3e-4)),
@@ -2365,11 +2534,15 @@ def _train_auto_prompt_cached_from_config(
     select_best_checkpoint = _bool_setting(train_cfg.get("select_best_checkpoint"), default=checkpoint_interval > 0)
     selection_metric_name = str(train_cfg.get("selection_metric", "val_loss")).strip() or "val_loss"
     best_checkpoint_path = output_dir / str(train_cfg.get("best_checkpoint_name", "checkpoint_best.pt"))
-    checkpoint_history: list[dict[str, Any]] = []
-    selected_checkpoint_path: Path | None = None
-    best_checkpoint_epoch: int | None = None
-    best_metric_name: str | None = None
-    best_metric_value: float | None = None
+    checkpoint_history: list[dict[str, Any]] = _restore_checkpoint_history_from_disk(torch=torch, output_dir=output_dir)
+    selected_checkpoint_path, best_checkpoint_epoch, best_metric_name, best_metric_value = _restore_best_checkpoint_state(
+        torch=torch,
+        best_checkpoint_path=best_checkpoint_path,
+        checkpoint_history=checkpoint_history,
+    )
+    if selected_checkpoint_path is None and resume_checkpoint_path is not None:
+        selected_checkpoint_path = Path(resume_checkpoint_path)
+    start_epoch = min(max(0, int(resume_start_epoch)), epochs)
     history: list[dict[str, float]] = []
     first_epoch_sample_counts: dict[str, int] = {}
     first_epoch_sample_count = 0
@@ -2380,13 +2553,22 @@ def _train_auto_prompt_cached_from_config(
         events_path=progress_events_path,
         experiment_id=experiment_id,
         train_seed=int(raw["train_seed"]) if raw.get("train_seed") is not None else seed,
-        epoch=0,
+        epoch=start_epoch,
         epochs=epochs,
         status="running",
-        phase="training",
+        phase="resuming" if resume_checkpoint_path is not None else "training",
         started_at=progress_started_at,
+        best_checkpoint_epoch=best_checkpoint_epoch,
+        best_metric_name=best_metric_name,
+        best_metric_value=best_metric_value,
     )
-    for epoch in range(epochs):
+    if resume_checkpoint_path is not None:
+        print(
+            f"[train-resume] checkpoint={resume_checkpoint_path} start_epoch={start_epoch} epochs={epochs}",
+            file=sys.stderr,
+            flush=True,
+        )
+    for epoch in range(start_epoch, epochs):
         model.train()
         loss_sum = 0.0
         objectness_sum = 0.0
@@ -2443,7 +2625,7 @@ def _train_auto_prompt_cached_from_config(
             box_sum += box_value
             ranking_sum += ranking_value
             distill_sum += distill_value
-            if epoch == 0:
+            if epoch == start_epoch:
                 _record_batch_counts(batch, first_epoch_sample_counts)
             if len(heatmap_samples) < heatmap_limit:
                 needed = heatmap_limit - len(heatmap_samples)
@@ -2511,10 +2693,10 @@ def _train_auto_prompt_cached_from_config(
                 progress.close()
         if batch_count <= 0:
             raise RuntimeError("No samples with bbox_tight/bbox_loose were found for auto prompt training.")
-        if epoch == 0:
+        if epoch == start_epoch:
             first_epoch_sample_count = epoch_sample_count
             print(
-                f"[train-mix] epoch=1 gpu_cache_batches={dense_batches} light_cache_batches={light_batches} "
+                f"[train-mix] epoch={epoch + 1} gpu_cache_batches={dense_batches} light_cache_batches={light_batches} "
                 f"usable={first_epoch_sample_count}",
                 file=sys.stderr,
                 flush=True,
@@ -2602,6 +2784,21 @@ def _train_auto_prompt_cached_from_config(
             best_metric_value=best_metric_value,
         )
 
+    if not history:
+        fallback_loss = _float_or_none(resume_metadata.get("metric_value") if resume_metadata else None)
+        if fallback_loss is None:
+            fallback_loss = best_metric_value if best_metric_value is not None else 0.0
+        history.append(
+            {
+                "epoch": float(start_epoch),
+                "loss": float(fallback_loss),
+                "objectness_loss": 0.0,
+                "box_loss": 0.0,
+                "ranking_loss": 0.0,
+                "heuristic_distill_loss": 0.0,
+            }
+        )
+
     summary = _finalize_auto_prompt_training(
         config_path=config_path,
         raw=raw,
@@ -2623,6 +2820,11 @@ def _train_auto_prompt_cached_from_config(
         best_metric_value=best_metric_value,
         extra_metadata={
             "init_checkpoint": init_checkpoint_path,
+            "resume_checkpoint": resume_checkpoint_path,
+            "resume_start_epoch": start_epoch,
+            "resume_checkpoint_epoch": resume_start_epoch if resume_checkpoint_path is not None else None,
+            "resume_checkpoint_metric_name": resume_metadata.get("metric_name") if resume_metadata else None,
+            "resume_checkpoint_metric_value": resume_metadata.get("metric_value") if resume_metadata else None,
             "parameter_count": count_auto_prompt_parameters(model),
             "cache": {
                 "mode": "mixed_gpu_light",

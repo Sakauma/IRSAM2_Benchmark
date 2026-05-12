@@ -120,6 +120,65 @@ def _selected_checkpoint_from_summary(output_dir: Path) -> Path | None:
     return None
 
 
+def _checkpoint_epoch_from_path(path: Path) -> int | None:
+    stem = path.stem
+    prefix = "checkpoint_epoch_"
+    if not stem.startswith(prefix):
+        return None
+    try:
+        return max(0, int(stem[len(prefix) :]))
+    except ValueError:
+        return None
+
+
+def _best_checkpoint_epoch_from_progress(output_dir: Path) -> int | None:
+    state_path = output_dir / "train_progress_state.json"
+    if not state_path.exists():
+        return None
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(state, dict):
+        return None
+    for key in ("best_checkpoint_epoch", "epoch"):
+        value = state.get(key)
+        if value is None:
+            continue
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _partial_resume_checkpoint(output_dir: Path) -> tuple[Path, int, str] | None:
+    epoch_checkpoints: list[tuple[int, Path]] = []
+    for checkpoint_path in output_dir.glob("checkpoint_epoch_*.pt"):
+        epoch = _checkpoint_epoch_from_path(checkpoint_path)
+        if epoch is None or not checkpoint_path.exists():
+            continue
+        epoch_checkpoints.append((epoch, checkpoint_path))
+    if epoch_checkpoints:
+        epoch, checkpoint_path = max(epoch_checkpoints, key=lambda item: item[0])
+        return checkpoint_path, epoch, "latest_epoch_checkpoint"
+    best_checkpoint = output_dir / "checkpoint_best.pt"
+    if best_checkpoint.exists():
+        return best_checkpoint, _best_checkpoint_epoch_from_progress(output_dir) or 0, "best_checkpoint"
+    return None
+
+
+def _set_resume_checkpoint(job: TrainJob, checkpoint_path: Path) -> None:
+    payload = _load_yaml(job.config_path)
+    train_cfg = payload.get("train", {})
+    if not isinstance(train_cfg, dict):
+        train_cfg = {}
+    train_cfg = dict(train_cfg)
+    train_cfg["resume_checkpoint"] = str(checkpoint_path)
+    payload["train"] = train_cfg
+    fr._write_yaml(job.config_path, payload)
+
+
 def _expected_rbgt_export_paths(root: Path) -> list[Path]:
     return [
         root / f"annotations_coco_ir_box_m9_{split}" / f"instances_rbgt_tiny_ir_box_{split}.json"
@@ -680,17 +739,28 @@ def _run_jobs(
                     free_gpus.append(str(gpu))
                     _set_train_progress_postfix(progress, active=active, seen_epochs=seen_epochs, counts=progress_counts, queued=len(queue))
                     continue
+                resume_info = None if rerun else _partial_resume_checkpoint(job.output_dir)
+                if resume_info is not None:
+                    resume_checkpoint, resume_epoch, resume_reason = resume_info
+                    _set_resume_checkpoint(job, resume_checkpoint)
+                    _advance_train_progress_to(progress, job=job, seen_epochs=seen_epochs, epoch=resume_epoch)
+                    _progress_write(
+                        progress,
+                        f"{prefix} resume_from {resume_reason} epoch={resume_epoch} checkpoint={resume_checkpoint}",
+                    )
                 command = [python_bin, str(TRAIN_AUTO_PROMPT_PY), "--config", str(job.config_path)]
                 if dry_run:
                     job.status = "dry_run"
                     progress_counts["dry_run"] += 1
-                    _advance_train_progress_to(progress, job=job, seen_epochs=seen_epochs, epoch=job.epochs)
+                    if resume_info is None:
+                        _advance_train_progress_to(progress, job=job, seen_epochs=seen_epochs, epoch=job.epochs)
                     _progress_write(progress, f"{prefix} dry_run CUDA_VISIBLE_DEVICES={gpu} {' '.join(command)}")
                     completed_slots += 1
                     free_gpus.append(str(gpu))
                     _set_train_progress_postfix(progress, active=active, seen_epochs=seen_epochs, counts=progress_counts, queued=len(queue))
                     continue
-                _remove_train_progress_files(job)
+                if resume_info is None:
+                    _remove_train_progress_files(job)
                 env = fr._build_env(paths)
                 env["CUDA_VISIBLE_DEVICES"] = str(gpu)
                 env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
