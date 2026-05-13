@@ -97,16 +97,26 @@ def _split_csv_list(value: str | None) -> list[str] | None:
     return output
 
 
-def _selected_checkpoint_from_summary(output_dir: Path) -> Path | None:
+def _selected_checkpoint_from_selection_summary(output_dir: Path) -> Path | None:
     summary_path = output_dir / "checkpoint_selection_summary.json"
-    if summary_path.exists():
-        try:
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
-            candidate = Path(str(summary.get("selected_checkpoint", "")))
-            if candidate.exists():
-                return candidate
-        except Exception:
-            pass
+    if not summary_path.exists():
+        return None
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        candidate = Path(str(summary.get("selected_checkpoint", "")))
+        if not candidate.is_absolute():
+            candidate = output_dir / candidate
+        if candidate.exists():
+            return candidate
+    except Exception:
+        return None
+    return None
+
+
+def _selected_checkpoint_from_summary(output_dir: Path) -> Path | None:
+    selected = _selected_checkpoint_from_selection_summary(output_dir)
+    if selected is not None:
+        return selected
     train_summary_path = output_dir / "train_summary.json"
     if train_summary_path.exists():
         try:
@@ -812,15 +822,7 @@ def _run_jobs(
     return failures
 
 
-def _run_selector(
-    *,
-    job: TrainJob,
-    validation_config_paths: list[str],
-    paths: dict[str, Any],
-    dry_run: bool,
-    python_bin: str,
-    selector: dict[str, Any],
-) -> dict[str, Any]:
+def _selector_command(*, job: TrainJob, validation_config_paths: list[str], python_bin: str, selector: dict[str, Any]) -> list[str]:
     command = [
         python_bin,
         str(SELECT_AUTO_PROMPT_CHECKPOINT_PY),
@@ -843,6 +845,19 @@ def _run_selector(
     ]
     for dataset_config in validation_config_paths:
         command.extend(["--dataset-config", str(dataset_config)])
+    return command
+
+
+def _run_selector(
+    *,
+    job: TrainJob,
+    validation_config_paths: list[str],
+    paths: dict[str, Any],
+    dry_run: bool,
+    python_bin: str,
+    selector: dict[str, Any],
+) -> dict[str, Any]:
+    command = _selector_command(job=job, validation_config_paths=validation_config_paths, python_bin=python_bin, selector=selector)
     if dry_run:
         print(f"[select dry-run] {' '.join(command)}", flush=True)
         return {"status": "dry_run", "job": job.key}
@@ -852,11 +867,169 @@ def _run_selector(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as handle:
         result = subprocess.run(command, cwd=PROJECT_ROOT, env=env, text=True, stdout=handle, stderr=subprocess.STDOUT, check=False)
-    selected = _selected_checkpoint_from_summary(job.output_dir)
+    selected = _selected_checkpoint_from_selection_summary(job.output_dir)
     if result.returncode == 0 and selected is not None:
         job.selected_checkpoint_path = selected
         return {"status": "completed", "job": job.key, "selected_checkpoint": str(selected)}
     return {"status": "failed", "job": job.key, "log_path": str(log_path), "returncode": result.returncode}
+
+
+def _make_selector_progress(*, total: int, enabled: bool) -> Any | None:
+    if not enabled or total <= 0:
+        return None
+    try:
+        from tqdm import tqdm
+    except Exception:
+        return None
+    return tqdm(total=total, unit="job", desc="m9 checkpoint select", dynamic_ncols=True, leave=True, position=0, file=sys.stderr)
+
+
+def _set_selector_progress_postfix(
+    progress: Any | None,
+    *,
+    active: list[dict[str, Any]],
+    counts: dict[str, int],
+    queued: int,
+) -> None:
+    if progress is None:
+        return
+    progress.set_postfix(
+        {
+            "active": len(active),
+            "completed": counts.get("completed", 0),
+            "skipped": counts.get("skipped", 0),
+            "failed": counts.get("failed", 0),
+            "dry_run": counts.get("dry_run", 0),
+            "queued": queued,
+        }
+    )
+
+
+def _terminate_selector_processes(active: list[dict[str, Any]]) -> None:
+    for running in list(active):
+        process = running["process"]
+        if process.poll() is None:
+            process.terminate()
+    for running in list(active):
+        process = running["process"]
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5.0)
+        handle = running.get("handle")
+        if handle is not None and not handle.closed:
+            handle.close()
+        active.remove(running)
+
+
+def _run_selectors(
+    *,
+    jobs: list[TrainJob],
+    validation_config_paths: list[str],
+    paths: dict[str, Any],
+    gpus: list[str],
+    dry_run: bool,
+    rerun: bool,
+    stop_on_error: bool,
+    python_bin: str,
+    selector: dict[str, Any],
+    show_progress: bool,
+) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    queue = list(jobs)
+    active: list[dict[str, Any]] = []
+    free_gpus = list(gpus)
+    total_jobs = len(queue)
+    completed_slots = 0
+    progress = _make_selector_progress(total=total_jobs, enabled=show_progress)
+    counts: dict[str, int] = {"completed": 0, "skipped": 0, "failed": 0, "dry_run": 0}
+    try:
+        while queue or active:
+            while queue and free_gpus and not (stop_on_error and failures):
+                job = queue.pop(0)
+                gpu = free_gpus.pop(0)
+                job.gpu = str(gpu)
+                prefix = f"[select {completed_slots + len(active) + 1}/{total_jobs} {job.key} seed={job.seed} gpu={gpu}]"
+                existing = _selected_checkpoint_from_selection_summary(job.output_dir)
+                if existing is not None and not rerun:
+                    job.selected_checkpoint_path = existing
+                    counts["skipped"] += 1
+                    completed_slots += 1
+                    if progress is not None:
+                        progress.update(1)
+                    _progress_write(progress, f"{prefix} skipped_existing selected={existing}")
+                    free_gpus.append(str(gpu))
+                    _set_selector_progress_postfix(progress, active=active, counts=counts, queued=len(queue))
+                    continue
+                command = _selector_command(
+                    job=job,
+                    validation_config_paths=validation_config_paths,
+                    python_bin=python_bin,
+                    selector=selector,
+                )
+                if dry_run:
+                    counts["dry_run"] += 1
+                    completed_slots += 1
+                    if progress is not None:
+                        progress.update(1)
+                    _progress_write(progress, f"{prefix} dry_run CUDA_VISIBLE_DEVICES={gpu} {' '.join(command)}")
+                    free_gpus.append(str(gpu))
+                    _set_selector_progress_postfix(progress, active=active, counts=counts, queued=len(queue))
+                    continue
+                env = fr._build_env(paths)
+                env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+                job.output_dir.mkdir(parents=True, exist_ok=True)
+                log_path = job.output_dir / "checkpoint_selection.log"
+                handle = log_path.open("w", encoding="utf-8")
+                handle.write(f"$ {' '.join(command)}\n\n")
+                handle.flush()
+                process = subprocess.Popen(command, cwd=PROJECT_ROOT, env=env, text=True, stdout=handle, stderr=subprocess.STDOUT)
+                active.append({"job": job, "gpu": str(gpu), "process": process, "handle": handle, "prefix": prefix, "log_path": log_path})
+                _progress_write(progress, f"{prefix} running log={log_path}")
+                _set_selector_progress_postfix(progress, active=active, counts=counts, queued=len(queue))
+            if not active:
+                if stop_on_error and failures:
+                    break
+                continue
+            time.sleep(1.0)
+            for running in list(active):
+                process = running["process"]
+                returncode = process.poll()
+                if returncode is None:
+                    continue
+                running["handle"].close()
+                active.remove(running)
+                free_gpus.append(str(running["gpu"]))
+                job = running["job"]
+                selected = _selected_checkpoint_from_selection_summary(job.output_dir)
+                if returncode == 0 and selected is not None:
+                    job.selected_checkpoint_path = selected
+                    counts["completed"] += 1
+                    _progress_write(progress, f"{running['prefix']} completed selected={selected}")
+                else:
+                    counts["failed"] += 1
+                    failure = {
+                        "status": "failed",
+                        "job": job.key,
+                        "seed": job.seed,
+                        "role": job.role,
+                        "log_path": str(running["log_path"]),
+                        "returncode": returncode,
+                    }
+                    failures.append(failure)
+                    _progress_write(progress, f"{running['prefix']} failed")
+                completed_slots += 1
+                if progress is not None:
+                    progress.update(1)
+                _set_selector_progress_postfix(progress, active=active, counts=counts, queued=len(queue))
+            if stop_on_error and failures:
+                _terminate_selector_processes(active)
+                break
+    finally:
+        if progress is not None:
+            progress.close()
+    return failures
 
 
 def _run_export(*, raw: dict[str, Any], dry_run: bool, python_bin: str) -> dict[str, Any]:
@@ -1375,27 +1548,30 @@ def main(argv: list[str] | None = None) -> int:
     if args.stage in {"all", "select", "pretrain"}:
         selector = m9.get("selector", {})
         pretrain_selection_jobs = [job for job in jobs_by_key.values() if job.role == "pretrain"]
-        for job in pretrain_selection_jobs:
-            validation_configs = _write_dataset_configs(
-                dataset_ids=[str(m9.get("rbgt_val_dataset", "rbgt_tiny_ir_box_m9_val"))],
-                base_matrix=base_matrix,
-                suite_config=suite_config,
-                paths=paths,
-                checkpoint=checkpoint,
-                output_dir=dataset_config_dir,
-            )
-            result = _run_selector(
-                job=job,
+        validation_configs = _write_dataset_configs(
+            dataset_ids=[str(m9.get("rbgt_val_dataset", "rbgt_tiny_ir_box_m9_val"))],
+            base_matrix=base_matrix,
+            suite_config=suite_config,
+            paths=paths,
+            checkpoint=checkpoint,
+            output_dir=dataset_config_dir,
+        )
+        failures.extend(
+            _run_selectors(
+                jobs=pretrain_selection_jobs,
                 validation_config_paths=validation_configs,
                 paths=paths,
+                gpus=gpus,
                 dry_run=args.dry_run,
+                rerun=args.rerun_stage,
+                stop_on_error=args.stop_on_error,
                 python_bin=args.python_bin,
                 selector=selector,
+                show_progress=bool(raw.get("auto_prompt", {}).get("train", {}).get("show_progress", True)),
             )
-            if result.get("status") == "failed":
-                failures.append(result)
-                if args.stop_on_error:
-                    return 1
+        )
+        if failures and args.stop_on_error:
+            return 1
 
     final_jobs: list[TrainJob] = []
     if args.stage in {"all", "finetune"}:
@@ -1446,27 +1622,30 @@ def main(argv: list[str] | None = None) -> int:
         selector = m9.get("selector", {})
         public_val = [str(item) for item in m9.get("public_train_datasets", ["nuaa_sirst", "nudt_sirst", "irstd_1k"])]
         final_selection_jobs = final_jobs or [job for job in jobs_by_key.values() if job.role != "pretrain"]
-        for job in final_selection_jobs:
-            validation_configs = _write_dataset_configs(
-                dataset_ids=public_val,
-                base_matrix=base_matrix,
-                suite_config=suite_config,
-                paths=paths,
-                checkpoint=checkpoint,
-                output_dir=dataset_config_dir,
-            )
-            result = _run_selector(
-                job=job,
+        validation_configs = _write_dataset_configs(
+            dataset_ids=public_val,
+            base_matrix=base_matrix,
+            suite_config=suite_config,
+            paths=paths,
+            checkpoint=checkpoint,
+            output_dir=dataset_config_dir,
+        )
+        failures.extend(
+            _run_selectors(
+                jobs=final_selection_jobs,
                 validation_config_paths=validation_configs,
                 paths=paths,
+                gpus=gpus,
                 dry_run=args.dry_run,
+                rerun=args.rerun_stage,
+                stop_on_error=args.stop_on_error,
                 python_bin=args.python_bin,
                 selector=selector,
+                show_progress=bool(raw.get("auto_prompt", {}).get("train", {}).get("show_progress", True)),
             )
-            if result.get("status") == "failed":
-                failures.append(result)
-                if args.stop_on_error:
-                    return 1
+        )
+        if failures and args.stop_on_error:
+            return 1
 
     all_jobs = [*jobs_by_key.values()]
     eval_records: list[dict[str, Any]] = []
